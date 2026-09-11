@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Reqly</title>
+
+    <!--
+      防白闪：必须在任何样式表之前同步执行。
+      读 localStorage 里的主题，立刻把 .dark 打到 <html> 上。
+      下面的 <style> 是「关键背景色」——在 theme.css 加载完成前顶一下，
+      避免 dev 模式下（CSS 由 JS 注入）出现一帧白底。
+      ⚠️ 这两个色值必须与 theme.css 的 --canvas 保持一致，改那边记得改这里。
+      内联而非外链：外链会多一次请求，白闪就回来了。
+    -->
+    <style>
+      html {
+        background-color: #ffffff;
+      }
+      html.dark {
+        background-color: #0f172a;
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem("reqly.theme") || "system";
+          var resolved =
+            mode === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : mode;
+          var root = document.documentElement;
+          root.classList.toggle("dark", resolved === "dark");
+          root.style.colorScheme = resolved;
+          root.dataset.themeMode = mode;
+        } catch (e) {
+          /* localStorage 被禁用等极端情况：保持默认亮色，不阻塞渲染 */
+        }
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

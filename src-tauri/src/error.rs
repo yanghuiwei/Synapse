@@ -1,0 +1,197 @@
+//! 统一错误类型与错误码。
+//!
+//! **契约（design.md §9.1）**：后端**只返回错误码**，不返回面向用户的文案。
+//! 前端 `src/lib/ipc.ts` 把 `code` 映射成 `src/lib/i18n/zh-CN.ts` 里的 key。
+//!
+//! 所以这里出现的所有人类可读字符串都只是**给开发者排查用的 debug 信息**，
+//! UI 一律不展示。字段名固定为 `code` + `debug`（+ 可选 `params`）。
+
+use serde::ser::{Serialize, SerializeStruct, Serializer};
+use serde_json::json;
+
+/// 错误码常量。加新码必须同步在 `src/lib/ipc.ts` 的 `ERROR_KEYS` 里登记，
+/// 否则前端只能退化成「未知错误」。
+pub mod codes {
+    /// 数据库操作失败（兜底）
+    pub const DB: &str = "E_DB";
+    /// SQLITE_BUSY：库被占用，可重试
+    pub const DB_LOCKED: &str = "E_DB_LOCKED";
+    /// 迁移脚本执行失败
+    pub const MIGRATION: &str = "E_MIGRATION";
+    /// 目标记录不存在
+    pub const NOT_FOUND: &str = "E_NOT_FOUND";
+    /// 入参不合法（字段级信息在 params 里）
+    pub const INVALID_INPUT: &str = "E_INVALID_INPUT";
+    /// 文件系统 / 数据目录相关失败
+    pub const IO: &str = "E_IO";
+    /// 不该发生的内部错误（panic、任务丢失等）
+    pub const INTERNAL: &str = "E_INTERNAL";
+
+    // ---- 请求层（P2） ----
+    //
+    // 为什么 DNS / 连接被拒 / TLS 要分成三个码：
+    // 它们的**用户动作完全不同** —— 域名打错了要去改地址，
+    // 连接被拒说明服务没起或端口不对，TLS 失败通常是证书或自签问题
+    // （对应的解法是打开「校验 TLS」开关）。合成一个"网络错误"等于让用户自己猜。
+    /// 域名解析失败
+    pub const DNS: &str = "E_DNS";
+    /// TCP 层连不上（端口没监听 / 被防火墙拦）
+    pub const CONN_REFUSED: &str = "E_CONN_REFUSED";
+    /// TLS 握手 / 证书校验失败
+    pub const TLS: &str = "E_TLS";
+    /// 请求超时
+    pub const TIMEOUT: &str = "E_TIMEOUT";
+    /// 重定向次数超过上限
+    pub const REDIRECT: &str = "E_REDIRECT";
+    /// 响应体解码失败（压缩流损坏、body 不完整等）
+    pub const DECODE: &str = "E_DECODE";
+    /// 请求地址本身不合法
+    pub const URL: &str = "E_URL";
+    /// 请求还在构造阶段就失败了（header 值非法等）
+    pub const REQUEST: &str = "E_REQUEST";
+    /// 请求体不是合法 JSON（本地就能判出来，不必白跑一趟网络）
+    pub const BODY_NOT_JSON: &str = "E_BODY_NOT_JSON";
+    /// 用户主动取消
+    pub const CANCELLED: &str = "E_CANCELLED";
+    /// 网络层兜底（上面几个都不是时）
+    pub const NETWORK: &str = "E_NETWORK";
+    /// 该功能还没实现（params.feature 说明是哪个）
+    pub const NOT_IMPLEMENTED: &str = "E_NOT_IMPLEMENTED";
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("sqlite error: {0}")]
+    Db(#[from] rusqlite::Error),
+
+    #[error("connection pool error: {0}")]
+    Pool(#[from] r2d2::Error),
+
+    #[error("migration failed at version {version}: {reason}")]
+    Migration { version: i64, reason: String },
+
+    #[error("{entity} #{id} not found")]
+    NotFound { entity: &'static str, id: i64 },
+
+    #[error("invalid input: {field} = {reason}")]
+    InvalidInput { field: &'static str, reason: String },
+
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("internal error: {0}")]
+    Internal(String),
+
+    // ---- 请求层（P2） ----
+    /// 请求失败。
+    ///
+    /// 用一个带 `code` 的变体、而不是「每个错误码一个变体」：请求层的失败模式有十来种，
+    /// 但它们的**结构完全一样**（一个码 + 给开发者看的调试信息 + 可选参数）。
+    /// 拆成十来个变体只会把 `code()` / `params()` 变成两张需要同步维护的大表。
+    /// `code` 必须是 [`codes`] 里的常量。
+    #[error("http request failed ({code}): {debug}")]
+    Http {
+        code: &'static str,
+        debug: String,
+        /// 结构化补充信息，供前端插值（如 DNS 失败时的 host）
+        params: Option<serde_json::Value>,
+    },
+
+    #[error("invalid request url `{raw}`: {reason}")]
+    InvalidUrl { raw: String, reason: String },
+
+    #[error("not implemented: {feature}")]
+    NotImplemented { feature: &'static str },
+
+    #[error("request cancelled by user")]
+    Cancelled,
+}
+
+impl AppError {
+    /// 映射成稳定的错误码。前端只认这个字段。
+    ///
+    /// 注意 `Db` 要细分：SQLITE_BUSY / SQLITE_LOCKED 是可重试的瞬时故障，
+    /// 语义上与「SQL 写错了」完全不同，前端提示语也不一样。
+    pub fn code(&self) -> &'static str {
+        match self {
+            AppError::Db(err) => match err {
+                rusqlite::Error::SqliteFailure(e, _) => match e.code {
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                        codes::DB_LOCKED
+                    }
+                    _ => codes::DB,
+                },
+                _ => codes::DB,
+            },
+            AppError::Pool(_) => codes::DB,
+            AppError::Migration { .. } => codes::MIGRATION,
+            AppError::NotFound { .. } => codes::NOT_FOUND,
+            AppError::InvalidInput { .. } => codes::INVALID_INPUT,
+            AppError::Io(_) => codes::IO,
+            AppError::Internal(_) => codes::INTERNAL,
+            AppError::Http { code, .. } => code,
+            AppError::InvalidUrl { .. } => codes::URL,
+            AppError::NotImplemented { .. } => codes::NOT_IMPLEMENTED,
+            AppError::Cancelled => codes::CANCELLED,
+        }
+    }
+
+    /// 请求层错误的快捷构造（不带 params）
+    pub fn http(code: &'static str, debug: impl Into<String>) -> Self {
+        AppError::Http {
+            code,
+            debug: debug.into(),
+            params: None,
+        }
+    }
+
+    /// 请求层错误的快捷构造（带 params，用于给前端插值）
+    pub fn http_with(
+        code: &'static str,
+        debug: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
+        AppError::Http {
+            code,
+            debug: debug.into(),
+            params: Some(params),
+        }
+    }
+
+    /// 结构化补充信息，供前端拼更精确的提示（如「找不到 request #12」）。
+    pub fn params(&self) -> Option<serde_json::Value> {
+        match self {
+            AppError::NotFound { entity, id } => Some(json!({ "entity": entity, "id": id })),
+            AppError::InvalidInput { field, .. } => Some(json!({ "field": field })),
+            AppError::Migration { version, .. } => Some(json!({ "version": version })),
+            AppError::Http { params, .. } => params.clone(),
+            AppError::InvalidUrl { raw, .. } => Some(json!({ "raw": raw })),
+            AppError::NotImplemented { feature } => Some(json!({ "feature": feature })),
+            _ => None,
+        }
+    }
+
+    /// 这个错误是否值得让用户重试（前端据此决定要不要显示「重试」按钮）
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self.code(),
+            codes::DB_LOCKED | codes::TIMEOUT | codes::NETWORK | codes::CONN_REFUSED
+        )
+    }
+}
+
+impl Serialize for AppError {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let has_params = self.params().is_some();
+        let mut st = serializer.serialize_struct("AppError", if has_params { 3 } else { 2 })?;
+        st.serialize_field("code", self.code())?;
+        if has_params {
+            st.serialize_field("params", &self.params())?;
+        }
+        // 仅用于日志/开发排查，UI 不展示
+        st.serialize_field("debug", &self.to_string())?;
+        st.end()
+    }
+}
+
+pub type AppResult<T> = Result<T, AppError>;

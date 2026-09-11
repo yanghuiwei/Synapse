@@ -1,0 +1,141 @@
+/* ============================================================
+   Reqly 设计令牌 —— 全项目唯一的颜色来源
+   业务组件里禁止硬编码色值，一律用 Tailwind 语义类
+   （bg-canvas / text-ink / border-line / text-brand ...）
+   映射关系见 tailwind.css 的 @theme inline
+   ============================================================ */
+
+:root {
+  /* 字体。
+     ⚠️ 命名必须避开 Tailwind 的主题命名空间（--font-* / --radius-* 等）：
+       若这里叫 --font-sans，而 tailwind.css 里再写
+       `--font-sans: var(--font-sans)` 就成了自引用，
+       变量算作 guaranteed-invalid → font-family 整条声明失效，
+       中文会掉回浏览器默认字体。所以原始令牌统一用 --type-* / --corner-*。
+
+     Latin 字体排在中文字体前面是刻意的：字体回退是「逐字符」的，
+     这样英文/数字用 Segoe UI，中文才落到雅黑。 */
+  --type-sans: "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI", system-ui,
+    -apple-system, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", sans-serif;
+  --type-mono: "JetBrains Mono", "Cascadia Code", "Cascadia Mono", ui-monospace,
+    Consolas, "Courier New", monospace;
+
+  /* 圆角 */
+  --corner-sm: 6px;
+  --corner-md: 8px;
+  --corner-lg: 12px;
+
+  /* 层级 */
+  --z-dropdown: 100;
+  --z-dialog: 200;
+  --z-toast: 300;
+}
+
+/* ---------------- Light ---------------- */
+:root,
+.light {
+  --canvas: #ffffff;
+  --canvas-subtle: #f8fafc;
+  --surface: #ffffff;
+  --surface-hover: #f1f5f9;
+
+  --line: #e2e8f0;
+  --line-strong: #cbd5e1;
+
+  --ink: #0f172a;
+  --ink-muted: #475569;
+  --ink-faint: #94a3b8;
+
+  --brand: #2563eb;
+  --brand-hover: #1d4ed8;
+  --brand-fg: #ffffff;
+
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+  --info: #0891b2;
+
+  /* HTTP 方法色（业界约定：GET 蓝 / POST 绿 / PUT 橙 / PATCH 紫 / DELETE 红） */
+  --m-get: #2563eb;
+  --m-post: #16a34a;
+  --m-put: #d97706;
+  --m-patch: #7c3aed;
+  --m-delete: #dc2626;
+  --m-other: #64748b;
+
+  /* 语法高亮（响应体 / 请求体 / 占位符） */
+  --syn-key: #7c3aed;
+  --syn-str: #2563eb;
+  --syn-num: #16a34a;
+  --syn-bool: #0891b2;
+  --syn-null: #64748b;
+  --syn-punct: #64748b;
+
+  --scrollbar: #cbd5e1;
+  --scrollbar-hover: #94a3b8;
+
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-2: 0 4px 16px rgba(15, 23, 42, 0.08);
+  --focus: rgba(37, 99, 235, 0.35);
+}
+
+/* ---------------- Dark ---------------- */
+.dark {
+  --canvas: #0f172a;
+  --canvas-subtle: #0b1220;
+  --surface: #161b2b;
+  --surface-hover: #1e2637;
+
+  --line: #273349;
+  --line-strong: #334155;
+
+  --ink: #f1f5f9;
+  --ink-muted: #94a3b8;
+  --ink-faint: #64748b;
+
+  --brand: #3b82f6;
+  --brand-hover: #2563eb;
+  --brand-fg: #ffffff;
+
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --info: #22d3ee;
+
+  --m-get: #60a5fa;
+  --m-post: #4ade80;
+  --m-put: #fbbf24;
+  --m-patch: #a78bfa;
+  --m-delete: #f87171;
+  --m-other: #94a3b8;
+
+  --syn-key: #c4b5fd;
+  --syn-str: #93c5fd;
+  --syn-num: #86efac;
+  --syn-bool: #67e8f9;
+  --syn-null: #94a3b8;
+  --syn-punct: #94a3b8;
+
+  --scrollbar: #334155;
+  --scrollbar-hover: #475569;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --focus: rgba(59, 130, 246, 0.45);
+}
+
+/* 主题切换过渡：只过渡颜色，不做 scale/位移，避免布局抖动 */
+@media (prefers-reduced-motion: no-preference) {
+  html.theme-transition,
+  html.theme-transition *,
+  html.theme-transition *::before,
+  html.theme-transition *::after {
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease,
+      fill 150ms ease,
+      stroke 150ms ease !important;
+  }
+}

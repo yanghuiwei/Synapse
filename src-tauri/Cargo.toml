@@ -1,0 +1,59 @@
+[package]
+name = "reqly"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "reqly_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+r2d2 = "0.8.10"
+r2d2_sqlite = "0.35.0"
+thiserror = "2.0.20"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio-util = { version = "0.7.19", default-features = false }
+# reqwest 必须关掉 default features：默认会拉 native-tls(OpenSSL)，那是"要求系统装 OpenSSL"的老路。
+# 用 rustls + **系统根证书**（native-roots）而不是 webpki-roots：
+# 企业内网常见「用公司根证书做中间人代理」的网关，webpki 的内置 CA 清单里没有它，
+# 会直接握手失败；走系统证书库才能正常访问内网网关。
+# 版本跟 design.md 保持一致走 0.12（最新 0.12.28）；0.13.5 已发布，
+# 但升级要重验代理/证书那几处行为，等 P8 打磨阶段再单独做。
+reqwest = { version = "0.12.28", default-features = false, features = [
+  "rustls-tls-native-roots",
+  "gzip",
+  "brotli",
+  "deflate",
+  "http2",
+  "charset",
+  "json",
+  "socks",
+  "cookies",
+  "multipart",
+  "stream",
+] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

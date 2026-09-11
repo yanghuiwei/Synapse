@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/* 暗色模式走 class 策略（在 <html> 上加 .dark），不用系统媒体查询，
+   这样「跟随系统 / 强制亮 / 强制暗」三态才能都实现 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 把 theme.css 的原始令牌映射成 Tailwind 语义工具类。
+   `inline` 很关键：让工具类输出 var(--x) 而不是编译期求值，
+   否则运行时切主题不会生效。
+
+   ⚠️ 右边引用的原始令牌**绝不能**与左边的主题变量同名。
+      （例：`--font-sans: var(--font-sans)` 是自引用，
+        会算成 guaranteed-invalid，整条 font-family 失效。）
+      所以 theme.css 里用的是 --type-* / --corner-* 这套名字。 */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-canvas-subtle: var(--canvas-subtle);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-fg: var(--brand-fg);
+
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-info: var(--info);
+
+  --color-m-get: var(--m-get);
+  --color-m-post: var(--m-post);
+  --color-m-put: var(--m-put);
+  --color-m-patch: var(--m-patch);
+  --color-m-delete: var(--m-delete);
+  --color-m-other: var(--m-other);
+
+  --color-syn-key: var(--syn-key);
+  --color-syn-str: var(--syn-str);
+  --color-syn-num: var(--syn-num);
+  --color-syn-bool: var(--syn-bool);
+  --color-syn-null: var(--syn-null);
+  --color-syn-punct: var(--syn-punct);
+
+  --font-sans: var(--type-sans);
+  --font-mono: var(--type-mono);
+
+  --radius-sm: var(--corner-sm);
+  --radius-md: var(--corner-md);
+  --radius-lg: var(--corner-lg);
+}
