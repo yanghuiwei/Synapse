@@ -4,6 +4,7 @@ import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { KeyValueItem } from "@/lib/types";
 import { IconButton } from "@/features/ui/Button";
+import { PlaceholderInput } from "./PlaceholderInput";
 
 export interface KeyValueTableProps {
   rows: readonly KeyValueItem[];
@@ -34,8 +35,10 @@ function withTrailingBlank(rows: readonly KeyValueItem[]): KeyValueItem[] {
   return list;
 }
 
+// 刻意**不写** `outline-none`：表格里的输入框没有边框，全局的
+// `:focus-visible` 焦点环就是它唯一的键盘焦点指示（见 global.css 的注释）
 const CELL =
-  "w-full bg-transparent px-1.5 py-1 font-mono text-xs outline-none " +
+  "w-full bg-transparent px-1.5 py-1 font-mono text-xs " +
   "placeholder:font-sans placeholder:text-ink-faint";
 
 /**
@@ -114,13 +117,17 @@ export function KeyValueTable({
                 </td>
 
                 <td>
-                  <input
+                  {/* 值这一列走 `PlaceholderInput`：`?x={{env.baseUrl}}`、
+                      `Authorization: {{token.access}}` 是最常见的两处占位符，
+                      在表格里当场看出写没写对，比发送后翻响应体便宜得多。
+                      **键那一列不接** —— 键名从来不是模板。 */}
+                  <PlaceholderInput
+                    dense
                     value={row.value}
-                    spellCheck={false}
-                    autoComplete="off"
+                    onChange={(value) => patchRow(index, { value })}
                     placeholder={valuePlaceholder}
-                    onChange={(e) => patchRow(index, { value: e.target.value })}
-                    className={cn(CELL, dim)}
+                    label={t("kv.value")}
+                    tone={row.enabled ? "normal" : "muted"}
                   />
                 </td>
 

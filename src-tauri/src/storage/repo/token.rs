@@ -76,6 +76,20 @@ pub fn list_by_folder(conn: &Connection, folder_id: i64) -> AppResult<Vec<TokenS
     collect_sources(conn, &sql, &[&folder_id])
 }
 
+/// 沿「最近的在前」的文件夹链找第一个 Token 源。
+///
+/// 判定依据是 `token_source` 表里**真的有没有行**，而不是文件夹上的
+/// `is_token_source` 标记 —— 那个标记只是 UI 的入口引导（建 Token 源时顺手打上），
+/// 拿它当硬条件会让「先建源、后打标记」这条顺序把源变成隐形的。
+pub fn first_in_chain(conn: &Connection, chain: &[i64]) -> AppResult<Option<TokenSource>> {
+    for folder_id in chain {
+        if let Some(source) = list_by_folder(conn, *folder_id)?.into_iter().next() {
+            return Ok(Some(source));
+        }
+    }
+    Ok(None)
+}
+
 pub fn get(conn: &Connection, id: i64) -> AppResult<TokenSource> {
     let sql = format!("SELECT {SOURCE_COLUMNS} FROM token_source WHERE id = ?1");
     conn.query_row(&sql, [id], map_source).map_err(|e| match e {

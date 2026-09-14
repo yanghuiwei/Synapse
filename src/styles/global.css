@@ -3,132 +3,161 @@
    只放「无法用 Tailwind 工具类表达」的东西：
    reset 兜底、滚动条、选区、数字等宽、焦点环。
    具体组件的样式一律写在组件里用工具类。
+
+   ┌─────────────────────────────────────────────────────────────┐
+   │ ⚠️ 整个文件必须包在 `@layer base` 里，不能裸写。            │
+   │                                                              │
+   │ 原因：CSS 级联里「无分层（unlayered）样式永远优先于任何      │
+   │ @layer 中的样式」，和选择器特异性无关。Tailwind v4 的工具类  │
+   │ 全部住在 `@layer utilities` 里，所以下面这些                  │
+   │ `button, input { font: inherit; color: inherit }`、           │
+   │ `button { background: none; border: none; padding: 0 }`       │
+   │ 一旦裸写，就会压过 `bg-brand` / `text-transparent` /          │
+   │ `font-mono` / `px-3` 等**所有**工具类。                       │
+   │                                                              │
+   │ 这个坑真发生过：地址栏出现「重影」（input 的 text-transparent │
+   │ 被吃掉，文字和镜像层叠在一起），所有 primary 按钮丢掉蓝底      │
+   │ （bg-brand 输给了 background: none）。                        │
+   │                                                              │
+   │ 层顺序在 theme.css 顶部用 `@layer theme, base, components,    │
+   │ utilities;` 显式钉死；base 内部则按「后写的赢」由引入顺序决定  │
+   │（tailwind.css 的 preflight 在前，本文件在后 → 本文件覆盖      │
+   │ preflight，正是我们要的）。                                   │
+   └─────────────────────────────────────────────────────────────┘
    ============================================================ */
 
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
-  padding: 0;
-}
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
 
-body {
-  font-family: var(--type-sans);
-  font-size: 14px;
-  line-height: 1.5;
-  background-color: var(--canvas);
-  color: var(--ink);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
+  body {
+    font-family: var(--type-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    background-color: var(--canvas);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 
-/* 桌面应用：禁掉整页拖拽/选中带来的「网页感」，
-   需要选中的区域（响应体、代码块）自行加 .selectable */
-body {
-  user-select: none;
-  cursor: default;
-}
-.selectable,
-input,
-textarea,
-pre,
-code {
-  user-select: text;
-  cursor: auto;
-}
+  /* 桌面应用：禁掉整页拖拽/选中带来的「网页感」，
+     需要选中的区域（响应体、代码块）自行加 .selectable */
+  body {
+    user-select: none;
+    cursor: default;
+  }
+  .selectable,
+  input,
+  textarea,
+  pre,
+  code {
+    user-select: text;
+    cursor: auto;
+  }
 
-/* 桌面应用不该有原生右键菜单，交给各组件自己处理 */
-* {
-  -webkit-tap-highlight-color: transparent;
-}
+  /* 桌面应用不该有原生右键菜单，交给各组件自己处理 */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
 
-code,
-kbd,
-pre,
-samp {
-  font-family: var(--type-mono);
-  font-variant-ligatures: none;
-}
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--type-mono);
+    font-variant-ligatures: none;
+  }
 
-/* 状态栏、耗时、字节数、行号等数字场景，避免切换时宽度跳动 */
-.tabular {
-  font-variant-numeric: tabular-nums;
-}
+  /* 状态栏、耗时、字节数、行号等数字场景，避免切换时宽度跳动 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
 
-/* ---------------- 滚动条 ---------------- */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar) transparent;
-}
+  /* ---------------- 滚动条 ---------------- */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar) transparent;
+  }
 
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background-color: var(--scrollbar);
-  border-radius: 999px;
-  /* 用透明边框把 thumb「缩」进去，留出呼吸感 */
-  border: 3px solid transparent;
-  background-clip: content-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background-color: var(--scrollbar-hover);
-}
-::-webkit-scrollbar-corner {
-  background: transparent;
-}
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar);
+    border-radius: 999px;
+    /* 用透明边框把 thumb「缩」进去，留出呼吸感 */
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-hover);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 
-/* ---------------- 选区 ---------------- */
-::selection {
-  background-color: var(--focus);
-  color: var(--ink);
-}
+  /* ---------------- 选区 ---------------- */
+  ::selection {
+    background-color: var(--focus);
+    color: var(--ink);
+  }
 
-/* ---------------- 焦点环 ----------------
-   键盘导航才显示，鼠标点击不显示（:focus-visible） */
-:focus {
-  outline: none;
-}
-:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 1px;
-  border-radius: var(--corner-sm);
-}
+  /* ---------------- 焦点环 ----------------
+     键盘导航才显示，鼠标点击不显示（:focus-visible）。
+     注意这里是「清掉默认 outline」，组件若要自定义焦点环，
+     加自己的 `focus-visible:` 工具类即可（utilities 层在本层之后）。 */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 1px;
+    border-radius: var(--corner-sm);
+  }
 
-/* ---------------- 表单元素继承字体 ---------------- */
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-}
-button {
-  background: none;
-  border: none;
-  padding: 0;
-}
+  /* ---------------- 表单元素继承字体 ----------------
+     这几条是「工具类失效」事件的主角：放进 base 层之后，
+     组件上的 font-mono / text-transparent / bg-brand 才能正常生效。 */
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+  button {
+    background: none;
+    border: none;
+    padding: 0;
+  }
 
-/* 禁用态统一观感 */
-:disabled,
-[aria-disabled="true"] {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
+  /* 禁用态统一观感 */
+  :disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
 
-/* ---------------- 减少动效偏好 ---------------- */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+  /* ---------------- 减少动效偏好 ----------------
+     带 !important：important 声明本来就跨层压过所有普通声明，
+     所以放进 base 也能盖住 utilities 里的 animate-* / transition-*。 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }

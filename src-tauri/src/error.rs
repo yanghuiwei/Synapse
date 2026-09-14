@@ -57,6 +57,34 @@ pub mod codes {
     pub const NETWORK: &str = "E_NETWORK";
     /// 该功能还没实现（params.feature 说明是哪个）
     pub const NOT_IMPLEMENTED: &str = "E_NOT_IMPLEMENTED";
+
+    // ---- 变量与 Token（P4） ----
+    //
+    // 为什么这三个要分开：它们指向的**修改动作完全不同** ——
+    // 配置缺失要去 Token 源面板补配置；刷新请求失败要去看那个接口本身能不能通
+    // （或者看网络/证书）；提取失败说明配置里的 JSONPath 与真实响应对不上。
+    // 合成一句「Token 出错了」等于让用户自己从头猜一遍。
+    /// Token 源配置本身不成立（没有可用来源 / 找不到取 token 的请求）
+    pub const TOKEN_SOURCE: &str = "E_TOKEN_SOURCE";
+    /// 取 token 的请求本身失败了（网络层错误 / 非 2xx 响应）
+    pub const TOKEN_REFRESH: &str = "E_TOKEN_REFRESH";
+    /// 取到了响应，但按配置的路径提不出 access_token
+    pub const TOKEN_EXTRACT: &str = "E_TOKEN_EXTRACT";
+    /// 没有可用缓存，且该 Token 源关闭了自动刷新（需要用户手动刷一次）
+    pub const TOKEN_EXPIRED: &str = "E_TOKEN_EXPIRED";
+
+    // ---- 导入器（P5） ----
+    //
+    // 三个码分开的理由是**用户的下一个动作不同**：
+    // 识别失败 = 这段东西我们压根不认（可能粘错了，或格式还没支持）；
+    // JSON 不合法 = 文件选错了或文件坏了（去重新导出一次）；
+    // 解析失败 = 格式认出来了，但里面某一条解不动（去看警告列表定位到哪一条）。
+    /// 没能从内容里识别出格式
+    pub const IMPORT_DETECT: &str = "E_IMPORT_DETECT";
+    /// 内容是 JSON 但不合法（或不是我们认得的那种 JSON）
+    pub const IMPORT_JSON: &str = "E_IMPORT_JSON";
+    /// 认出了格式，但内容本身解不动（引号没闭合、必填字段缺失等）
+    pub const IMPORT_PARSE: &str = "E_IMPORT_PARSE";
 }
 
 #[derive(Debug, thiserror::Error)]

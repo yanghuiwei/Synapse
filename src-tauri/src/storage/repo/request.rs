@@ -8,9 +8,10 @@
 //! 而 JSON 解析失败要冒泡成我们自己的错误类型（见 `parse_json_column` 的说明）。
 
 use rusqlite::{Connection, Row};
+use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::models::{ApiRequest, BodyType, KeyValueItem, RequestSettings};
+use crate::storage::models::{ApiRequest, AuthConfig, BodyType, KeyValueItem, RequestSettings};
 use crate::storage::now_iso;
 use crate::storage::repo::{opt_text, parse_json_column, to_json_column, ORDER_BY_SORT};
 
@@ -36,7 +37,8 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
         headers: parse_json_column::<Vec<KeyValueItem>>(&headers_raw, "request.headers")?,
         body_type: BodyType::parse(&body_type_raw),
         body: row.get("body")?,
-        auth: parse_json_column(&auth_raw, "request.auth")?,
+        // 宽松解析：存量值是 `{}`（P2 起 auth 一直只做透传），见 AuthConfig 的注释
+        auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "request.auth")?),
         settings: parse_json_column(&settings_raw, "request.settings")?,
         pre_script: row.get("pre_script")?,
         test_script: row.get("test_script")?,
@@ -194,6 +196,39 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> AppResult<ApiRequest> {
     get(conn, id)
 }
 
+/// 复制成一个新请求：内容全抄，落在**同一个文件夹**的末尾。
+///
+/// `name` 由调用方给（前端用 `t("collections.copySuffix")` 拼），
+/// 后端不生成「副本」这类面向用户的文案 —— 名字是数据，文案归前端（见 `crate::error` 的契约）。
+///
+/// 不复制的东西：`id`（新行）、`created_at` / `updated_at`（新行自己的时间）、
+/// `deleted_at`（新行是存活的）、`sort_order`（追加到末尾）。
+pub fn duplicate(conn: &Connection, id: i64, name: &str) -> AppResult<ApiRequest> {
+    let src = get(conn, id)?;
+    let now = now_iso();
+
+    let next_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM request
+         WHERE workspace_id = ?1 AND folder_id IS ?2 AND deleted_at IS NULL",
+        rusqlite::params![src.workspace_id, src.folder_id],
+        |r| r.get(0),
+    )?;
+
+    conn.execute(
+        "INSERT INTO request
+           (folder_id, workspace_id, name, method, url, params, headers,
+            body_type, body, auth, settings, pre_script, test_script,
+            sort_order, created_at, updated_at)
+         SELECT folder_id, workspace_id, ?2, method, url, params, headers,
+                body_type, body, auth, settings, pre_script, test_script,
+                ?3, ?4, ?4
+         FROM request WHERE id = ?1",
+        rusqlite::params![id, name, next_order, now],
+    )?;
+
+    get(conn, conn.last_insert_rowid())
+}
+
 /// 在分类间移动。`folder_id = None` 表示移出到「未分类」。
 pub fn move_to_folder(conn: &Connection, id: i64, folder_id: Option<i64>) -> AppResult<ApiRequest> {
     let req = get(conn, id)?;
@@ -312,7 +347,8 @@ mod tests {
         assert!(r.params.is_empty());
         assert!(r.headers.is_empty());
         assert_eq!(r.settings, RequestSettings::default());
-        assert_eq!(r.auth, serde_json::json!({}));
+        // 建表默认是 `'{}'`，读出来是「不注入授权」而不是报错
+        assert_eq!(r.auth, AuthConfig::Inherit);
     }
 
     #[test]
@@ -327,7 +363,9 @@ mod tests {
         r.headers = vec![KeyValueItem::new("Content-Type", "application/json")];
         r.body_type = BodyType::Json;
         r.body = r#"{"user":"a"}"#.into();
-        r.auth = serde_json::json!({ "kind": "bearer", "token": "{{token.access}}" });
+        r.auth = AuthConfig::Bearer {
+            token: "{{token.access}}".into(),
+        };
         r.settings.timeout_ms = 5_000;
         r.settings.verify_tls = false;
         r.settings.proxy = Some("http://127.0.0.1:7890".into());
@@ -409,6 +447,40 @@ mod tests {
 
         let unfiled = move_to_folder(&conn, r.id, None).unwrap();
         assert_eq!(unfiled.folder_id, None);
+    }
+
+    /// 复制：内容全抄、落在同一个文件夹末尾、名字用传入的那个
+    #[test]
+    fn duplicate_copies_content_into_the_same_folder() {
+        let conn = db();
+        let f = folder(&conn, "auth");
+        let mut src = create(&conn, 1, Some(f), "login").unwrap();
+        src.method = "POST".into();
+        src.url = "https://example.com/login".into();
+        src.params = vec![KeyValueItem::new("page", "1")];
+        src.headers = vec![KeyValueItem::new("X-Trace", "1")];
+        src.body_type = BodyType::Json;
+        src.body = r#"{"u":"a"}"#.into();
+        src.settings.timeout_ms = 1_234;
+        save(&conn, &src).unwrap();
+
+        // 同文件夹里先放一个别的，验证副本排在**末尾**
+        create(&conn, 1, Some(f), "zzz").unwrap();
+
+        let copy = duplicate(&conn, src.id, "login 副本").unwrap();
+
+        assert_ne!(copy.id, src.id);
+        assert_eq!(copy.name, "login 副本");
+        assert_eq!(copy.folder_id, Some(f));
+        assert_eq!(copy.method, "POST");
+        assert_eq!(copy.url, "https://example.com/login");
+        assert_eq!(copy.params, src.params);
+        assert_eq!(copy.headers, src.headers);
+        assert_eq!(copy.body_type, BodyType::Json);
+        assert_eq!(copy.body, r#"{"u":"a"}"#);
+        assert_eq!(copy.settings.timeout_ms, 1_234);
+        assert!(copy.deleted_at.is_none(), "副本必须是存活的");
+        assert_eq!(copy.sort_order, 2, "追加到该文件夹末尾");
     }
 
     #[test]

@@ -113,6 +113,20 @@ pub fn count(conn: &Connection, workspace_id: i64) -> AppResult<i64> {
     )?)
 }
 
+/// 与 [`search`] 配套的**匹配**总数。
+///
+/// 不能拿 [`count`] 顶替：那是全部存活历史的条数，搜索时会把分页
+/// 判断带偏 —— 搜出 3 条却告诉前端「共 128 条」，滚到底会一直请求空页。
+pub fn count_matching(conn: &Connection, workspace_id: i64, keyword: &str) -> AppResult<i64> {
+    let pattern = format!("%{keyword}%");
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM history
+         WHERE workspace_id = ?1 AND deleted_at IS NULL AND request_name LIKE ?2",
+        rusqlite::params![workspace_id, pattern],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn list_deleted(conn: &Connection, workspace_id: i64) -> AppResult<Vec<HistoryEntry>> {
     let sql = format!(
         "SELECT {COLUMNS} FROM history
@@ -298,6 +312,11 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].request_name, "create order");
         assert!(search(&conn, 1, "nothing", 10, 0).unwrap().is_empty());
+
+        // 计数必须跟着关键字走，否则「还有下一页」会一直为真
+        assert_eq!(count_matching(&conn, 1, "order").unwrap(), 1);
+        assert_eq!(count_matching(&conn, 1, "nothing").unwrap(), 0);
+        assert_eq!(count(&conn, 1).unwrap(), 2, "不带关键字时才是全量");
     }
 
     #[test]

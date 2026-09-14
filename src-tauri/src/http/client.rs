@@ -30,8 +30,66 @@ const MAX_CACHED_CLIENTS: usize = 16;
 /// 空闲连接回收时间。取 reqwest 默认值，显式写出来是为了以后调参有地方改。
 const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
 
-/// 每个 host 保留的空闲连接数（压测时靠它复用连接）
-const POOL_MAX_IDLE_PER_HOST: usize = 8;
+/// 日常单发的每 host 空闲连接数。
+///
+/// 8 是个够用的手气数：界面上的连续调试最多也就几路并发。
+/// **压测必须覆盖它**（见 [`PoolProfile::Loadtest`]）。
+const INTERACTIVE_IDLE_PER_HOST: usize = 8;
+
+/// 压测时空闲连接数的硬上限。
+///
+/// 用户能填的并发数上限是 1000（`loadtest::MAX_CONCURRENCY`），
+/// 但连接池是**全局共享**的，压测结束后这些空闲连接会一直留到
+/// `pool_idle_timeout`（90 秒）。所以这里再箍一道，别让一次手滑
+/// 输入把 fd 占满到影响界面本身。
+const MAX_LOADTEST_IDLE_PER_HOST: usize = 1_000;
+
+/// 「这个 Client 是给谁用的」。
+///
+/// 存在的理由是一个**会静默拖慢压测的默认值**：日常路径的空闲连接数是 8，
+/// 而压测要的是「等于并发数」。按 8 条连接跑 50 并发的话，每一轮里
+/// 42 条连接都要重做 TCP + TLS 握手 —— 量出来的"延迟"其实是
+/// 「握手 + 请求」，而连接池本身成了被测对象。这正是 design.md §7.2
+/// 写明 `pool_max_idle_per_host = C` 要避免的事。
+///
+/// 参与缓存键的构造：两套空闲连接数是**烘焙进** Client 的，
+/// 不分开缓存的话，先生成的那一份会被后一个场景静默复用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolProfile {
+    /// 界面上的单次发送 / 取 token / 导入时的探测
+    Interactive,
+    /// 压测：空闲连接数跟着并发数走；`keep_alive = false` 时归零（即不复用）
+    Loadtest { concurrency: u32, keep_alive: bool },
+}
+
+impl PoolProfile {
+    fn idle_per_host(self) -> usize {
+        match self {
+            PoolProfile::Interactive => INTERACTIVE_IDLE_PER_HOST,
+            PoolProfile::Loadtest {
+                concurrency,
+                keep_alive,
+            } => {
+                if !keep_alive {
+                    // reqwest 没有「关掉 keep-alive」的开关，
+                    // 「每个 host 一条空闲连接都不留」就是它的等价表达
+                    return 0;
+                }
+                (concurrency as usize).clamp(1, MAX_LOADTEST_IDLE_PER_HOST)
+            }
+        }
+    }
+
+    fn cache_tag(self) -> String {
+        match self {
+            PoolProfile::Interactive => "i".to_string(),
+            PoolProfile::Loadtest {
+                concurrency,
+                keep_alive,
+            } => format!("l{concurrency}{}", if keep_alive { "k" } else { "n" }),
+        }
+    }
+}
 
 pub struct ClientCache {
     entries: Mutex<HashMap<String, Client>>,
@@ -52,7 +110,36 @@ impl ClientCache {
 
     /// 取一个符合 `settings` 的 Client。命中缓存直接返回（`Client` 内部是 `Arc`，clone 很便宜）。
     pub fn get(&self, settings: &RequestSettings) -> AppResult<Client> {
-        let key = cache_key(settings);
+        self.get_with_profile(settings, PoolProfile::Interactive)
+    }
+
+    /// 压测专用：空闲连接数按并发数铺开。
+    ///
+    /// 单独开一个入口而不是给 `RequestSettings` 加字段：
+    /// `RequestSettings` 是**会存进库、会进历史快照**的请求属性，
+    /// 而「连接池留几条空闲」是这一次压测的运行时参数，
+    /// 混进去会让「同一个请求」在同一次压测前后拿到两个不同的配置指纹。
+    pub fn get_for_loadtest(
+        &self,
+        settings: &RequestSettings,
+        concurrency: u32,
+        keep_alive: bool,
+    ) -> AppResult<Client> {
+        self.get_with_profile(
+            settings,
+            PoolProfile::Loadtest {
+                concurrency,
+                keep_alive,
+            },
+        )
+    }
+
+    fn get_with_profile(
+        &self,
+        settings: &RequestSettings,
+        profile: PoolProfile,
+    ) -> AppResult<Client> {
+        let key = cache_key(settings, profile);
 
         if let Some(client) = lock(&self.entries).get(&key) {
             return Ok(client.clone());
@@ -60,7 +147,7 @@ impl ClientCache {
 
         // 故意在锁外构造：build() 里会读证书库，不是瞬间完成的，
         // 不该让其它请求跟着等锁。并发下可能同一个 key 被构造两次，无害（后写入的胜出）。
-        let client = build(settings)?;
+        let client = build(settings, profile)?;
 
         let mut entries = lock(&self.entries);
         if entries.len() >= MAX_CACHED_CLIENTS {
@@ -87,26 +174,27 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn cache_key(settings: &RequestSettings) -> String {
+fn cache_key(settings: &RequestSettings, profile: PoolProfile) -> String {
     // 结构体字段顺序固定，序列化结果稳定，直接当签名用。
     // 注意 timeout_ms 为 0 时会被下面 max(1) 改成 1ms，这里也要归一，否则
     // 「0」和「1」会各占一个缓存位却指向同一个配置。
     format!(
-        "v1|t={}|r={}:{}|tls={}|px={}|hv={:?}",
+        "v2|t={}|r={}:{}|tls={}|px={}|hv={:?}|pool={}",
         settings.timeout_ms.max(1),
         settings.follow_redirects,
         settings.max_redirects,
         settings.verify_tls,
         settings.proxy.as_deref().unwrap_or("").trim(),
         settings.http_version,
+        profile.cache_tag(),
     )
 }
 
-fn build(settings: &RequestSettings) -> AppResult<Client> {
+fn build(settings: &RequestSettings, profile: PoolProfile) -> AppResult<Client> {
     let mut builder = Client::builder()
         .user_agent(user_agent())
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
-        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+        .pool_max_idle_per_host(profile.idle_per_host())
         // 0 会被 reqwest 解读成「无限等待」，那是最糟的行为（界面假死、压测永不结束）
         .timeout(Duration::from_millis(settings.timeout_ms.max(1)))
         // 只在用户**明确关掉**校验时才关。默认是校验。
@@ -289,7 +377,60 @@ mod tests {
         );
         assert!(
             with_proxy.contains("proxies:"),
-            "反证失败：显式指定代理时 Debug 里应当能看到 proxies，实际：{with_proxy}"
+            "显式配了代理就该出现在 Debug 里：{with_proxy}"
         );
+    }
+
+    /// 压测的 Client 与日常的**不能共用缓存位**：空闲连接数是烘焙进 Client 的，
+    /// 混用会让压测静默拿到只有 8 条空闲连接的池子。
+    #[test]
+    fn loadtest_client_does_not_share_the_interactive_slot() {
+        let cache = ClientCache::new();
+        cache.get(&settings()).expect("交互");
+        cache.get_for_loadtest(&settings(), 50, true).expect("压测");
+
+        assert_eq!(cache.cached_count(), 2, "两套连接池语义 = 两个 Client");
+    }
+
+    /// 同并发数同 keep_alive 的压测请求复用同一个 Client
+    #[test]
+    fn identical_loadtest_profiles_reuse_one_client() {
+        let cache = ClientCache::new();
+        cache.get_for_loadtest(&settings(), 64, true).expect("a");
+        cache.get_for_loadtest(&settings(), 64, true).expect("b");
+
+        assert_eq!(cache.cached_count(), 1);
+    }
+
+    /// 并发数不同 = 连接池大小不同 = 必须分开
+    #[test]
+    fn different_concurrency_gets_its_own_pool() {
+        let cache = ClientCache::new();
+        cache.get_for_loadtest(&settings(), 10, true).expect("10");
+        cache.get_for_loadtest(&settings(), 100, true).expect("100");
+        cache
+            .get_for_loadtest(&settings(), 10, false)
+            .expect("10 不复用");
+
+        assert_eq!(cache.cached_count(), 3);
+    }
+
+    #[test]
+    fn idle_per_host_follows_concurrency_and_is_clamped() {
+        let lt = |c: u32, keep: bool| {
+            PoolProfile::Loadtest {
+                concurrency: c,
+                keep_alive: keep,
+            }
+            .idle_per_host()
+        };
+
+        assert_eq!(lt(50, true), 50, "压测的空闲连接数要等于并发数");
+        assert_eq!(lt(1, true), 1);
+        // 关掉连接复用时一条空闲连接都不留
+        assert_eq!(lt(50, false), 0);
+        // 并发数再大也不能超过硬上限，否则压测结束后一堆空闲 fd 会赖着不走
+        assert_eq!(lt(u32::MAX, true), MAX_LOADTEST_IDLE_PER_HOST);
+        assert_eq!(PoolProfile::Interactive.idle_per_host(), 8);
     }
 }

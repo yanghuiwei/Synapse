@@ -44,6 +44,8 @@ export interface StatusBarProps {
   environmentName?: string | null;
   /** 待刷新的 Token 数量 */
   pendingTokens?: number;
+  /** 已判定有效的 Token 数量（没有待刷新时显示这个，别拿 0 冒充） */
+  validTokens?: number;
   /**
    * 后端不可达（例如在浏览器里直接打开 dev server）。
    * 为真时**覆盖** `status` 的显示 —— 这一条比「就绪」重要得多。
@@ -62,6 +64,7 @@ export function StatusBar({
   status = "ready",
   environmentName = null,
   pendingTokens = 0,
+  validTokens = 0,
   offline = false,
   appVersion,
   className,
@@ -101,7 +104,7 @@ export function StatusBar({
         <span className={cn("tabular", hasPending ? "text-warn" : "text-ink-muted")}>
           {hasPending
             ? t("status.tokenExpired", { count: pendingTokens })
-            : t("status.tokenValid", { count: 0 })}
+            : t("status.tokenValid", { count: validTokens })}
         </span>
       </span>
 

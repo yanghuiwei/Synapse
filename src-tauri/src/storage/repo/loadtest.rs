@@ -221,6 +221,81 @@ pub fn count_samples(conn: &Connection, run_id: i64) -> AppResult<i64> {
     )?)
 }
 
+/// 读一轮的**全部**采样。给导出用。
+///
+/// 单独开一个函数，而不是让调用方给 [`list_samples`] 传 `limit = -1`：
+/// SQLite 里 `LIMIT -1` 确实是「不限」，但把这个魔法数散落在调用点上，
+/// 读代码的人第一反应是「这里写错了」。一个具名函数把这个约定收在一处。
+///
+/// 上限由 [`crate::loadtest::MAX_TOTAL`] 保证（一轮最多 50 万条，约 30MB），
+/// 所以这里可以放心一次性读进内存 —— 导出本来就是一次性动作。
+pub fn list_all_samples(conn: &Connection, run_id: i64) -> AppResult<Vec<LoadtestSample>> {
+    let sql = format!(
+        "SELECT {SAMPLE_COLUMNS} FROM loadtest_sample
+         WHERE run_id = ?1 ORDER BY seq ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([run_id], map_sample)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 默认保留多少轮的采样明细。
+///
+/// 为什么是「保留 N 轮**明细**」而不是「保留 N 轮」：两个表的量级差三个数量级 ——
+/// `loadtest_run` 一行约 1KB（名字 + config + summary），而一轮 50 万请求的
+/// `loadtest_sample` 约 30MB。design.md §7.4 又要「历史压测记录列表，可对比两次运行」，
+/// 而对比用的是 run 行里的 summary，不是逐条采样。所以裁的只能是明细。
+///
+/// 20 轮的上限是这么来的：常见的一轮是几百到几千请求（几十 KB～几百 KB），
+/// 20 轮也就几 MB；真有人连跑 20 轮 50 万请求，那是 600MB —— 属于
+/// design.md §7.5 明确划到「不做」的长稳测试范畴，不在优化目标里。
+const DEFAULT_KEEP_RUNS: i64 = 20;
+
+/// 供命令层默认使用。见 [`DEFAULT_KEEP_RUNS`] 的说明。
+pub fn default_keep_runs() -> i64 {
+    DEFAULT_KEEP_RUNS
+}
+
+/// 裁掉旧轮次的采样明细，只留最近 [`DEFAULT_KEEP_RUNS`] 轮。
+///
+/// 返回删除的行数。
+///
+/// **不动 `loadtest_run`**：历史列表、跨轮对比、以及报告里的概要数字都要靠它。
+/// 被裁过明细的那一轮会呈现为「概要齐全、图表和样本为空」，
+/// 界面靠 `count_samples(run) == 0 && summary.total > 0` 认出来并说明白
+/// —— 这比悄悄少一截数据好。
+///
+/// `keep_runs < 1` 直接拒绝：`LIMIT 0` 会把**刚跑完的这一轮**的明细也删掉，
+/// 而那正是用户马上要看的报告。这种"参数写错就静默毁掉唯一有用的数据"
+/// 必须在入口拦住。
+pub fn prune_samples(conn: &Connection, keep_runs: i64) -> AppResult<u64> {
+    if keep_runs < 1 {
+        return Err(AppError::InvalidInput {
+            field: "keepRuns",
+            reason: "至少为 1：保留 0 轮会连刚跑完的那一轮明细一起删掉".into(),
+        });
+    }
+
+    // `started_at` 精度到毫秒，同一批创建的 run 可能完全相同，用 id 兜底排序
+    // —— 与 `list_runs` 保持同一套顺序，否则会出现「列表里还在、明细没了」
+    // 的交叉状态。
+    //
+    // 这里不需要 `finished_at IS NOT NULL` 之类的保护：正在跑的那一轮一定是
+    // 最新的（命令层保证同时只有一轮），因此必然落在 keep 集合里。
+    let deleted = conn.execute(
+        "DELETE FROM loadtest_sample
+         WHERE run_id NOT IN (
+           SELECT id FROM loadtest_run ORDER BY started_at DESC, id DESC LIMIT ?1
+         )",
+        [keep_runs],
+    )?;
+    Ok(deleted as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +440,106 @@ mod tests {
             finish_run(&conn, 77, &json!({})).unwrap_err(),
             AppError::NotFound { .. }
         ));
+    }
+
+    // ---------------- 保留策略 ----------------
+
+    /// 建 `n` 轮，每轮 `per_run` 条采样。返回按创建顺序排列的 run id。
+    fn seed_runs(conn: &mut Connection, n: i64, per_run: i64) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let run = create_run(conn, None, &format!("r{i}"), &json!({})).unwrap();
+            let batch: Vec<LoadtestSample> = (0..per_run).map(|s| sample(run.id, s)).collect();
+            insert_samples(conn, run.id, &batch).unwrap();
+            ids.push(run.id);
+        }
+        ids
+    }
+
+    #[test]
+    fn prune_keeps_only_the_newest_runs_samples() {
+        let mut conn = db();
+        let ids = seed_runs(&mut conn, 5, 4);
+
+        // 留最近 2 轮：删掉 3 轮 × 4 条 = 12 条
+        assert_eq!(prune_samples(&conn, 2).unwrap(), 12);
+
+        for (i, id) in ids.iter().enumerate() {
+            let left = count_samples(&conn, *id).unwrap();
+            if i >= 3 {
+                assert_eq!(left, 4, "第 {i} 轮应当被保留");
+            } else {
+                assert_eq!(left, 0, "第 {i} 轮的明细应当被裁掉");
+            }
+        }
+    }
+
+    /// 这条是保留策略的**核心安全属性**：刚跑完的那一轮明细必须还在。
+    /// 用户跑完压测第一件事就是看图表，而图表的数据源正是采样明细。
+    #[test]
+    fn prune_never_touches_the_newest_run() {
+        let mut conn = db();
+        let ids = seed_runs(&mut conn, 6, 3);
+        let newest = *ids.last().unwrap();
+
+        prune_samples(&conn, 1).unwrap();
+
+        assert_eq!(
+            count_samples(&conn, newest).unwrap(),
+            3,
+            "最新一轮的明细被裁掉了 —— 报告会变成空的"
+        );
+    }
+
+    /// run 行必须活下来：历史列表、跨轮对比、概要数字都靠它。
+    /// 裁掉的只是明细，这跟「删掉一次压测记录」是两回事。
+    #[test]
+    fn prune_keeps_run_rows_so_history_still_lists_them() {
+        let mut conn = db();
+        seed_runs(&mut conn, 5, 2);
+
+        prune_samples(&conn, 1).unwrap();
+
+        let runs = list_runs(&conn, 50, 0).unwrap();
+        assert_eq!(runs.len(), 5, "run 行不该被保留策略删掉");
+        // 被裁明细的那几轮概要仍然读得出来
+        assert_eq!(runs[0].request_name, "r4");
+        assert_eq!(runs[4].request_name, "r0");
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_under_the_limit() {
+        let mut conn = db();
+        seed_runs(&mut conn, 3, 5);
+        assert_eq!(prune_samples(&conn, 10).unwrap(), 0);
+        assert_eq!(prune_samples(&conn, 3).unwrap(), 0);
+    }
+
+    /// `keep_runs = 0` 会连最新的那一轮一起删 —— 这类"参数写错就毁掉唯一有用数据"
+    /// 的输入必须在入口拒掉，而不是靠调用方自觉。
+    #[test]
+    fn prune_refuses_zero_instead_of_emptying_everything() {
+        let mut conn = db();
+        let ids = seed_runs(&mut conn, 2, 3);
+
+        for bad in [0, -1] {
+            assert!(matches!(
+                prune_samples(&conn, bad).unwrap_err(),
+                AppError::InvalidInput {
+                    field: "keepRuns",
+                    ..
+                }
+            ));
+        }
+        // 拒绝之后一条都不能少
+        for id in ids {
+            assert_eq!(count_samples(&conn, id).unwrap(), 3);
+        }
+    }
+
+    #[test]
+    fn prune_on_an_empty_database_is_harmless() {
+        let conn = db();
+        assert_eq!(prune_samples(&conn, 5).unwrap(), 0);
     }
 }

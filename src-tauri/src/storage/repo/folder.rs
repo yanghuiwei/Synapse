@@ -7,16 +7,18 @@
 //!   `UNION` 去重能让查询停下来，而 `UNION ALL` 会直接无限循环。
 
 use rusqlite::{Connection, Row};
+use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::models::Folder;
+use crate::storage::models::{AuthConfig, Folder};
 use crate::storage::now_iso;
-use crate::storage::repo::{bool_to_int, opt_text, ORDER_BY_SORT};
+use crate::storage::repo::{bool_to_int, opt_text, parse_json_column, ORDER_BY_SORT};
 
-const COLUMNS: &str =
-    "id, workspace_id, parent_id, name, sort_order, is_token_source, created_at, updated_at, deleted_at";
+const COLUMNS: &str = "id, workspace_id, parent_id, name, sort_order, is_token_source, auth, \
+     created_at, updated_at, deleted_at";
 
-fn map_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
+fn map_row(row: &Row<'_>) -> AppResult<Folder> {
+    let auth_raw: String = row.get("auth")?;
     Ok(Folder {
         id: row.get("id")?,
         workspace_id: row.get("workspace_id")?,
@@ -24,6 +26,8 @@ fn map_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
         name: row.get("name")?,
         sort_order: row.get("sort_order")?,
         is_token_source: row.get("is_token_source")?,
+        // 走宽松解析：`folder.auth` 的形状在 P4 才定稿，存量值是 `{}`
+        auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "folder.auth")?),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         deleted_at: opt_text(row, "deleted_at")?,
@@ -57,13 +61,7 @@ pub fn list_by_workspace(conn: &Connection, workspace_id: i64) -> AppResult<Vec<
     let sql = format!(
         "SELECT {COLUMNS} FROM folder WHERE workspace_id = ?1 AND deleted_at IS NULL{ORDER_BY_SORT}"
     );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([workspace_id], map_row)?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
+    collect(conn, &sql, &[&workspace_id])
 }
 
 /// 回收站里的文件夹
@@ -73,11 +71,24 @@ pub fn list_deleted(conn: &Connection, workspace_id: i64) -> AppResult<Vec<Folde
          WHERE workspace_id = ?1 AND deleted_at IS NOT NULL
          ORDER BY deleted_at DESC, id DESC"
     );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([workspace_id], map_row)?;
+    collect(conn, &sql, &[&workspace_id])
+}
+
+/// 逐行收集。
+///
+/// 为什么不用 `query_map`：`map_row` 要解析 `folder.auth` 这一 JSON 列，
+/// 而 `query_map` 的闭包只能返回 `rusqlite::Result` —— 解析失败得冒泡成
+/// 我们自己的错误类型（`AppResult`），所以只能自己 `rows.next()` 走。
+fn collect(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> AppResult<Vec<Folder>> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query(params)?;
     let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
+    while let Some(row) = rows.next()? {
+        out.push(map_row(row)?);
     }
     Ok(out)
 }
@@ -85,13 +96,63 @@ pub fn list_deleted(conn: &Connection, workspace_id: i64) -> AppResult<Vec<Folde
 /// 按 id 取。软删除的也能取到（回收站要用）。
 pub fn get(conn: &Connection, id: i64) -> AppResult<Folder> {
     let sql = format!("SELECT {COLUMNS} FROM folder WHERE id = ?1");
-    conn.query_row(&sql, [id], map_row).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([id])?;
+    match rows.next()? {
+        Some(row) => map_row(row),
+        None => Err(AppError::NotFound {
             entity: "folder",
             id,
-        },
-        other => AppError::Db(other),
-    })
+        }),
+    }
+}
+
+/// 从某个文件夹向上的完整链，**最近的在前**，含自身。
+///
+/// 授权继承（design.md §4.4）与 Token 源查找都靠它。N+1 次查询，
+/// 但文件夹树的深度是个位数，用一条递归 SQL 换这点开销不划算 ——
+/// 而且递归 SQL 想把「按深度排序」和「防环」同时写对，比这里复杂得多。
+///
+/// 防环：每走一级都要求 parent 没走过。SQL 侧的递归查询靠 `UNION` 去重，
+/// 这是同一件事的 Rust 侧一半。
+pub fn ancestry(conn: &Connection, folder_id: i64) -> AppResult<Vec<Folder>> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current = Some(folder_id);
+
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            break;
+        }
+        let folder = match get(conn, id) {
+            Ok(f) => f,
+            // 父级被彻底删过（外键 ON DELETE CASCADE 只会带走子节点，
+            // 但这个 id 可能来自一条脏数据）—— 链就断在这里，不报错
+            Err(AppError::NotFound { .. }) => break,
+            Err(e) => return Err(e),
+        };
+        current = folder.parent_id;
+        out.push(folder);
+    }
+
+    Ok(out)
+}
+
+/// 覆盖分组级授权配置（design.md §4.4 的「继承父级」靠它落数据）
+pub fn set_auth(conn: &Connection, id: i64, auth: &AuthConfig) -> AppResult<Folder> {
+    let raw =
+        serde_json::to_string(auth).map_err(|e| AppError::Internal(format!("folder.auth: {e}")))?;
+    let affected = conn.execute(
+        "UPDATE folder SET auth = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, raw, now_iso()],
+    )?;
+    if affected == 0 {
+        return Err(AppError::NotFound {
+            entity: "folder",
+            id,
+        });
+    }
+    get(conn, id)
 }
 
 pub fn create(
@@ -287,8 +348,13 @@ pub fn restore_tree(conn: &Connection, id: i64) -> AppResult<Folder> {
 
 /// 彻底删除整棵子树（含请求）。回收站的「彻底删除」用。
 ///
-/// 返回被删掉的总行数（请求 + 文件夹）。
-pub fn purge_tree(conn: &Connection, id: i64) -> AppResult<usize> {
+/// 返回 `(文件夹数, 请求数)`。
+///
+/// 为什么按**类别**分开返回、而不是一个总数：界面上要显示
+/// 「已彻底删除：3 个分类 / 12 个接口」，而调用方拿不到这两个数字 ——
+/// 请求数是靠显式 DELETE 得来的，文件夹数只能从子树大小推。
+/// 给一个混合的总数等于把「拆不开」这件事推给每一处调用点。
+pub fn purge_tree(conn: &Connection, id: i64) -> AppResult<(usize, usize)> {
     // request.folder_id 是 ON DELETE SET NULL，所以必须先显式删掉子树的请求，
     // 否则它们会变成「没有文件夹的孤儿」而不是被一并删除。
     let ids = subtree_ids(conn, id)?;
@@ -299,9 +365,9 @@ pub fn purge_tree(conn: &Connection, id: i64) -> AppResult<usize> {
         });
     }
 
-    let mut deleted = 0usize;
+    let mut requests = 0usize;
     for folder_id in &ids {
-        deleted += conn.execute("DELETE FROM request WHERE folder_id = ?1", [folder_id])?;
+        requests += conn.execute("DELETE FROM request WHERE folder_id = ?1", [folder_id])?;
     }
 
     // ⚠️ 文件夹数**不能**靠 `execute()` 的返回值累加。
@@ -317,9 +383,8 @@ pub fn purge_tree(conn: &Connection, id: i64) -> AppResult<usize> {
         ),
         [id],
     )?;
-    deleted += ids.len();
 
-    Ok(deleted)
+    Ok((ids.len(), requests))
 }
 
 #[cfg(test)]
@@ -519,8 +584,9 @@ mod tests {
         insert_request(&conn, child.id, "r1");
         insert_request(&conn, grandchild.id, "r2");
 
-        let deleted = purge_tree(&conn, root.id).unwrap();
-        assert_eq!(deleted, 5, "2 requests + 3 folders");
+        let (folders, requests) = purge_tree(&conn, root.id).unwrap();
+        assert_eq!(folders, 3, "三层树必须报 3 个文件夹（少算的坑）");
+        assert_eq!(requests, 2);
 
         let folders: i64 = conn
             .query_row("SELECT COUNT(*) FROM folder", [], |r| r.get(0))

@@ -17,11 +17,20 @@ pub mod keys {
     pub const THEME: &str = "theme";
     /// 界面语言：zh-CN
     pub const LOCALE: &str = "locale";
-    /// 最近一次使用的环境 id
-    pub const ACTIVE_ENV_ID: &str = "activeEnvironmentId";
     /// 回收站保留天数
     pub const TRASH_RETENTION_DAYS: &str = "trashRetentionDays";
 }
+
+// ⚠️ 曾经有过一个 `activeEnvironmentId` 键，P4 把它删了。
+//
+// 「当前环境」的唯一真源是 `environment.is_active` 这一列（见 `commands::env`
+// 与 `repo::env::set_active`）。两处都表达同一件事的结果是：
+// 界面在这一处改、发送路径读那一处，然后出现「切换了环境但请求还是老变量」
+// 这种几乎无法从代码上看出因果的 bug。
+//
+// 保留这条注释是因为**老库里的那一行还在**（设 `setting` 是自由键值表，
+// 删它要写一次迁移，而它的代价只是几十字节）。读到它时直接忽略即可 ——
+// 前端也不再有这个键（见 `src/lib/sync.ts` 的 `SETTING_KEYS`）。
 
 /// 键名合法性：非空、不超过 64 字节、只允许字母数字与 `._-`。
 ///

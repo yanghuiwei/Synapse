@@ -14,24 +14,69 @@
    ============================================================ */
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { interpolate, type TranslateParams } from "./i18n";
 import { zhCN, type MessageKey } from "./i18n/zh-CN";
 import {
   apiRequestSchema,
   appInfoSchema,
+  deleteFolderResultSchema,
+  envVarSchema,
+  environmentSchema,
+  exportResultSchema,
   folderSchema,
+  historyEntrySchema,
+  historyPageSchema,
+  importOutcomeSchema,
+  importPreviewSchema,
+  loadtestProgressEventSchema,
+  loadtestChartSchema,
+  loadtestRunDetailSchema,
+  loadtestRunSchema,
+  loadtestSampleSchema,
+  purgeTrashResultSchema,
+  purgeTreeResultSchema,
   responsePayloadSchema,
   settingSchema,
+  tokenSourceSchema,
+  tokenStatusSchema,
+  trashContentsSchema,
   workspaceSchema,
 } from "./schemas";
 import type {
   ApiRequest,
   AppInfo,
+  AuthConfig,
+  ConflictMode,
+  DeleteFolderResult,
+  EnvVar,
+  Environment,
+  ExportFormat,
+  ExportResult,
   Folder,
+  HistoryEntry,
+  HistoryPage,
   HttpResponsePayload,
+  ImportOutcome,
+  ImportPreview,
+  ImportSourceInput,
+  LoadtestConfig,
+  LoadtestChart,
+  LoadtestProgressEvent,
+  LoadtestRun,
+  LoadtestRunDetail,
+  LoadtestSample,
+  LoadtestTarget,
+  NewHistoryEntry,
+  PurgeTrashResult,
+  PurgeTreeResult,
+  ReportLabels,
   RequestSpec,
   Setting,
+  TokenSource,
+  TokenStatus,
+  TrashContents,
   Workspace,
 } from "./types";
 
@@ -72,9 +117,29 @@ export const ERROR_KEYS = {
   E_CANCELLED: "error.cancelled",
   E_NETWORK: "error.network",
   E_NOT_IMPLEMENTED: "error.notImplemented",
+  // ---- Token（P4） ----
+  //
+  // 这四条分得细，是因为**用户动作完全不同**：
+  // 「没有 Token 来源」→ 去建一个；「刷新失败」→ 去修那个取 token 的请求；
+  // 「提取失败」→ 改提取路径；「已过期且关掉了自动刷新」→ 打开开关或手动刷。
+  // 合成一句「Token 出错了」等于让用户自己猜。
+  E_TOKEN_SOURCE: "error.tokenSource",
+  E_TOKEN_REFRESH: "error.tokenRefresh",
+  E_TOKEN_EXTRACT: "error.tokenExtract",
+  E_TOKEN_EXPIRED: "error.tokenExpired",
+  // ---- 导入器（P5） ----
+  //
+  // 三个码分开是因为**用户的下一个动作不同**：识别失败 = 这段东西我们压根不认
+  // （可能粘错了）；JSON 不合法 = 文件选错了或坏了（重新导一次）；
+  // 解析失败 = 格式认出来了，但里面某条解不动（去看警告列表定位）。
+  E_IMPORT_DETECT: "error.importDetect",
+  E_IMPORT_JSON: "error.importJson",
+  E_IMPORT_PARSE: "error.importParse",
   // ---- 仅前端 ----
   E_NOT_TAURI: "error.notTauri",
   E_SCHEMA_DRIFT: "error.schemaDrift",
+  /** 启动序列还没跑完就发起了写操作（正常操作流里不该出现） */
+  E_WORKSPACE_MISSING: "error.workspaceMissing",
   E_UNKNOWN: "error.unknown",
 } as const satisfies Record<string, MessageKey>;
 
@@ -163,6 +228,12 @@ export class IpcError extends Error {
    * 即可 —— `code` 是稳定标识，本来就不该被语言绑死。
    */
   get localized(): string {
+    // 少数错误码在**带了额外参数**时有更精确的说法。这里显式列举而不是
+    // 给插值器加「缺参数就删掉那句话」的花招 —— 那种隐式行为会让
+    // `zh-CN.ts` 里读不出文案到底长什么样。
+    if (this.code === "E_TOKEN_REFRESH" && typeof this.params.status === "number") {
+      return interpolate(zhCN["error.tokenRefreshHttp"], this.uiParams);
+    }
     return interpolate(zhCN[ERROR_KEYS[this.code]], this.uiParams);
   }
 
@@ -294,6 +365,41 @@ export const workspaces = {
 export const folders = {
   list: (workspaceId: number): Promise<Folder[]> =>
     call("list_folders", { workspaceId }, { parse: (v) => folderSchema.array().parse(v) }),
+
+  create: (workspaceId: number, parentId: number | null, name: string): Promise<Folder> =>
+    call("create_folder", { workspaceId, parentId, name }, { parse: (v) => folderSchema.parse(v) }),
+
+  rename: (id: number, name: string): Promise<Folder> =>
+    call("rename_folder", { id, name }, { parse: (v) => folderSchema.parse(v) }),
+
+  setTokenSource: (id: number, isTokenSource: boolean): Promise<Folder> =>
+    call(
+      "set_folder_token_source",
+      { id, isTokenSource },
+      { parse: (v) => folderSchema.parse(v) },
+    ),
+
+  /**
+   * 设置分类的授权（P4）。这是**继承链的数据源** ——
+   * 子分类/请求上配 `inherit` 就是沿链向上找第一个非 `inherit` 的。
+   */
+  setAuth: (id: number, auth: AuthConfig): Promise<Folder> =>
+    call("set_folder_auth", { id, auth }, { parse: (v) => folderSchema.parse(v) }),
+
+  /** `parentId = null` 表示移到根。移进自己的子孙会被后端拒绝。 */
+  move: (id: number, parentId: number | null): Promise<Folder> =>
+    call("move_folder", { id, parentId }, { parse: (v) => folderSchema.parse(v) }),
+
+  /** 级联软删除：整棵子树 + 子树下的请求一起进回收站 */
+  remove: (id: number): Promise<DeleteFolderResult> =>
+    call("delete_folder", { id }, { parse: (v) => deleteFolderResultSchema.parse(v) }),
+
+  restore: (id: number): Promise<Folder> =>
+    call("restore_folder", { id }, { parse: (v) => folderSchema.parse(v) }),
+
+  /** 彻底删除（含子树与请求）。**不可撤销** */
+  purge: (id: number): Promise<PurgeTreeResult> =>
+    call("purge_folder", { id }, { parse: (v) => purgeTreeResultSchema.parse(v) }),
 };
 
 export const requests = {
@@ -317,4 +423,358 @@ export const requests = {
    * 用户点取消时请求刚好回完是很常见的事，按「本来就没在跑」处理即可。
    */
   cancel: (runId: string): Promise<boolean> => call("cancel_request", { runId }),
+
+  create: (workspaceId: number, folderId: number | null, name: string): Promise<ApiRequest> =>
+    call("create_request", { workspaceId, folderId, name }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  /** 全量保存。编辑器每次改动后落库走这里。 */
+  save: (request: ApiRequest): Promise<ApiRequest> =>
+    call("save_request", { request }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  rename: (id: number, name: string): Promise<ApiRequest> =>
+    call("rename_request", { id, name }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  /** 复制到同一个分类下。名字由前端拼（后端不产出「副本」这类文案）。 */
+  duplicate: (id: number, name: string): Promise<ApiRequest> =>
+    call("duplicate_request", { id, name }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  /** `folderId = null` 表示移出到「未分类」 */
+  move: (id: number, folderId: number | null): Promise<ApiRequest> =>
+    call("move_request", { id, folderId }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  /** 软删除，返回被删的那一行 —— 界面要用它显示「已移到回收站」 */
+  remove: (id: number): Promise<ApiRequest> =>
+    call("delete_request", { id }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  restore: (id: number): Promise<ApiRequest> =>
+    call("restore_request", { id }, { parse: (v) => apiRequestSchema.parse(v) }),
+
+  /** 彻底删除。**不可撤销** */
+  purge: async (id: number): Promise<void> => {
+    await call<null>("purge_request", { id });
+  },
+};
+
+export const history = {
+  /**
+   * 一页历史。`keyword` 为空白等同不过滤。
+   *
+   * `limit` / `offset` 后端会夹紧（limit ∈ [1,200]，offset ≥ 0），
+   * 前端算错也不会拿到空列表。
+   */
+  list: (
+    workspaceId: number,
+    opts: { keyword?: string; limit?: number; offset?: number } = {},
+  ): Promise<HistoryPage> =>
+    call(
+      "list_history",
+      {
+        workspaceId,
+        keyword: opts.keyword ?? null,
+        limit: opts.limit ?? null,
+        offset: opts.offset ?? null,
+      },
+      { parse: (v) => historyPageSchema.parse(v) },
+    ),
+
+  get: (id: number): Promise<HistoryEntry> =>
+    call("get_history", { id }, { parse: (v) => historyEntrySchema.parse(v) }),
+
+  /**
+   * 写一条历史（发送结束后调用）。
+   *
+   * **成功与失败都要写**：`status = null` + `error` 有值代表网络层失败，
+   * 那恰恰是最值得回看的几条。用户主动取消不写。
+   */
+  record: (entry: NewHistoryEntry): Promise<HistoryEntry> =>
+    call("record_history", { entry }, { parse: (v) => historyEntrySchema.parse(v) }),
+
+  /** 移除一条（进回收站） */
+  remove: async (id: number): Promise<void> => {
+    await call<null>("delete_history", { id });
+  },
+
+  restore: (id: number): Promise<HistoryEntry> =>
+    call("restore_history", { id }, { parse: (v) => historyEntrySchema.parse(v) }),
+
+  /** 彻底删除一条。**不可撤销** */
+  purge: async (id: number): Promise<void> => {
+    await call<null>("purge_history", { id });
+  },
+
+  /** 清空历史（全部进回收站），返回条数 */
+  clearAll: (workspaceId: number): Promise<number> =>
+    call("clear_history", { workspaceId }),
+};
+
+export const trash = {
+  /** 回收站的三块内容一次拿回 */
+  list: (workspaceId: number): Promise<TrashContents> =>
+    call("list_trash", { workspaceId }, { parse: (v) => trashContentsSchema.parse(v) }),
+
+  /** 清空回收站（**硬删除**） */
+  purge: (workspaceId: number): Promise<PurgeTrashResult> =>
+    call("purge_trash", { workspaceId }, { parse: (v) => purgeTrashResultSchema.parse(v) }),
+};
+
+// ---------------------------------------------------------------
+// 环境与变量（P4）
+// ---------------------------------------------------------------
+
+export const envs = {
+  list: (workspaceId: number): Promise<Environment[]> =>
+    call("list_environments", { workspaceId }, {
+      parse: (v) => environmentSchema.array().parse(v),
+    }),
+
+  /** 当前激活的环境。`null` = 不使用环境（**不是错误**） */
+  active: (workspaceId: number): Promise<Environment | null> =>
+    call("get_active_environment", { workspaceId }, {
+      parse: (v) => environmentSchema.nullable().parse(v),
+    }),
+
+  create: (workspaceId: number, name: string): Promise<Environment> =>
+    call("create_environment", { workspaceId, name }, {
+      parse: (v) => environmentSchema.parse(v),
+    }),
+
+  rename: (id: number, name: string): Promise<Environment> =>
+    call("rename_environment", { id, name }, { parse: (v) => environmentSchema.parse(v) }),
+
+  /** `id = null` 表示「不使用环境」。唯一真源是 `environment.is_active` 列。 */
+  setActive: async (workspaceId: number, id: number | null): Promise<void> => {
+    await call<null>("set_active_environment", { workspaceId, id });
+  },
+
+  /** 软删除（进回收站） */
+  remove: async (id: number): Promise<void> => {
+    await call<null>("delete_environment", { id });
+  },
+
+  restore: (id: number): Promise<Environment> =>
+    call("restore_environment", { id }, { parse: (v) => environmentSchema.parse(v) }),
+
+  /** 彻底删除。**不可撤销**（变量由外键级联带走） */
+  purge: async (id: number): Promise<void> => {
+    await call<null>("purge_environment", { id });
+  },
+
+  vars: (environmentId: number): Promise<EnvVar[]> =>
+    call("list_env_vars", { environmentId }, { parse: (v) => envVarSchema.array().parse(v) }),
+
+  /**
+   * 整表替换变量。
+   *
+   * 整表提交而不是逐行增删改：少一套 API 就少一套需要保持一致的语义。
+   * 空白键由后端**丢弃**（不报错）—— 「加一行」的默认状态就是空行。
+   */
+  replaceVars: (environmentId: number, vars: EnvVar[]): Promise<EnvVar[]> =>
+    call("replace_env_vars", { environmentId, vars }, {
+      parse: (v) => envVarSchema.array().parse(v),
+    }),
+};
+
+// ---------------------------------------------------------------
+// Token 来源（P4）
+// ---------------------------------------------------------------
+
+export const tokens = {
+  list: (workspaceId: number): Promise<TokenSource[]> =>
+    call("list_token_sources", { workspaceId }, {
+      parse: (v) => tokenSourceSchema.array().parse(v),
+    }),
+
+  create: (
+    workspaceId: number,
+    folderId: number,
+    name: string,
+    fetchRequestId: number,
+  ): Promise<TokenSource> =>
+    call("create_token_source", { workspaceId, folderId, name, fetchRequestId }, {
+      parse: (v) => tokenSourceSchema.parse(v),
+    }),
+
+  /** 全量保存 */
+  save: (source: TokenSource): Promise<TokenSource> =>
+    call("save_token_source", { source }, { parse: (v) => tokenSourceSchema.parse(v) }),
+
+  /** 硬删除（Token 配置属于「机器用的配置」，不进回收站） */
+  remove: async (id: number): Promise<void> => {
+    await call<null>("delete_token_source", { id });
+  },
+
+  /**
+   * 某条请求**实际生效**的 Token 来源（沿分类链向上找第一个）。
+   *
+   * 用它把「当前生效的是哪个」摆到界面上 —— 否则用户对着三个配置
+   * 只能靠猜哪个在起作用。
+   */
+  resolve: (folderId: number | null): Promise<TokenSource | null> =>
+    call("resolve_token_source", { folderId }, {
+      parse: (v) => tokenSourceSchema.nullable().parse(v),
+    }),
+
+  status: (id: number): Promise<TokenStatus> =>
+    call("get_token_status", { id }, { parse: (v) => tokenStatusSchema.parse(v) }),
+
+  /** 强制刷新，忽略缓存。走的是同一个单飞锁 —— 不会变成第 6 次网络请求。 */
+  refresh: (id: number): Promise<TokenStatus> =>
+    call("refresh_token", { id }, { parse: (v) => tokenStatusSchema.parse(v) }),
+
+  /**
+   * 一次拿回所有来源的状态。
+   *
+   * 没有做成一条后端命令：来源本来就只有个位数（一个工作区通常 1~3 个），
+   * 而 `get_token_status` 是纯读缓存、不触发网络。为省几次 IPC 加一条
+   * 聚合命令，换来的是两处需要同步的语义。
+   */
+  statuses: async (sources: readonly TokenSource[]): Promise<Map<number, TokenStatus>> => {
+    const rows = await Promise.all(
+      sources.map(async (s) => [s.id, await tokens.status(s.id)] as const),
+    );
+    return new Map(rows);
+  },
+};
+
+// ---------------------------------------------------------------
+// 导入器（P5）
+// ---------------------------------------------------------------
+
+export const imports = {
+  /**
+   * 只看不写：解析 + 与库里比对，回一棵差异树。
+   *
+   * `conflict` 是参数而不是常量：差异树**随冲突模式变**（副本模式会把
+   * 同名的算成新增，覆盖模式会多出一批「移除」），所以切换模式要重算。
+   *
+   * 这里**没有**「是否导入环境」的参数：预览永远列出文件里带的环境，
+   * 用户才知道原来还有一批变量可以一起导。真写不写由提交那一步的开关决定。
+   */
+  preview: (source: ImportSourceInput, conflict: ConflictMode): Promise<ImportPreview> =>
+    call(
+      "preview_import",
+      { source, conflict },
+      { parse: (v) => importPreviewSchema.parse(v) },
+    ),
+
+  /**
+   * 落库。
+   *
+   * 会**重新解析一遍**（预览到落库之间用户可能换了文件），
+   * 但走的是同一套计划逻辑，所以名字与冲突判定和预览完全一致 ——
+   * 界面上看到什么，落库就是什么。
+   */
+  commit: (
+    source: ImportSourceInput,
+    conflict: ConflictMode,
+    includeEnvironments: boolean,
+  ): Promise<ImportOutcome> =>
+    call(
+      "commit_import",
+      { source, conflict, includeEnvironments },
+      { parse: (v) => importOutcomeSchema.parse(v) },
+    ),
+};
+
+// ---------------------------------------------------------------
+// 压测（P6）
+// ---------------------------------------------------------------
+
+/**
+ * 进度事件名。**必须与 Rust 侧 `commands::loadtest::PROGRESS_EVENT` 逐字一致** ——
+ * 它是两边的唯一约定，写错了不会有任何报错，只是进度条永远不动。
+ */
+const LOADTEST_PROGRESS_EVENT = "reqly://loadtest-progress";
+
+export const loadtests = {
+  /**
+   * 跑一轮压测。**这个 Promise 要等到整轮结束才 resolve**（可能几十秒），
+   * 过程中的数字靠 `onProgress` 推。
+   *
+   * `token` 由调用方生成并保管：它是这一轮在事件流与取消里的身份。
+   * 后端在跑的过程中还不知道数据库的 run id，所以不能拿它当标识。
+   */
+  start: (
+    token: string,
+    target: LoadtestTarget,
+    spec: RequestSpec,
+    config: LoadtestConfig,
+  ): Promise<LoadtestRunDetail> =>
+    call(
+      "start_loadtest",
+      { token, target, spec, config },
+      { parse: (v) => loadtestRunDetailSchema.parse(v) },
+    ),
+
+  /**
+   * 取消当前这一轮。返回 `false` = 本来就没在跑（**不是错误**）。
+   *
+   * 不传 token：同时只允许一轮压测，所以「取消谁」没有歧义。
+   * 取消后已经在飞的请求不打断、自然结束，所以超时 30 秒时最多还要等 30 秒。
+   */
+  cancel: (): Promise<boolean> => call("cancel_loadtest"),
+
+  /** 历史压测列表，新的在前 */
+  runs: (limit?: number, offset?: number): Promise<LoadtestRun[]> =>
+    call(
+      "list_loadtest_runs",
+      { limit, offset },
+      { parse: (v) => loadtestRunSchema.array().parse(v) },
+    ),
+
+  /** 一轮的详情。打开历史记录时用 */
+  run: (runId: number): Promise<LoadtestRunDetail> =>
+    call("get_loadtest_run", { runId }, { parse: (v) => loadtestRunDetailSchema.parse(v) }),
+
+  /** 一轮的采样明细（分页）。列表与图表用 */
+  samples: (runId: number, limit?: number, offset?: number): Promise<LoadtestSample[]> =>
+    call(
+      "get_loadtest_samples",
+      { runId, limit, offset },
+      { parse: (v) => loadtestSampleSchema.array().parse(v) },
+    ),
+
+  remove: async (runId: number): Promise<void> => {
+    await call<null>("delete_loadtest_run", { runId });
+  },
+
+  /**
+   * 一轮的图表数据（时间线 / 分布 / 最慢 / 失败）。
+   *
+   * 聚合在后端算 —— 前端拿到的只有几十个点，而不是几十万条明细。
+   */
+  chart: (runId: number): Promise<LoadtestChart> =>
+    call("get_loadtest_chart", { runId }, { parse: (v) => loadtestChartSchema.parse(v) }),
+  /**
+   * 导出报告。返回**落盘的绝对路径** —— 后端写在用户的下载目录里，
+   * 前端拿这个路径去「打开所在目录」。
+   *
+   * `labels` 是报表里的全部文案，来自 `zh-CN.ts`。报表是唯一「后端产文本」
+   * 的场景，但文案来源仍然只有一个。
+   */
+  export: (runId: number, format: ExportFormat, labels: ReportLabels): Promise<ExportResult> =>
+    call(
+      "export_loadtest_report",
+      { runId, format, labels },
+      { parse: (v) => exportResultSchema.parse(v) },
+    ),
+
+  /**
+   * 订阅进度事件。返回退订函数，**必须在组件卸载 / 换轮次时调用** ——
+   * 不退订的表现是每跑一轮就多一个监听者，进度回调被重复触发 N 次。
+   */
+  onProgress: (handler: (event: LoadtestProgressEvent) => void): Promise<UnlistenFn> => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {});
+
+    return listen<unknown>(LOADTEST_PROGRESS_EVENT, (e) => {
+      const parsed = loadtestProgressEventSchema.safeParse(e.payload);
+      if (!parsed.success) {
+        // 结构对不上就丢掉这一帧，而不是往上抛：进度只是显示，
+        // 一个坏的进度帧不该把正在跑的那一轮（或整个面板）弄崩。
+        console.warn("[reqly] 压测进度事件结构异常：", parsed.error.message);
+        return;
+      }
+      handler(parsed.data);
+    });
+  },
 };

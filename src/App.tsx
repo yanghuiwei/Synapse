@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Panel, usePanelRef } from "react-resizable-panels";
 import type { PanelSize } from "react-resizable-panels";
-import { matchShortcut } from "@/lib/constants";
+import { matchShortcut, SECTION_SHORTCUTS } from "@/lib/constants";
 import * as ipc from "@/lib/ipc";
 import { bootstrapSettings } from "@/lib/sync";
 import { useTheme } from "@/lib/useTheme";
+import { useEnvStore } from "@/store/env";
 import { useRequestStore } from "@/store/request";
+import { tokenCounts, useTokenStore } from "@/store/token";
 import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { ActivityRail } from "@/features/layout/ActivityRail";
@@ -36,7 +38,18 @@ export function App() {
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const setSidebarCollapsed = useUiStore((s) => s.setSidebarCollapsed);
   const workspaceStatus = useWorkspaceStore((s) => s.status);
+  const workspaceId = useWorkspaceStore((s) => s.workspace?.id);
   const requestRunning = useRequestStore((s) => s.runId !== null);
+
+  /**
+   * 状态栏的两个数字。
+   *
+   * `pendingTokenCount` 是**派生**的（`sources × statuses` 的函数），不在 store 里存一份 ——
+   * 存一份就得在每次刷新后同步更新，而这种同步迟早会漏。
+   */
+  const environmentName = useEnvStore((s) => s.active?.name ?? null);
+  const pendingTokens = useTokenStore((s) => tokenCounts(s).pending);
+  const validTokens = useTokenStore((s) => tokenCounts(s).valid);
 
   /** 版本号以后端为准（`get_app_info`），拿不到就回退到构建期常量 */
   const [appVersion, setAppVersion] = useState<string | undefined>(undefined);
@@ -80,6 +93,19 @@ export function App() {
     };
   }, []);
 
+  /**
+   * 环境与 Token 的启动加载。
+   *
+   * ⚠️ 依赖必须是 `workspaceId`：首挂时 `workspace.load()` 还在路上，
+   * 两个 store 的 `load()` 拿到的 workspace 是 null 会直接返回 ——
+   * 那样状态栏会**永远**显示「不使用环境 / 0 个有效」，而且不报错。
+   */
+  useEffect(() => {
+    if (workspaceId === undefined) return;
+    void useEnvStore.getState().load();
+    void useTokenStore.getState().load();
+  }, [workspaceId]);
+
   // 拖拽到最小宽度会触发库的自动折叠，这里把状态同步回 store，
   // 否则 TopBar 上的图标会跟实际状态对不上。
   const handleSidebarResize = useCallback(
@@ -103,6 +129,38 @@ export function App() {
       if (matchShortcut(event, "toggleTheme")) {
         event.preventDefault();
         toggleTheme();
+        return;
+      }
+
+      // Ctrl+1 / 2 / 3：集合 / 历史 / 回收站
+      for (const { name, section } of SECTION_SHORTCUTS) {
+        if (!matchShortcut(event, name)) continue;
+        event.preventDefault();
+        const ui = useUiStore.getState();
+        ui.setSection(section);
+        // 侧栏被折叠时切板块等于什么都没发生 —— 顺手展开，
+        // 否则用户会以为快捷键坏了
+        if (ui.sidebarCollapsed) ui.setSidebarCollapsed(false);
+        return;
+      }
+
+      // Ctrl+N 新建请求。先切到「集合」：新建对话框挂在集合树里，
+      // 在历史/回收站板块下弹不出来
+      if (matchShortcut(event, "newRequest")) {
+        event.preventDefault();
+        const ui = useUiStore.getState();
+        ui.setSection("collections");
+        if (ui.sidebarCollapsed) ui.setSidebarCollapsed(false);
+        ui.openCreateDialog("request", null);
+        return;
+      }
+
+      // Ctrl+K 聚焦侧栏搜索框。当前板块没有搜索框时它是空操作
+      if (matchShortcut(event, "focusSearch")) {
+        event.preventDefault();
+        document
+          .querySelector<HTMLInputElement>("[data-sidebar-search]")
+          ?.focus();
         return;
       }
 
@@ -178,6 +236,9 @@ export function App() {
               ? "sending"
               : "ready"
         }
+        environmentName={environmentName}
+        pendingTokens={pendingTokens}
+        validTokens={validTokens}
         offline={offline}
         appVersion={appVersion}
       />

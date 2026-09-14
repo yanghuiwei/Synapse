@@ -24,11 +24,18 @@ pub struct Migration {
 ///
 /// 加新迁移：新建 `migrations/00N_xxx.sql`，在下面追加一项，version 递增。
 /// 已发布的迁移**不要再改**（用户库里已经跑过了，改了也不会重跑）。
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../../migrations/001_init.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../../migrations/001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "folder_auth",
+        sql: include_str!("../../migrations/002_folder_auth.sql"),
+    },
+];
 
 /// 代码里定义的最高版本号
 pub fn latest_version() -> i64 {
@@ -134,7 +141,7 @@ mod tests {
     fn applies_all_migrations_on_empty_db() {
         let mut conn = open_memory();
         let applied = run(&mut conn).expect("migrate");
-        assert_eq!(applied, vec![1], "fresh db should apply migration 1");
+        assert_eq!(applied, vec![1, 2], "fresh db should apply every migration");
         assert_eq!(current_version(&conn).unwrap(), latest_version());
     }
 
@@ -151,7 +158,7 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 1, "version table must have exactly one row");
+        assert_eq!(rows, 2, "version table must have one row per migration");
     }
 
     /// schema 完整性：design.md §3.2 的表一张都不能少。
@@ -206,6 +213,27 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == idx), "missing index: {idx}");
         }
+    }
+
+    /// 002 是 `ALTER TABLE`，为「继承父级」提供数据源。
+    /// 存量库里必须能补上这一列且默认值是 `{}`（= 未配置）。
+    #[test]
+    fn folder_auth_column_is_added_with_empty_default() {
+        let mut conn = open_memory_with_pragmas();
+        run(&mut conn).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO workspace (id, name, created_at, updated_at)
+               VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO folder (id, workspace_id, name, created_at, updated_at)
+               VALUES (1, 1, 'f', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+
+        let auth: String = conn
+            .query_row("SELECT auth FROM folder WHERE id = 1", [], |r| r.get(0))
+            .expect("folder.auth must exist after migration 2");
+        assert_eq!(auth, "{}");
     }
 
     /// 外键必须真的生效（PRAGMA foreign_keys 是连接级开关，容易忘）

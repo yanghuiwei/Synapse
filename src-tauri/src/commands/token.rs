@@ -1,0 +1,306 @@
+//! Token 源命令（design.md §4.3）。
+//!
+//! 与 `commands::env` 一样只做「校验入参 → 调仓储 / 引擎 → 映射错误」。
+//! 唯一带点编排的是 [`refresh_token`] 与 [`get_token_status`]：它们要用
+//! 「激活环境的变量」去解析取 token 的那个请求，所以得先自己把环境捞出来。
+//!
+//! ## 为什么状态查询是命令而不是前端算
+//!
+//! 「还有多少秒过期」取决于 `skew_seconds` 与缓存的 `expires_at`，
+//! 判定逻辑在 `http::token::is_expired` 里**只有一份**。前端自己拿
+//! `expires_at` 与 `skew` 再算一遍，两边迟早会在边界上分叉，表现为
+//! 「徽标说还有 5 秒，后端说已经过期了」。
+
+use std::collections::HashMap;
+
+use serde::Serialize;
+use tauri::State;
+
+use crate::commands::validate::clean_name;
+use crate::error::{AppError, AppResult};
+use crate::http::token::{is_expired, TokenDeps};
+use crate::storage::models::TokenSource;
+use crate::storage::{repo, with_conn};
+use crate::AppState;
+
+/// Token 源的运行状态。给徽标（剩余有效期）与「立即刷新」用。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenStatus {
+    /// 有没有缓存行。`false` = 从没取过
+    pub has_cache: bool,
+    /// 已经过期（含 `skew_seconds` 提前量）
+    pub expired: bool,
+    /// 过期时间的绝对值（ISO8601）；`null` = 永不过期
+    pub expires_at: Option<String>,
+    /// 还剩多少秒。负数表示已经过去多久；`null` = 永不过期或没有缓存
+    pub remaining_seconds: Option<i64>,
+    /// 缓存最后一次写入的时间
+    pub updated_at: Option<String>,
+    /// 当前缓存的 access token。**由前端负责打码显示** ——
+    /// 与 `env_var.is_secret` 同一套约定（后端给真值，打码是展示层的事）
+    pub access_token: Option<String>,
+    pub has_refresh_token: bool,
+    /// 该 Token 源是否开启自动刷新
+    pub auto_refresh: bool,
+}
+
+// ============================================================
+// 配置 CRUD
+// ============================================================
+
+#[tauri::command]
+pub async fn list_token_sources(
+    state: State<'_, AppState>,
+    workspace_id: i64,
+) -> AppResult<Vec<TokenSource>> {
+    with_conn(&state.pool, move |conn| {
+        repo::token::list_by_workspace(conn, workspace_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn create_token_source(
+    state: State<'_, AppState>,
+    workspace_id: i64,
+    folder_id: i64,
+    name: String,
+    fetch_request_id: i64,
+) -> AppResult<TokenSource> {
+    let name = clean_name(&name, "name")?;
+    with_conn(&state.pool, move |conn| {
+        repo::token::create(conn, workspace_id, folder_id, &name, fetch_request_id)
+    })
+    .await
+}
+
+/// 全量保存。仓储只校验文件夹存在，不校验 `is_token_source` 标记 ——
+/// 标记是 UI 的引导，不该做成数据库层的硬约束（先建源后打标记是合法顺序）。
+#[tauri::command]
+pub async fn save_token_source(
+    state: State<'_, AppState>,
+    source: TokenSource,
+) -> AppResult<TokenSource> {
+    let name = clean_name(&source.name, "name")?;
+    if source.skew_seconds < 0 {
+        return Err(AppError::InvalidInput {
+            field: "skewSeconds",
+            reason: "cannot be negative".into(),
+        });
+    }
+
+    with_conn(&state.pool, move |conn| {
+        repo::token::save(conn, &TokenSource { name, ..source })
+    })
+    .await
+}
+
+/// 硬删除（Token 配置属于「机器用的配置」，不进回收站；缓存行由外键带走）。
+#[tauri::command]
+pub async fn delete_token_source(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    with_conn(&state.pool, move |conn| repo::token::delete(conn, id)).await
+}
+
+/// 某条请求（按文件夹）实际会用到哪个 Token 源 —— 沿文件夹链向上找第一个。
+///
+/// 前端用它显示「当前生效的 Token 源」，免得用户对着三个配置猜到底哪个在起作用。
+#[tauri::command]
+pub async fn resolve_token_source(
+    state: State<'_, AppState>,
+    folder_id: Option<i64>,
+) -> AppResult<Option<TokenSource>> {
+    let Some(folder_id) = folder_id else {
+        return Ok(None);
+    };
+    with_conn(&state.pool, move |conn| {
+        let chain = repo::folder::ancestry(conn, folder_id)?;
+        let ids: Vec<i64> = chain.iter().map(|f| f.id).collect();
+        repo::token::first_in_chain(conn, &ids)
+    })
+    .await
+}
+
+// ============================================================
+// 状态与刷新
+// ============================================================
+
+#[tauri::command]
+pub async fn get_token_status(state: State<'_, AppState>, id: i64) -> AppResult<TokenStatus> {
+    let source = source_of(&state, id).await?;
+
+    let cache = {
+        let pool = state.pool.clone();
+        with_conn(&pool, move |conn| repo::token::get_cache(conn, id)).await?
+    };
+
+    Ok(status_of(&source, cache.as_ref()))
+}
+
+/// 强制刷新，忽略缓存（design.md §4.3 的「立即刷新」）。
+///
+/// 走的是同一个单飞锁：如果此刻正好有 5 个业务请求也在等刷新，
+/// 这次强制刷新**不会**变成第 6 次网络请求 —— 它排在同一个航班上。
+#[tauri::command]
+pub async fn refresh_token(state: State<'_, AppState>, id: i64) -> AppResult<TokenStatus> {
+    let source = source_of(&state, id).await?;
+    let env = active_env(&state).await?;
+
+    let deps = TokenDeps {
+        pool: &state.pool,
+        clients: &state.clients,
+        source: &source,
+        env: &env,
+        cancel: None,
+    };
+    state.tokens.refresh_now(&deps).await?;
+
+    // 刷完再把库里的那一行读回来作状态 —— 不直接拿刷新返回值拼，
+    // 免得「显示的状态」与「真的落库了什么」有第二条路径
+    let cache = {
+        let pool = state.pool.clone();
+        with_conn(&pool, move |conn| repo::token::get_cache(conn, id)).await?
+    };
+    Ok(status_of(&source, cache.as_ref()))
+}
+
+// ============================================================
+// 内部助手
+// ============================================================
+
+async fn source_of(state: &State<'_, AppState>, id: i64) -> AppResult<TokenSource> {
+    let pool = state.pool.clone();
+    with_conn(&pool, move |conn| repo::token::get(conn, id)).await
+}
+
+/// 激活环境的变量。取 token 的那个请求自己也可能写 `{{env.clientId}}`。
+async fn active_env(state: &State<'_, AppState>) -> AppResult<HashMap<String, String>> {
+    let pool = state.pool.clone();
+    with_conn(&pool, |conn| {
+        let Some(workspace) = repo::workspace::active(conn)? else {
+            return Ok(HashMap::new());
+        };
+        repo::env::active_vars(conn, workspace.id)
+    })
+    .await
+}
+
+fn status_of(
+    source: &TokenSource,
+    cache: Option<&crate::storage::models::TokenCache>,
+) -> TokenStatus {
+    let Some(cache) = cache else {
+        return TokenStatus {
+            has_cache: false,
+            expired: true,
+            expires_at: None,
+            remaining_seconds: None,
+            updated_at: None,
+            access_token: None,
+            has_refresh_token: false,
+            auto_refresh: source.auto_refresh,
+        };
+    };
+
+    let now = chrono::Utc::now();
+    let remaining = cache
+        .expires_at
+        .as_deref()
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|at| (at.with_timezone(&chrono::Utc) - now).num_seconds());
+
+    TokenStatus {
+        has_cache: true,
+        expired: is_expired(cache, source.skew_seconds, now),
+        expires_at: cache.expires_at.clone(),
+        remaining_seconds: remaining,
+        updated_at: Some(cache.updated_at.clone()),
+        access_token: Some(cache.access_token.clone()),
+        has_refresh_token: cache.refresh_token.is_some(),
+        auto_refresh: source.auto_refresh,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::models::TokenCache;
+
+    fn source(auto_refresh: bool) -> TokenSource {
+        TokenSource {
+            id: 1,
+            workspace_id: 1,
+            folder_id: 1,
+            name: "oauth".into(),
+            fetch_request_id: 1,
+            access_path: "$.a".into(),
+            refresh_path: "$.r".into(),
+            expires_in_path: "$.e".into(),
+            expires_in_unit: crate::storage::models::ExpiryUnit::Seconds,
+            refresh_request_id: None,
+            auto_refresh,
+            skew_seconds: 30,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+        }
+    }
+
+    fn cache(expires_at: Option<&str>) -> TokenCache {
+        TokenCache {
+            id: 1,
+            token_source_id: 1,
+            access_token: "tok".into(),
+            refresh_token: None,
+            expires_at: expires_at.map(str::to_string),
+            raw_response: None,
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn no_cache_is_reported_as_expired() {
+        let status = status_of(&source(true), None);
+        assert!(!status.has_cache);
+        assert!(status.expired, "从没取过就必须算过期，否则徽标会显示成有效");
+        assert_eq!(status.remaining_seconds, None);
+        assert_eq!(status.access_token, None);
+    }
+
+    #[test]
+    fn remaining_seconds_is_computed_from_expires_at() {
+        let at = (chrono::Utc::now() + chrono::Duration::seconds(100))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let status = status_of(&source(true), Some(&cache(Some(&at))));
+
+        let remaining = status.remaining_seconds.expect("算得出剩余秒数");
+        assert!((96..=100).contains(&remaining), "剩余秒数不对: {remaining}");
+        assert!(!status.expired, "还有 100 秒、skew 30 秒 → 仍然有效");
+        assert!(status.has_cache);
+    }
+
+    /// 永不过期的缓存：`remaining` 为 `None` 且不算过期
+    #[test]
+    fn cache_without_expiry_is_valid_forever() {
+        let status = status_of(&source(true), Some(&cache(None)));
+        assert!(status.has_cache);
+        assert!(!status.expired);
+        assert_eq!(status.remaining_seconds, None);
+        assert_eq!(status.expires_at, None);
+    }
+
+    /// 已经过去的过期时间 → 过期，且剩余是负数
+    #[test]
+    fn past_expiry_shows_negative_remaining() {
+        let at = (chrono::Utc::now() - chrono::Duration::seconds(60))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let status = status_of(&source(true), Some(&cache(Some(&at))));
+        assert!(status.expired);
+        assert!(status.remaining_seconds.unwrap() < 0);
+    }
+
+    #[test]
+    fn status_mirrors_auto_refresh_flag() {
+        assert!(status_of(&source(true), None).auto_refresh);
+        assert!(!status_of(&source(false), None).auto_refresh);
+    }
+}

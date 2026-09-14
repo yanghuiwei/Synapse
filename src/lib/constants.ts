@@ -27,7 +27,24 @@ export const SHORTCUTS = {
   focusSearch: { ctrlKey: true, code: "KeyK" },
   /** 发送当前请求 */
   send: { ctrlKey: true, code: "Enter" },
+  /** 切到「集合」。与 Ctrl+2 / Ctrl+3 一起覆盖最常用的三个板块 */
+  sectionCollections: { ctrlKey: true, code: "Digit1" },
+  sectionHistory: { ctrlKey: true, code: "Digit2" },
+  sectionTrash: { ctrlKey: true, code: "Digit3" },
 } as const satisfies Record<string, ShortcutDef>;
+
+/**
+ * 数字键 → 侧栏板块。
+ *
+ * 用 `event.code`（`Digit1`）而不是 `event.key`（"1"）：中文输入法下
+ * `event.key` 在部分布局里会变成别的字符，而 `code` 反映的是**物理按键**，
+ * 与键盘布局无关。
+ */
+export const SECTION_SHORTCUTS = [
+  { name: "sectionCollections", section: "collections" },
+  { name: "sectionHistory", section: "history" },
+  { name: "sectionTrash", section: "trash" },
+] as const;
 
 export type ShortcutName = keyof typeof SHORTCUTS;
 

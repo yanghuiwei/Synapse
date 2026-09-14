@@ -25,11 +25,16 @@ import {
  *
  * ⚠️ 与 `src-tauri/src/commands/settings.rs` 的 `keys` 模块同级；
  *    那个模块只做文档化，不做白名单，所以这里是唯一的拼写来源。
+ *
+ * ⚠️ **「当前环境」不在这里**，尽管这里曾经有过一个 `activeEnvironmentId`。
+ *    它的唯一真源是 `environment.is_active` 这一列（P4 收敛，见
+ *    `src-tauri/src/commands/env.rs` 顶部的说明）。两处都表达同一件事
+ *    的结果是「界面在这一处改、发送路径读那一处」，然后出现
+ *    「切换了环境但请求还是老变量」这种从代码上看不出因果的 bug。
  */
 export const SETTING_KEYS = {
   theme: "theme",
   locale: "locale",
-  activeEnvironmentId: "activeEnvironmentId",
   trashRetentionDays: "trashRetentionDays",
 } as const;
 

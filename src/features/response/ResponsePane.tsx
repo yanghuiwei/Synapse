@@ -19,6 +19,7 @@ import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
 import { ResponseViewer, type ResponseTab } from "./ResponseViewer";
+import { UnresolvedBanner } from "./UnresolvedBanner";
 
 const TABS: readonly TabItem<ResponseTab>[] = [
   { key: "body", labelKey: "response.tab.body" },
@@ -186,6 +187,10 @@ export function ResponsePane() {
           </span>
         ) : null}
       </div>
+
+      {/* 未解析的占位符挂在**响应上**（它就是这一次发送的属性），
+          所以横幅也画在响应区里 —— 而不是飘在请求区或弹一个 toast */}
+      <UnresolvedBanner placeholders={response?.unresolvedPlaceholders ?? []} />
 
       <div className="min-h-0 flex-1 overflow-hidden">{content}</div>
     </section>

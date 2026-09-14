@@ -39,6 +39,28 @@ export type HttpVersion = "auto" | "http1" | "http2";
 
 export type ExpiryUnit = "seconds" | "millis" | "absolute";
 
+/** API Key 注入到哪儿 */
+export type ApiKeyLocation = "header" | "query";
+
+/**
+ * 授权配置，与 Rust 的 `storage::models::AuthConfig` 一一对应。
+ *
+ * 内部标签枚举（`type` 字段判别），变体名两边都是 camelCase。
+ *
+ * `inherit` 的语义是「沿文件夹链向上找最近的非 inherit 配置」，由后端在
+ * 发送时解析（`http::pipeline`）—— 前端只负责显示「继承自哪里」。
+ *
+ * ⚠️ **前端的 `Record<string, unknown>` 时代结束了**：老库里存的是 `{}`，
+ * 后端把它宽松解析成 `inherit`（见 `AuthConfig::from_json`）。前端这边
+ * `schemas.ts` 同样给了兜底，读到认不出的形状就退回 `inherit`。
+ */
+export type AuthConfig =
+  | { type: "inherit" }
+  | { type: "none" }
+  | { type: "bearer"; token: string }
+  | { type: "basic"; username: string; password: string }
+  | { type: "apiKey"; key: string; value: string; location: ApiKeyLocation };
+
 /** 逐请求的发送设置，对应 `request.settings` JSON 列 */
 export interface RequestSettings {
   followRedirects: boolean;
@@ -73,6 +95,13 @@ export interface Folder {
   sortOrder: number;
   /** 是否被标记为 Token 源分组 */
   isTokenSource: boolean;
+  /**
+   * 这个分类给其下所有请求提供的授权（P4）。
+   *
+   * 之所以放在**分类**上：一个团队的内网接口往往共用一套 Bearer，
+   * 逐请求配一遍就是逐请求写错一遍的机会。
+   */
+  auth: AuthConfig;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -89,8 +118,7 @@ export interface ApiRequest {
   headers: KeyValueItem[];
   bodyType: BodyType;
   body: string;
-  /** TODO(P2/P4)：AuthConfig 结构待定稿，当前只做透传 */
-  auth: Record<string, unknown>;
+  auth: AuthConfig;
   settings: RequestSettings;
   preScript: string;
   testScript: string;
@@ -217,12 +245,62 @@ export interface RequestSpec {
   headers: KeyValueItem[];
   bodyType: BodyType;
   body: string;
+  auth: AuthConfig;
   settings: RequestSettings;
+  /**
+   * 这条请求挂在哪个分类下。
+   *
+   * 不是可有可无的元数据：Token 源分组（§4.3）与授权继承（§4.4）都要
+   * **沿分类链向上找**，所以它是这次发送语义的一部分。
+   * P2/P3 存下来的历史快照里没有这个字段 —— 缺失时按「无分类」处理。
+   */
+  folderId?: number | null;
 }
 
 export interface HttpHeader {
   name: string;
   value: string;
+}
+
+/** 占位符的命名空间。与 Rust `template::resolver::Namespace::as_str()` 一一对应 */
+export type PlaceholderNamespace =
+  | "func"
+  | "env"
+  | "token"
+  | "resp"
+  | "prev"
+  | "folder"
+  | "unknown";
+
+/**
+ * 这个占位符为什么没解析出来。
+ *
+ * 与 Rust `UnresolvedReason::as_str()` 一一对应，是**码**不是文案 ——
+ * 中文在 `zh-CN.ts` 的 `placeholder.reason.*` 里查。
+ */
+export type UnresolvedReason =
+  | "unknownNamespace"
+  | "badFunction"
+  | "envNotFound"
+  | "noTokenSource"
+  | "tokenUnavailable"
+  | "noResponse"
+  | "respPathMiss"
+  | "notSupported";
+
+/**
+ * 本次发送里**没能解析**的占位符。
+ *
+ * 它们的原文被原样留在了请求里 —— 也就是「你发出去的不是你以为的那串地址」。
+ * 挂在响应上而不是单开一条事件：它就是「这一次发送」的属性。
+ */
+export interface UnresolvedPlaceholder {
+  /** 原文，含花括号，如 `{{env.nope}}` */
+  raw: string;
+  namespace: PlaceholderNamespace;
+  /** 命名空间之后的部分，如 `nope` / `$.data.id` */
+  key: string;
+  reason: UnresolvedReason;
 }
 
 /**
@@ -254,4 +332,444 @@ export interface HttpResponsePayload {
   downloadMs: number;
   /** 端到端总耗时（含组装与解析，比 ttfb + download 略大） */
   totalMs: number;
+  /**
+   * 本次发送里没解析出来的占位符。
+   *
+   * 前端要把它显眼地摆出来：这些占位符的**原文**已经跟着请求发出去了，
+   * 99% 的情况是用户想要的接口根本没被调到（打到 `https://api.x/{{env.path}}`）。
+   */
+  unresolvedPlaceholders: UnresolvedPlaceholder[];
+}
+
+/**
+ * Token 源的运行状态（`get_token_status` / `refresh_token` 的返回）。
+ *
+ * 「还有多少秒过期」由**后端**算（判定逻辑只有一份，见 `http::token::is_expired`）。
+ * 前端自己拿 `expiresAt` 与 `skewSeconds` 再算一遍，两边迟早会在边界上分叉，
+ * 表现为「徽标说还有 5 秒，后端说已经过期了」。
+ */
+export interface TokenStatus {
+  /** 有没有缓存行。`false` = 从没取过 */
+  hasCache: boolean;
+  /** 已经过期（含 `skewSeconds` 提前量） */
+  expired: boolean;
+  /** 过期时间的绝对值；`null` = 永不过期 */
+  expiresAt: string | null;
+  /** 还剩多少秒。负数表示已经过去多久；`null` = 永不过期或没有缓存 */
+  remainingSeconds: number | null;
+  updatedAt: string | null;
+  /** 当前缓存的 access token。**打码是展示层的事**（见 `env.secretHint` 的同一套约定） */
+  accessToken: string | null;
+  hasRefreshToken: boolean;
+  autoRefresh: boolean;
+}
+
+// ============================================================
+// 集合管理 / 历史 / 回收站（P3）
+// ============================================================
+
+/** 级联软删除的计数（`delete_folder`） */
+export interface DeleteFolderResult {
+  folders: number;
+  requests: number;
+}
+
+/** 彻底删除一棵子树的计数（`purge_folder`） */
+export interface PurgeTreeResult {
+  folders: number;
+  requests: number;
+}
+
+/** 清空回收站的计数（`purge_trash`） */
+export interface PurgeTrashResult {
+  folders: number;
+  requests: number;
+  history: number;
+}
+
+/**
+ * 回收站的全部内容。
+ *
+ * 三块列表一次拿回：分三次请求会出现「分类已经出来了，历史还在转」
+ * 这种半截界面，而且用户在回收站里做的多半是「整体清空」，不是逐块看。
+ */
+export interface TrashContents {
+  folders: Folder[];
+  requests: ApiRequest[];
+  history: HistoryEntry[];
+}
+
+/** 一页历史 + 匹配总数（`list_history`） */
+export interface HistoryPage {
+  items: HistoryEntry[];
+  total: number;
+}
+
+/**
+ * 写一条历史的入参（`record_history`）。
+ *
+ * 与 `HistoryEntry` 的差别：没有 `id` / `deletedAt`（由后端生成），
+ * 也没有「执行时间」（后端用 `now_iso()` 取，避免前端时钟不准）。
+ */
+export interface NewHistoryEntry {
+  workspaceId: number;
+  /** 快照来自哪个已保存请求；null = 从未保存过的临时请求 */
+  requestId: number | null;
+  /** 冗余的名字快照 —— 请求被删掉后历史仍要能读 */
+  requestName: string;
+  snapshot: RequestSpec;
+  /** null = 网络层就失败了（此时 `error` 有值） */
+  status: number | null;
+  durationMs: number | null;
+  respSize: number | null;
+  /** 错误码字符串（如 `E_DNS`），不是给人读的句子 */
+  error: string | null;
+  environment: string | null;
+}
+
+// ============================================================
+// 导入器（P5）
+// ============================================================
+
+/** 识别出来的来源格式。加一种要同步 `importer::Format`。 */
+export type ImportFormat = "curl" | "postman" | "apipost" | "reqly";
+
+/**
+ * 同名冲突的处理方式。语义差异见 Rust 侧 `commands::import_::Conflict`：
+ * `merge` 更新、`duplicate` 建副本、`overwrite` 以文件为准（多出来的进回收站）。
+ */
+export type ConflictMode = "merge" | "duplicate" | "overwrite";
+
+/**
+ * 警告的种类，**机器可读**。文案在前端查表（后端只回码，不回句子）。
+ * 加一种要同步 `importer::WarningKind`。
+ */
+export type ImportWarningKind =
+  | "unknownArgument"
+  | "missingArgumentValue"
+  | "unsupportedField"
+  | "renamedDuplicate"
+  | "truncatedName"
+  | "generatedName"
+  | "skippedItem";
+
+export interface ImportWarning {
+  /** 出问题的对象名（接口名 / 分类名），没有就是 undefined */
+  subject?: string;
+  kind: ImportWarningKind;
+  /** 只给开发者看的细节，界面不展示 */
+  detail: string;
+}
+
+/** 一个节点在预览树里的处境 */
+export type DiffStatus = "new" | "update" | "skip" | "keep" | "remove";
+
+export type PreviewKind = "folder" | "request";
+
+export interface ImportCounts {
+  created: number;
+  updated: number;
+  skipped: number;
+  removed: number;
+}
+
+export interface PreviewNode {
+  name: string;
+  kind: PreviewKind;
+  status: DiffStatus;
+  method?: string;
+  url?: string;
+  children?: PreviewNode[];
+}
+
+export interface EnvPreview {
+  name: string;
+  varCount: number;
+  /** 同名环境已存在 → 变量会并进去，不会再多个环境出来 */
+  merged: boolean;
+}
+
+export interface ImportPreview {
+  format: ImportFormat;
+  counts: ImportCounts;
+  nodes: PreviewNode[];
+  environments: EnvPreview[];
+  warnings: ImportWarning[];
+}
+
+export interface ImportOutcome {
+  format: ImportFormat;
+  counts: ImportCounts;
+  environments: number;
+  warnings: ImportWarning[];
+}
+
+/**
+ * 导入时给「文件里没名字」的东西用的占位文案。
+ *
+ * 由**前端**送过去：这些名字会写进库、显示在侧栏上，属于界面文案。
+ * 后端硬编码一份中文的话，以后加英文界面就会露馅。
+ */
+export interface ImportLabels {
+  untitledFolder: string;
+  untitledRequest: string;
+  untitledCollection: string;
+}
+
+/** 一次导入的输入：内容 + 落点 + 占位文案 */
+export interface ImportSourceInput {
+  text: string;
+  workspaceId: number;
+  /** null = 工作区根 */
+  targetFolderId: number | null;
+  fileName?: string;
+  labels: ImportLabels;
+}
+
+// ============================================================
+// 压测（P6，design.md §7）
+// ============================================================
+
+/**
+ * 压测配置（design.md §7.1）。字段名与 Rust `LoadtestConfig` 一一对应。
+ *
+ * 刻意**没有**「持续时间 / 爬坡 / 停止条件」这几项：design.md §7.1 定稿的模型是
+ * 「固定并发 + 固定总请求数」，本工具不做开环加压（§7.5 把「恒定 RPS 加压」
+ * 和「精确的 QPS 阶梯爬坡」明确列为不做的事）。
+ */
+export interface LoadtestConfig {
+  concurrency: number;
+  total: number;
+  timeoutMs: number;
+  followRedirects: boolean;
+  /** 复用连接。关掉之后每个请求都要重做握手 —— 那是在测握手 */
+  keepAlive: boolean;
+  /** 每个 worker 两轮请求之间的间隔 */
+  thinkTimeMs: number;
+  httpVersion: HttpVersion;
+  /** 预热请求数，不计入统计 */
+  warmupRequests: number;
+}
+
+export interface LatencySummary {
+  minMs: number;
+  meanMs: number;
+  p50Ms: number;
+  p90Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+  maxMs: number;
+}
+
+export interface ThroughputSummary {
+  /** **有效**吞吐：只数成功的请求 */
+  avgRps: number;
+  peakRps: number;
+  /** 峰值是「按不足 1 秒的实际时长折算」出来的 —— 界面上要说明 */
+  peakWindowIsPartial: boolean;
+  totalBytes: number;
+  avgBytes: number;
+}
+
+export interface StatusBucket {
+  /**
+   * `null` = **没拿到响应**（连接失败 / 超时 / TLS）。
+   *
+   * 后端刻意用 null 而不是 0 当哨兵：0 不是合法状态码，但拿它当特殊值
+   * 意味着前端必须记住「0 是特殊的那一个」。
+   */
+  status: number | null;
+  count: number;
+}
+
+export interface ErrorBucket {
+  /** 后端错误码（`E_TIMEOUT` / `E_DNS` …），**不是文案** */
+  code: string;
+  count: number;
+  /** 最慢的若干条的序号，供界面直接跳到那一条 */
+  slowestSeqs: number[];
+  slowestMs: number;
+}
+
+export interface LoadtestSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  /** 0.0 ~ 1.0。**不是百分数** —— 谁显示谁乘 100 */
+  successRate: number;
+  elapsedMs: number;
+  /** 实际吞吐（含失败）。与 `throughput.avgRps` 不是同一个数，见 Rust `stats` 模块头 */
+  tps: number;
+  latency: LatencySummary;
+  throughput: ThroughputSummary;
+  statuses: StatusBucket[];
+  errors: ErrorBucket[];
+  /** 被用户取消的。**必须显示** —— 否则这份数字会被当成完整结果引用 */
+  cancelled: boolean;
+  /**
+   * 整轮里被冻结成同一个值的动态函数占位符（`{{$uuid}}` 这类）。
+   *
+   * 占位符只在开工前解析一次（见 Rust `loadtest::engine`），所以这些本该
+   * 「每个请求都不一样」的占位符在整轮里是同一个值。不一定错，但用户必须知道。
+   */
+  frozenFunctions: string[];
+}
+
+/** 压测进行中的一次进度快照（每 200ms 推一次） */
+export interface LoadtestProgress {
+  sent: number;
+  succeeded: number;
+  failed: number;
+  p95Ms: number;
+  /** 最近一个采样窗口的速率，不是从头算的平均值 */
+  currentRps: number;
+  elapsedMs: number;
+  /**
+   * 最近 50 条失败，**最新的在后**。
+   *
+   * 跟着进度事件一起推，而不是另开一个查询：失败日志的意义就是「跟着跑」，
+   * 每 200ms 多发一次 IPC 取它等于自己给压测加负载。
+   * 代价是每帧多带几十条，而正常压测里这个数组是空的。
+   */
+  recentFailures: FailureLine[];
+}
+
+/** 进度事件的载荷 */
+export interface LoadtestProgressEvent {
+  /** 前端生成的 runToken。同时只允许一轮，它用来**丢掉过期事件** */
+  token: string;
+  snapshot: LoadtestProgress;
+}
+
+/** 这一轮压的是哪个请求 */
+export interface LoadtestTarget {
+  /** 从哪条保存的请求发起；null = 对着未保存的草稿压测 */
+  requestId: number | null;
+  /** 请求的显示名，作为快照存进这一轮。空则后端退化成 `METHOD url` */
+  requestName: string | null;
+}
+
+/**
+ * 一轮压测的详情。
+ *
+ * `summary` 为 `null` = 这一轮还没跑完或跑失败没产出概要；`sampleCount` 为 0
+ * 而 `summary.total > 0` = 明细已被保留策略裁掉（图表画不出来，但概要可信）。
+ */
+export interface LoadtestRunDetail {
+  run: LoadtestRun;
+  summary: LoadtestSummary | null;
+  sampleCount: number;
+}
+
+export type ExportFormat = "html" | "csv" | "json";
+
+export interface ExportResult {
+  /** 落盘的绝对路径 */
+  path: string;
+  bytes: number;
+  format: ExportFormat;
+}
+
+/**
+ * 报表文案。
+ *
+ * 由前端送过去 —— 报表是唯一「后端产文本」的场景（一份要发给别人的成品文档
+ * 不能只有数字没有标签），但文案来源仍然只有一个：`zh-CN.ts`。
+ * 字段可缺省：缺的落到后端那份语言中立的兜底（P50 / RPS / Bytes 这类写法）。
+ */
+export interface ReportLabels {
+  lang?: string;
+  title?: string;
+  runId?: string;
+  target?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  elapsed?: string;
+  sectionConfig?: string;
+  sectionSummary?: string;
+  sectionCharts?: string;
+  sectionLatency?: string;
+  sectionThroughput?: string;
+  sectionStatus?: string;
+  sectionErrors?: string;
+  sectionSlowest?: string;
+  sectionNotes?: string;
+  chartLatency?: string;
+  chartRps?: string;
+  chartHistogram?: string;
+  requestsSent?: string;
+  successRate?: string;
+  tps?: string;
+  p95?: string;
+  min?: string;
+  mean?: string;
+  p50?: string;
+  p90?: string;
+  p99?: string;
+  max?: string;
+  avgRps?: string;
+  peakRps?: string;
+  totalBytes?: string;
+  avgBytes?: string;
+  status?: string;
+  count?: string;
+  code?: string;
+  seq?: string;
+  durationMs?: string;
+  concurrency?: string;
+  total?: string;
+  timeout?: string;
+  followRedirects?: string;
+  keepAlive?: string;
+  thinkTime?: string;
+  httpVersion?: string;
+  warmup?: string;
+  yes?: string;
+  no?: string;
+  noResponse?: string;
+  cancelledNotice?: string;
+  samplesPrunedNotice?: string;
+  frozenNotice?: string;
+  peakPartialNotice?: string;
+  notes?: string[];
+}
+
+/** 截断的失败日志行（进度事件里推的） */
+export interface FailureLine {
+  seq: number;
+  /** 服务端答了 4xx/5xx 时才有；没拿到响应时为 null */
+  status: number | null;
+  /** 错误码。服务端正常应答时为 null —— 那不是「没拿到响应」 */
+  code: string | null;
+  durationMs: number;
+  offsetMs: number;
+}
+
+/** 时间线上的一个点（一秒） */
+export interface TimelinePoint {
+  second: number;
+  /** 这一秒内**完成**的请求数（含失败） */
+  count: number;
+  p95Ms: number;
+}
+
+/** 延迟分布的一个桶，按 2 的幂划分 */
+export interface HistogramBucket {
+  lowerMs: number;
+  /** 上界（含） */
+  upperMs: number;
+  count: number;
+}
+
+/**
+ * 一轮压测的图表数据。
+ *
+ * **聚合在后端算好再给前端**：一轮 50 万条明细整体走 IPC 是几十 MB 的 JSON，
+ * 而图表真正需要的只是几十个聚合点。明细的去处是 CSV 导出与「最慢 N 条」表格。
+ */
+export interface LoadtestChart {
+  timeline: TimelinePoint[];
+  histogram: HistogramBucket[];
+  slowest: LoadtestSample[];
+  failures: LoadtestSample[];
 }

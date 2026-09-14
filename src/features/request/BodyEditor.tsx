@@ -4,6 +4,7 @@ import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { BodyType } from "@/lib/types";
+import { PlaceholderHint } from "./PlaceholderInput";
 
 interface BodyTypeOption {
   value: BodyType;
@@ -99,11 +100,16 @@ export function BodyEditor({
             : t("request.bodyPlaceholder")
         }
         className={cn(
-          "min-h-0 flex-1 resize-none bg-transparent p-2.5 outline-none",
+          "min-h-0 flex-1 resize-none bg-transparent p-2.5",
           "font-mono text-xs text-ink placeholder:font-sans placeholder:text-ink-faint",
           locked && "cursor-not-allowed text-ink-faint",
         )}
       />
+
+      {/* 请求体是多行的，套不上那套「两层叠加 + 常量同步」的高亮（镜像层得
+          同时复刻换行与两个方向的滚动，差一个字符就整段错位）。
+          一行提示足够回答问题：「我这段 body 里的占位符写对了没有」。 */}
+      <PlaceholderHint text={body} />
     </div>
   );
 }

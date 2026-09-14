@@ -54,4 +54,12 @@
   --radius-sm: var(--corner-sm);
   --radius-md: var(--corner-md);
   --radius-lg: var(--corner-lg);
+
+  /* 阴影。`--shadow-*` 是 Tailwind 的阴影命名空间（生成 shadow-e1 / shadow-e2），
+     右边引用 theme.css 的原始令牌 —— 名字不能撞，所以原始令牌叫 --shadow-1/2。 */
+  --shadow-e1: var(--shadow-1);
+  --shadow-e2: var(--shadow-2);
+
+  /* 模态遮罩。用法：`bg-scrim` */
+  --color-scrim: var(--scrim);
 }

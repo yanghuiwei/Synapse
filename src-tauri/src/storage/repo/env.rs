@@ -4,6 +4,9 @@
 //! * [`set_active`] —— 「同一工作区只有一个激活环境」是跨行约束，
 //!   必须在一个事务里先全部置 0 再置 1，否则中途失败会留下两个激活环境。
 //! * [`replace_vars`] —— 变量表编辑器是整表提交语义，先删后插要在同一事务里。
+//!
+//! [`merge_vars`] 是个例外：它**故意不带事务**，因为调用方（导入命令）
+//! 要把建环境、写变量、建请求收在同一个事务里。
 
 use rusqlite::{Connection, Row};
 
@@ -96,6 +99,28 @@ pub fn get_active(conn: &Connection, workspace_id: i64) -> AppResult<Option<Envi
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// 当前激活环境的变量表：键 → 值，**只含 `enabled = 1` 的**。
+///
+/// 停用（`enabled = 0`）的变量必须在这里就被滤掉，而不是留给解析器 ——
+/// 否则 `{{env.x}}` 会解析成功，用户却以为它已经停用了。
+/// 没有激活环境时返回空表（不是错误：`{{env.x}}` 会照常报「变量不存在」）。
+pub fn active_vars(
+    conn: &Connection,
+    workspace_id: i64,
+) -> AppResult<std::collections::HashMap<String, String>> {
+    let Some(active) = get_active(conn, workspace_id)? else {
+        return Ok(std::collections::HashMap::new());
+    };
+
+    let mut vars = std::collections::HashMap::new();
+    for var in list_vars(conn, active.id)? {
+        if var.enabled && !var.key.trim().is_empty() {
+            vars.insert(var.key, var.value);
+        }
+    }
+    Ok(vars)
 }
 
 pub fn create(conn: &Connection, workspace_id: i64, name: &str) -> AppResult<Environment> {
@@ -217,8 +242,46 @@ pub fn replace_vars(
     vars: &[EnvVar],
 ) -> AppResult<Vec<EnvVar>> {
     let tx = conn.transaction()?;
+    ensure_env(&tx, environment_id)?;
+    clear_vars(&tx, environment_id)?;
+    insert_vars(&tx, environment_id, vars)?;
+    tx.commit()?;
+    list_vars(conn, environment_id)
+}
 
-    let exists: i64 = tx.query_row(
+/// 合并变量：同名的用传入值改写，库里没有的追加到末尾，**库里其余的保留**。
+///
+/// 与 [`replace_vars`] 的差别是**覆盖范围**而不是写法：那个是整表替换
+/// （变量编辑器整表提交的语义），这个是给导入用的 ——
+/// 导入一份集合不该把用户自己往上加的变量一起冲掉。
+///
+/// 刻意**不开事务**：调用方（导入命令）要把「建环境 + 写变量 + 建请求」
+/// 收在同一个事务里，这里再开一个就成了嵌套事务，回滚边界会变得说不清。
+pub fn merge_vars(
+    conn: &Connection,
+    environment_id: i64,
+    incoming: &[EnvVar],
+) -> AppResult<Vec<EnvVar>> {
+    ensure_env(conn, environment_id)?;
+
+    let mut merged = list_vars(conn, environment_id)?;
+    for var in incoming {
+        match merged.iter_mut().find(|slot| slot.key == var.key) {
+            Some(slot) => {
+                slot.value = var.value.clone();
+                slot.is_secret = var.is_secret;
+            }
+            None => merged.push(var.clone()),
+        }
+    }
+
+    clear_vars(conn, environment_id)?;
+    insert_vars(conn, environment_id, &merged)?;
+    list_vars(conn, environment_id)
+}
+
+fn ensure_env(conn: &Connection, environment_id: i64) -> AppResult<()> {
+    let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM environment WHERE id = ?1",
         [environment_id],
         |r| r.get(0),
@@ -229,14 +292,20 @@ pub fn replace_vars(
             id: environment_id,
         });
     }
+    Ok(())
+}
 
-    tx.execute(
+fn clear_vars(conn: &Connection, environment_id: i64) -> AppResult<()> {
+    conn.execute(
         "DELETE FROM env_var WHERE environment_id = ?1",
         [environment_id],
     )?;
+    Ok(())
+}
 
+fn insert_vars(conn: &Connection, environment_id: i64, vars: &[EnvVar]) -> AppResult<()> {
     for (index, var) in vars.iter().enumerate() {
-        tx.execute(
+        conn.execute(
             "INSERT INTO env_var (environment_id, key, value, is_secret, enabled, sort_order)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
@@ -249,9 +318,7 @@ pub fn replace_vars(
             ],
         )?;
     }
-
-    tx.commit()?;
-    list_vars(conn, environment_id)
+    Ok(())
 }
 
 #[cfg(test)]

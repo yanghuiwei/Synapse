@@ -1,5 +1,5 @@
-import { Ban, Braces, ChevronDown, ListTree, Lock, Send, Settings2, Terminal } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Ban, Braces, ChevronDown, Gauge, ListTree, Lock, Send, Settings2, Terminal } from "lucide-react";
+import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/cn";
 import { HTTP_METHODS, methodTextClass } from "@/lib/http";
@@ -7,16 +7,17 @@ import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { KeyValueItem, RequestSettings } from "@/lib/types";
 import { useRequestStore } from "@/store/request";
-import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
+import { LoadTestPanel } from "@/features/loadtest/LoadTestPanel";
+import { AuthTab } from "./AuthTab";
 import { BodyEditor } from "./BodyEditor";
 import { KeyValueTable } from "./KeyValueTable";
 import { UrlBar } from "./UrlBar";
 
-type RequestTab = "params" | "headers" | "body" | "auth" | "scripts" | "settings";
+type RequestTab = "params" | "headers" | "body" | "auth" | "scripts" | "settings" | "loadtest";
 
 const TAB_LABEL: Record<RequestTab, MessageKey> = {
   params: "request.tab.params",
@@ -25,6 +26,7 @@ const TAB_LABEL: Record<RequestTab, MessageKey> = {
   auth: "request.tab.auth",
   scripts: "request.tab.scripts",
   settings: "request.tab.settings",
+  loadtest: "loadtest.tab",
 };
 
 const TAB_ICON: Record<RequestTab, typeof ListTree> = {
@@ -34,8 +36,15 @@ const TAB_ICON: Record<RequestTab, typeof ListTree> = {
   auth: Lock,
   scripts: Terminal,
   settings: Settings2,
+  loadtest: Gauge,
 };
 
+/**
+ * 页签顺序。
+ *
+ * 「压测」排在最后，因为它**不是**在编辑请求 —— 它是拿当前草稿去打一轮。
+ * 插在 body/auth 中间会让人以为它也是请求定义的一部分。
+ */
 const TAB_ORDER: readonly RequestTab[] = [
   "params",
   "headers",
@@ -43,6 +52,7 @@ const TAB_ORDER: readonly RequestTab[] = [
   "auth",
   "scripts",
   "settings",
+  "loadtest",
 ];
 
 /** 标签角标只数「真的会发出去」的行：勾选着的、并且有键名 */
@@ -174,39 +184,31 @@ function SettingsForm() {
 export function RequestPane() {
   const { t } = useI18n();
 
-  const activeRequestId = useUiStore((s) => s.activeRequestId);
+  // 「打开的是哪一份内容」由 store 的显式动作决定，这里**不**再看选中项 ——
+  // 历史快照能灌进编辑器却没有任何 id 可挂（见 store/request 里的注释）
   const requests = useWorkspaceStore((s) => s.requests);
-
-  const active = useMemo(
-    () => requests.find((r) => r.id === activeRequestId) ?? null,
-    [requests, activeRequestId],
-  );
 
   const draft = useRequestStore((s) => s.draft);
   const sourceId = useRequestStore((s) => s.sourceId);
+  const sourceName = useRequestStore((s) => s.sourceName);
+
+  // 已保存的请求可能在树上被改过名，显示时优先取工作区里的最新名字；
+  // 查不到（刚被删掉）就退回打开时的快照名
+  const openedName = useMemo(
+    () =>
+      sourceId === null
+        ? sourceName
+        : (requests.find((r) => r.id === sourceId)?.name ?? sourceName),
+    [requests, sourceId, sourceName],
+  );
   const runId = useRequestStore((s) => s.runId);
   const cancelling = useRequestStore((s) => s.cancelling);
   const patch = useRequestStore((s) => s.patch);
   const setRows = useRequestStore((s) => s.setRows);
-  const loadFrom = useRequestStore((s) => s.loadFrom);
   const send = useRequestStore((s) => s.send);
   const cancel = useRequestStore((s) => s.cancel);
 
   const [tab, setTab] = useState<RequestTab>("params");
-
-  /**
-   * 把选中的请求灌进草稿。
-   *
-   * 只在**选中项 id 变了**的时候灌 —— 不能盯着 `active` 这个对象：
-   * 工作区每次重新加载都会产生一批新对象，那时草稿会被"重置"，
-   * 用户正在敲的字就凭空消失了。这是这个面板最容易写错的一处。
-   */
-  const loadedId = useRef<number | null | undefined>(undefined);
-  useEffect(() => {
-    if (loadedId.current === activeRequestId) return;
-    loadedId.current = activeRequestId;
-    loadFrom(active);
-  }, [activeRequestId, active, loadFrom]);
 
   const tabs = useMemo<readonly TabItem<RequestTab>[]>(
     () =>
@@ -227,8 +229,8 @@ export function RequestPane() {
    * 用 `sourceId` 而不是「有没有选中」来判断"已保存"：选中的请求可能刚被删掉，
    * 而草稿还留着 —— 那时它就已经是个未保存的请求了，不该显示成保存过。
    */
-  const saved = active !== null && active.id === sourceId;
-  const headerLabel = saved ? active.name : t("common.unsaved");
+  const saved = sourceId !== null;
+  const headerLabel = openedName ?? t("common.unsaved");
 
   const BodyIcon = TAB_ICON[tab];
 
@@ -288,7 +290,11 @@ export function RequestPane() {
       </div>
 
       {/* 内容区 */}
-      {tab === "body" ? (
+      {tab === "loadtest" ? (
+        // 压测面板自带滚动与内边距（它的内容比一个表格复杂得多），
+        // 所以不像其它页签那样再套一层 overflow 容器
+        <LoadTestPanel className="min-h-0 flex-1" />
+      ) : tab === "body" ? (
         <BodyEditor
           className="min-h-0 flex-1"
           bodyType={draft.bodyType}
@@ -310,8 +316,12 @@ export function RequestPane() {
             valuePlaceholder={t("kv.value")}
           />
         </div>
+      ) : tab === "auth" ? (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <AuthTab />
+        </div>
       ) : (
-        // auth / scripts 分别是 P4 / P5 的事，先明确占位而不是留白
+        // scripts 是 P5 的事，先明确占位而不是留白
         <EmptyState
           icon={BodyIcon}
           title={t(TAB_LABEL[tab])}

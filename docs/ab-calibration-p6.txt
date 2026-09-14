@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running tests\loadtest_ab.rs (target\debug\deps\loadtest_ab-b3c824dc2e5ad591.exe)
+
+running 1 test
+test p95_agrees_with_apachebench ... 
+===== "uniform" （500 请求 / 50 并发）=====
+  P95 配对矩阵
+    准绳口径   ab -n 500 -c 50      vs 引擎默认(keep-alive)  ab= 128  ours= 127  偏差   0.78%  (允差 10%)
+    同策略     ab -k                 vs keep_alive=true  ab= 127  ours= 127  偏差   0.00%  (允差 10%)
+    两边新建   ab -n 500 -c 50      vs keep_alive=false  ab= 128  ours= 126  偏差   1.56%  (允差 20%)
+    交叉       ab -k                 vs keep_alive=false  ab= 127  ours= 126  偏差   0.79%  (允差 20%)
+  其余分位（仅报告）
+    P50  ab 默认= 109 (-k= 110)   ours 默认= 110 (no-ka= 107)   偏差 0.92% / 1.83%
+    P90  ab 默认= 125 (-k= 126)   ours 默认= 126 (no-ka= 125)   偏差 0.80% / 0.00%
+    P99  ab 默认= 130 (-k= 129)   ours 默认= 143 (no-ka= 128)   偏差 10.00% / 1.54%
+  Connection Times 的 Total 行（同策略两两对）
+    ab -k  vs 我们默认    min ab=  81 ours=  85   mean ab=109.0 ours=108.9   med ab= 110 ours= 110   max ab= 277 ours= 147
+    ab 默认 vs 我们新建   min ab=  81 ours=  82   mean ab=109.0 ours=107.4   med ab= 109 ours= 107   max ab= 254 ours= 131
+  引擎耗时 1154/1171ms · 服务端共收到 2000 个请求（ab 1000 + 我们 1000）
+
+===== "cliff" （500 请求 / 50 并发）=====
+  P95 配对矩阵
+    准绳口径   ab -n 500 -c 50      vs 引擎默认(keep-alive)  ab= 165  ours= 170  偏差   3.03%  (允差 10%)
+    同策略     ab -k                 vs keep_alive=true  ab= 174  ours= 170  偏差   2.30%  (允差 10%)
+    两边新建   ab -n 500 -c 50      vs keep_alive=false  ab= 165  ours= 171  偏差   3.64%  (允差 20%)
+    交叉       ab -k                 vs keep_alive=false  ab= 174  ours= 171  偏差   1.72%  (允差 20%)
+  其余分位（仅报告）
+    P50  ab 默认=  45 (-k=  48)   ours 默认=  46 (no-ka=  48)   偏差 2.22% / 6.67%
+    P90  ab 默认= 162 (-k= 161)   ours 默认=  86 (no-ka=  77)   偏差 46.91% / 52.47%
+    P99  ab 默认= 172 (-k= 176)   ours 默认= 172 (no-ka= 182)   偏差 0.00% / 5.81%
+  Connection Times 的 Total 行（同策略两两对）
+    ab -k  vs 我们默认    min ab=  41 ours=  43   mean ab= 60.0 ours= 60.2   med ab=  48 ours=  46   max ab= 251 ours= 183
+    ab 默认 vs 我们新建   min ab=  41 ours=  42   mean ab= 58.0 ours= 63.4   med ab=  45 ours=  48   max ab= 213 ours= 190
+  引擎耗时 754/775ms · 服务端共收到 2000 个请求（ab 1000 + 我们 1000）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.49s
+

@@ -17,18 +17,37 @@ import { useState } from "react";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
+import { useHistoryStore } from "@/store/history";
 import { useUiStore, type SidebarSection } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button, IconButton } from "@/features/ui/Button";
+import { ConfirmDialog } from "@/features/ui/Dialog";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { CollectionTree } from "@/features/collections/CollectionTree";
+import { EnvManager } from "@/features/env/EnvManager";
+import { ConnectedImportDialog } from "@/features/import/ImportDialog";
+import { HistoryList } from "@/features/history/HistoryList";
+import { RunList } from "@/features/loadtest/RunList";
+import { TrashBin } from "@/features/trash/TrashBin";
 
-/** 顶部的一枚操作按钮 */
+/**
+ * 顶部的一枚操作按钮。
+ *
+ * `id` 而不是内联回调：这张表是**模块级常量**，而回调要用到 store
+ * 与组件状态（确认框）。写在表里就得把 store 也搬到模块作用域，
+ * 于是「点按钮发生什么」会被拆到两个地方。现在是「表描述长相，
+ * `runAction` 描述行为」。
+ */
+type ActionId = "newRequest" | "newFolder" | "import" | "clearHistory" | "newEnv";
+
 interface SidebarAction {
+  id: ActionId;
   labelKey: MessageKey;
   icon: LucideIcon;
   danger?: boolean;
   primary?: boolean;
+  /** 还没实现的入口：画出来但点不动，比凭空消失更容易让人知道「以后会有」 */
+  disabled?: boolean;
 }
 
 interface SectionMeta {
@@ -49,9 +68,10 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyTitleKey: "common.empty",
     emptyDescKey: "sidebar.emptyCollections",
     actions: [
-      { labelKey: "sidebar.newRequest", icon: Plus, primary: true },
-      { labelKey: "sidebar.newFolder", icon: FolderPlus },
-      { labelKey: "sidebar.import", icon: Import },
+      { id: "newRequest", labelKey: "sidebar.newRequest", icon: Plus, primary: true },
+      { id: "newFolder", labelKey: "sidebar.newFolder", icon: FolderPlus },
+      // cURL / Postman / ApiPost / Reqly 四种来源（P5）
+      { id: "import", labelKey: "sidebar.import", icon: Import },
     ],
     searchable: true,
     searchPlaceholderKey: "sidebar.filterPlaceholder",
@@ -61,7 +81,7 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Clock,
     emptyTitleKey: "common.empty",
     emptyDescKey: "sidebar.emptyHistory",
-    actions: [{ labelKey: "history.clearAll", icon: Trash }],
+    actions: [{ id: "clearHistory", labelKey: "history.clearAll", icon: Trash }],
     searchable: true,
     searchPlaceholderKey: "history.searchPlaceholder",
   },
@@ -69,7 +89,7 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     titleKey: "nav.environments",
     emptyIcon: Globe,
     emptyTitleKey: "common.empty",
-    actions: [{ labelKey: "env.new", icon: Plus, primary: true }],
+    actions: [{ id: "newEnv", labelKey: "env.new", icon: Plus, primary: true }],
     searchable: true,
     searchPlaceholderKey: "common.search",
   },
@@ -86,7 +106,9 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Trash,
     emptyTitleKey: "common.empty",
     emptyDescKey: "history.emptyTrash",
-    actions: [{ labelKey: "history.deleteForever", icon: Trash, danger: true }],
+    // 「清空回收站」交给 `TrashBin` 自己画：它贴着那张总览，
+    // 还能把「3 个分类 / 12 个接口 / 40 条历史」写进确认文案
+    actions: [],
     searchable: false,
   },
   settings: {
@@ -98,14 +120,28 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
   },
 };
 
+/**
+ * 搜索框。
+ *
+ * 受控与否由 `value` 是否传入决定：集合树与历史各有自己的筛选状态
+ * （一个在 `ui` store、一个在 `history` store），而环境/压测那两个板块
+ * 还没有筛选逻辑 —— 那时它退回非受控，至少输入框本身是能用的。
+ */
 function SearchField({
   placeholder,
   className,
+  value,
+  onChange,
 }: {
   placeholder: string;
   className?: string;
+  value?: string;
+  onChange?: (value: string) => void;
 }) {
-  const [value, setValue] = useState("");
+  const [local, setLocal] = useState("");
+  const controlled = value !== undefined;
+  const current = controlled ? value : local;
+
   return (
     <div className={cn("relative", className)}>
       <Search
@@ -116,8 +152,13 @@ function SearchField({
       />
       <input
         type="search"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
+        // Ctrl+K 靠它找到这个输入框（见 App.tsx 的全局快捷键）
+        data-sidebar-search
+        value={current}
+        onChange={(e) => {
+          setLocal(e.target.value);
+          onChange?.(e.target.value);
+        }}
         placeholder={placeholder}
         className={cn(
           "h-7 w-full rounded-sm border border-line bg-surface pl-7 pr-2",
@@ -178,6 +219,48 @@ export function Sidebar() {
   const section = useUiStore((s) => s.section);
   const meta = SECTION_META[section];
 
+  const openCreateDialog = useUiStore((s) => s.openCreateDialog);
+  const openEnvDialog = useUiStore((s) => s.openEnvDialog);
+  const openImport = useUiStore((s) => s.openImport);
+  const filter = useUiStore((s) => s.filter);
+  const setFilter = useUiStore((s) => s.setFilter);
+  const historyKeyword = useHistoryStore((s) => s.keyword);
+  const setHistoryKeyword = useHistoryStore((s) => s.setKeyword);
+
+  const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
+
+  const runAction = (id: ActionId) => {
+    switch (id) {
+      case "newRequest":
+        // 建在哪儿由对话框决定（根级），之后想挪就拖
+        openCreateDialog("request", null);
+        break;
+      case "newFolder":
+        openCreateDialog("folder", null);
+        break;
+      case "clearHistory":
+        setClearHistoryOpen(true);
+        break;
+      case "newEnv":
+        // 走 ui store 而不是 local state：对话框的宿主在 `EnvManager`，
+        // 而这个按钮在 `Sidebar` 的标题区 —— 两棵子树隔着一层
+        openEnvDialog({ kind: "new" });
+        break;
+      case "import":
+        // 与「新建环境」同一个理由：按钮在标题区，对话框挂在下面
+        openImport();
+        break;
+    }
+  };
+
+  /** 搜索框接哪个 store —— 每个板块记自己那份筛选，切回来还是原样 */
+  const search =
+    section === "collections"
+      ? { value: filter, onChange: setFilter }
+      : section === "history"
+        ? { value: historyKeyword, onChange: setHistoryKeyword }
+        : { value: undefined, onChange: undefined };
+
   return (
     <aside className="flex h-full min-h-0 flex-col border-r border-line bg-canvas-subtle">
       {/* 标题行 */}
@@ -188,21 +271,27 @@ export function Sidebar() {
         {meta.actions.map((a) => {
           const Icon = a.icon;
           const label = t(a.labelKey);
+          const title = a.disabled ? `${label}（${t("common.comingSoon")}）` : label;
           return a.primary ? (
             <Button
-              key={a.labelKey}
+              key={a.id}
               size="sm"
               variant="primary"
               icon={<Icon size={13} strokeWidth={2.2} />}
+              disabled={a.disabled}
+              title={title}
+              onClick={() => runAction(a.id)}
             >
               {label}
             </Button>
           ) : (
             <IconButton
-              key={a.labelKey}
+              key={a.id}
               size="sm"
-              label={label}
+              label={title}
               variant={a.danger ? "danger" : "ghost"}
+              disabled={a.disabled}
+              onClick={() => runAction(a.id)}
             >
               <Icon size={14} strokeWidth={2} />
             </IconButton>
@@ -215,6 +304,8 @@ export function Sidebar() {
         <div className="shrink-0 px-2.5 pb-2">
           <SearchField
             placeholder={t(meta.searchPlaceholderKey ?? "common.search")}
+            value={search.value}
+            onChange={search.onChange}
           />
         </div>
       ) : null}
@@ -223,6 +314,14 @@ export function Sidebar() {
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
         {section === "collections" ? (
           <CollectionsBody />
+        ) : section === "history" ? (
+          <HistoryList />
+        ) : section === "environments" ? (
+          <EnvManager />
+        ) : section === "loadtest" ? (
+          <RunList />
+        ) : section === "trash" ? (
+          <TrashBin />
         ) : (
           <EmptyState
             icon={meta.emptyIcon}
@@ -232,6 +331,22 @@ export function Sidebar() {
           />
         )}
       </div>
+
+      {/* 清空历史是「能撤」的（记录进回收站），所以不套红色确认按钮 ——
+          红色留给真正不可撤销的那几个操作 */}
+      {clearHistoryOpen ? (
+        <ConfirmDialog
+          title={t("history.clearConfirmTitle")}
+          description={t("history.clearConfirm")}
+          confirmLabel={t("history.clearAll")}
+          onConfirm={() => void useHistoryStore.getState().clearAll()}
+          onClose={() => setClearHistoryOpen(false)}
+        />
+      ) : null}
+
+      {/* 挂在侧栏根节点上（它是个 portal），所以切板块不会把用户正在填的
+          导入内容卸掉 —— 填到一半去别的板块看一眼是常事 */}
+      <ConnectedImportDialog />
     </aside>
   );
 }

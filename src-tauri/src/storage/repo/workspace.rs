@@ -35,6 +35,15 @@ pub fn list(conn: &Connection) -> AppResult<Vec<Workspace>> {
     Ok(out)
 }
 
+/// 当前工作区。这一版只做单工作区体验（见文件头），所以就是列表里的第一个。
+///
+/// 与 [`ensure_default`] 的区别：这个函数**只读**，不建任何东西 ——
+/// 它会被请求流水线在每次发送前调用，写操作放在热路径上不合适。
+/// 返回 `None` 表示「还没有工作区」，调用方按空环境处理即可。
+pub fn active(conn: &Connection) -> AppResult<Option<Workspace>> {
+    Ok(list(conn)?.into_iter().next())
+}
+
 /// 按 id 取。已被软删除的也算「存在」—— 回收站要能读到它。
 pub fn get(conn: &Connection, id: i64) -> AppResult<Workspace> {
     let sql = format!("SELECT {COLUMNS} FROM workspace WHERE id = ?1");

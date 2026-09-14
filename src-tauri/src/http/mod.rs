@@ -12,9 +12,13 @@
 pub mod cancel;
 pub mod client;
 pub mod execute;
+pub mod pipeline;
+pub mod token;
 
 pub use cancel::{InflightGuard, InflightRegistry};
 pub use client::ClientCache;
 pub use execute::{
     execute, execute_with_cancel, BodyEncoding, HttpHeader, HttpResponsePayload, RequestSpec,
 };
+pub use pipeline::{Pipeline, Prepared};
+pub use token::{TokenDeps, TokenRefresher};
