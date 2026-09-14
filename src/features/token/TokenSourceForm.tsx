@@ -80,6 +80,25 @@ export function TokenSourceForm({
     [requests, value.folderId],
   );
 
+  /**
+   * 「刷新请求」下拉的选项。
+   *
+   * 当前值可能指向一个**已经不在这个分类下**的请求（被挪走或删了）。这种情况
+   * 不补一个占位项的话，`<select>` 找不到匹配的 option，会退回去显示第一项
+   * 「与获取 Token 的请求相同」—— 界面在撒谎，而刷新时走的仍是那个旧 id。
+   * 宁可写「已失效」，让用户自己动手改。
+   */
+  const refreshOptions = useMemo(() => {
+    const base = [
+      { value: "0", label: t("token.refreshRequestSame") },
+      ...candidates.map((r) => ({ value: String(r.id), label: `${r.method} ${r.name}` })),
+    ];
+
+    const current = value.refreshRequestId;
+    if (current === null || candidates.some((r) => r.id === current)) return base;
+    return [{ value: String(current), label: t("token.refreshRequestGone") }, ...base];
+  }, [candidates, value.refreshRequestId, t]);
+
   const folderName =
     folders?.find((f) => f.id === value.folderId)?.name ?? t("token.unsavedFolder");
 
@@ -146,6 +165,21 @@ export function TokenSourceForm({
             ]}
           />
         )}
+      </Field>
+
+      <Field label={t("token.refreshRequest")} hint={t("token.refreshRequestHint")}>
+        {/* 候选与上面那份是同一个列表：能换 Token 的接口同样得在这个分类下，
+            否则后端读不到它的定义（`load_fetch_spec` 会直接 NotFound）。
+            所以这里不是「缺省时随便挑一个」，缺省就是复用上面那个。 */}
+        <Select
+          value={String(value.refreshRequestId ?? 0)}
+          disabled={candidates.length === 0}
+          onChange={(raw) => {
+            const id = Number(raw);
+            patch({ refreshRequestId: id === 0 ? null : id });
+          }}
+          options={refreshOptions}
+        />
       </Field>
 
       <Group title={t("token.extractTitle")} icon={KeyRound}>

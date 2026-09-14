@@ -196,6 +196,23 @@ pub async fn commit_import(
     .await
 }
 
+/// 解析 + 落库，一步到位，**只吃一个连接**。
+///
+/// 存在的理由：`commit_import` 是 Tauri 命令（要 `State<'_, AppState>`），
+/// 非 Tauri 进程造不出来；而它内部真正干活的两步（[`build_plan`] / [`apply_plan`]）
+/// 的中间产物 `Plan` 是私有类型。把这一层暴露给 MCP 侧，是为了让
+/// 「AI 粘一段 curl」与「用户在界面里点导入」**走完全同一条落库路径** ——
+/// 各自拼一遍落库逻辑的话，冲突判定、名字去重、回收站行为迟早分叉。
+pub fn import_into_folder(
+    conn: &mut Connection,
+    source: &ImportSource,
+    conflict: Conflict,
+    include_environments: bool,
+) -> AppResult<ImportOutcome> {
+    let plan = build_plan(conn, source, conflict, include_environments)?;
+    apply_plan(conn, &plan)
+}
+
 // ============================================================
 // 计划
 // ============================================================

@@ -160,14 +160,7 @@ pub async fn start_loadtest(
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} {}", spec.method, spec.url));
 
-    let config_json = serde_json::to_value(StoredRunConfig {
-        target: StoredTarget {
-            method: &spec.method,
-            url: &spec.url,
-        },
-        config: &config,
-    })
-    .map_err(|e| AppError::Internal(format!("serialize loadtest run config: {e}")))?;
+    let config_json = stored_run_config(&spec, &config)?;
 
     let request_id = target.request_id;
     let run = with_conn(&state.pool, move |conn| {
@@ -282,8 +275,27 @@ async fn run_round(
     }
 }
 
+/// 把「这一轮压的是什么 + 配置」压成落库用的 JSON。
+///
+/// 抽成独立函数而不是留在 `start_loadtest` 里内联：MCP 侧（`mcp::tools`）也要
+/// 建 run 行，而**两边写进 `loadtest_run.config` 的形状必须一模一样** ——
+/// 否则桌面端读历史时，MCP 跑出来的那几轮解析不出目标地址。
+pub fn stored_run_config(
+    spec: &RequestSpec,
+    config: &LoadtestConfig,
+) -> AppResult<serde_json::Value> {
+    serde_json::to_value(StoredRunConfig {
+        target: StoredTarget {
+            method: &spec.method,
+            url: &spec.url,
+        },
+        config,
+    })
+    .map_err(|e| AppError::Internal(format!("serialize loadtest run config: {e}")))
+}
+
 /// 落库：写概要 → 批量写采样 → 裁旧明细。
-async fn persist_outcome(
+pub async fn persist_outcome(
     pool: SqlitePool,
     run_id: i64,
     outcome: RunOutcome,
@@ -322,7 +334,10 @@ async fn persist_outcome(
 ///
 /// 删不掉不报错：留下一行 `finished_at` 为空的记录，界面会显示成
 /// 「未完成」—— 那是实情，比把失败吞掉强。
-async fn discard_run(pool: &SqlitePool, run_id: i64) {
+///
+/// MCP 侧复用（`mcp::tools`）：那边同样是「引擎没产出概要就把 run 行抹掉」，
+/// 而收尾语义必须与桌面端一致 —— 一份实现，两处调用。
+pub async fn discard_run(pool: &SqlitePool, run_id: i64) {
     if let Err(e) = with_conn(pool, move |conn| repo::loadtest::delete_run(conn, run_id)).await {
         eprintln!("[reqly] failed to discard empty loadtest run #{run_id}: {e}");
     }

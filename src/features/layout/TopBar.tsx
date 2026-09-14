@@ -43,6 +43,10 @@ export function TopBar() {
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const setSection = useUiStore((s) => s.setSection);
+  // 顶栏这个「导入」与侧栏标题区那个是**同一个动作的两个入口**：
+  // 侧栏那个只在「集合」板块出现，而导入是全应用级的（往工作区里加东西），
+  // 不该逼用户先切回集合板块才能点。对话框本体只有一份（`ConnectedImportDialog`）。
+  const openImport = useUiStore((s) => s.openImport);
   // 顶栏也读真源：真源是 `environment.is_active` 列（见 store/env.ts）
   const environmentName = useEnvStore((s) => s.active?.name ?? null);
   const pendingTokens = useTokenStore((s) => tokenCounts(s).pending);
@@ -106,6 +110,7 @@ export function TopBar() {
         size="sm"
         variant="secondary"
         icon={<Import size={13} strokeWidth={2} />}
+        onClick={openImport}
       >
         {t("sidebar.import")}
       </Button>

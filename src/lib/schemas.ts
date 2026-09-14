@@ -127,6 +127,13 @@ export const apiRequestSchema = z.looseObject({
   headers: z.array(keyValueItemSchema),
   bodyType: bodyTypeSchema,
   body: z.string(),
+  /**
+   * 003 迁移新增的两列。与 `auth` 同理带 `.catch()` 兜底：**前端可能先于
+   * 后端更新**（浏览器里还开着旧 dev server），那时少这两个字段不该让
+   * 整个集合树打不开 —— 退回空快照即可，表现与升级前一致。
+   */
+  bodyByType: z.record(z.string(), z.string()).catch({}),
+  bodyRows: z.array(keyValueItemSchema).catch([]),
   // 老库里是 `{}`，Rust 侧宽松解析成 inherit；这里同样兜底（见 authConfigSchema）
   auth: authConfigSchema.catch({ type: "inherit" }),
   settings: requestSettingsSchema,
@@ -237,6 +244,14 @@ export const appInfoSchema = z.looseObject({
   appVersion: z.string(),
 });
 
+export const mcpSetupSchema = z.looseObject({
+  jsonSnippet: z.string(),
+  yamlSnippet: z.string(),
+  commandPath: z.string(),
+  dbPath: z.string(),
+  commandExists: z.boolean(),
+});
+
 // ---------------------------------------------------------------
 // 请求执行（P2）
 // ---------------------------------------------------------------
@@ -265,6 +280,9 @@ export const requestSpecSchema = z.looseObject({
   headers: z.array(keyValueItemSchema).catch([]),
   bodyType: bodyTypeSchema.catch("none"),
   body: z.string().catch(""),
+  // 分槽快照与键值行同样兜底：P2/P3 时期的历史快照里没有它们
+  bodyByType: z.record(z.string(), z.string()).catch({}),
+  bodyRows: z.array(keyValueItemSchema).catch([]),
   auth: authConfigSchema.catch({ type: "inherit" }),
   settings: requestSettingsSchema.catch(() => ({ ...DEFAULT_REQUEST_SETTINGS })),
   // 老快照里没有这个字段 —— 缺失按「无分类」处理，而不是整条记录打不开

@@ -35,6 +35,7 @@ import {
   loadtestRunDetailSchema,
   loadtestRunSchema,
   loadtestSampleSchema,
+  mcpSetupSchema,
   purgeTrashResultSchema,
   purgeTreeResultSchema,
   responsePayloadSchema,
@@ -68,6 +69,7 @@ import type {
   LoadtestRunDetail,
   LoadtestSample,
   LoadtestTarget,
+  McpSetup,
   NewHistoryEntry,
   PurgeTrashResult,
   PurgeTreeResult,
@@ -351,6 +353,17 @@ export const settings = {
 export const app = {
   info: (): Promise<AppInfo> =>
     call("get_app_info", undefined, { parse: (v) => appInfoSchema.parse(v) }),
+};
+
+/**
+ * MCP Server 的连接信息（P7）。
+ *
+ * 只有「取片段」这一个读操作 —— MCP 进程的启停由客户端负责，
+ * 桌面端既不需要也不该去管它（设计上两者只共享那个 SQLite 文件）。
+ */
+export const mcp = {
+  setup: (): Promise<McpSetup> =>
+    call("get_mcp_setup", undefined, { parse: (v) => mcpSetupSchema.parse(v) }),
 };
 
 export const workspaces = {

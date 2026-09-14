@@ -11,6 +11,7 @@ import type {
   RequestSettings,
   RequestSpec,
 } from "@/lib/types";
+import { rowsFrom, serializeUrlencoded } from "@/lib/urlencoded";
 import { useEnvStore } from "@/store/env";
 import { useHistoryStore } from "@/store/history";
 import { useWorkspaceStore } from "@/store/workspace";
@@ -31,7 +32,22 @@ export interface RequestDraft {
   params: KeyValueItem[];
   headers: KeyValueItem[];
   bodyType: BodyType;
+  /**
+   * **当前** `bodyType` 对应的那份内容，也是唯一会被发出去的一份。
+   *
+   * 它与 [`RequestDraft.bodyByType`] 是「镜子与原件」：切类型时先把旧值
+   * 写回原件、再从新那格取出来，所以切走再切回来内容还在。
+   */
   body: string;
+  /** 每种请求体类型各存一份（键是 `bodyType` 的字面量） */
+  bodyByType: Record<string, string>;
+  /**
+   * 键值型请求体（urlencoded）的行。
+   *
+   * 只有一份 —— 当前也只有 urlencoded 一种类型用到它。将来 multipart
+   * (`form`) 落地时**必须**改成按类型分槽，否则两者会串。
+   */
+  bodyRows: KeyValueItem[];
   auth: AuthConfig;
   settings: RequestSettings;
   /**
@@ -53,12 +69,30 @@ function emptyDraft(): RequestDraft {
     headers: [],
     bodyType: "none",
     body: "",
+    bodyByType: {},
+    bodyRows: [],
     // 新请求默认**继承分类**：绝大多数时候用户会在分类上配一次授权，
     // 然后希望下面所有请求自动用上
     auth: { type: "inherit" },
     settings: { ...DEFAULT_REQUEST_SETTINGS },
     folderId: null,
   };
+}
+
+/**
+ * 把分槽快照补齐成「一定包含当前类型」的一份。
+ *
+ * 当前类型**无条件以 `body` 列的值覆盖**，而不是反过来 —— `body` 是库里
+ * 其他写入者（MCP 的 `update_request`、curl 导入，以及以后任何脚本）唯一
+ * 会碰的列，拿快照当权威会把它们刚写进去的内容吃掉，症状是
+ * 「MCP 明明改了请求体，界面上还是旧的」。
+ */
+function bodySnapshot(
+  bodyType: BodyType,
+  body: string,
+  raw: Record<string, string>,
+): Record<string, string> {
+  return { ...raw, [bodyType]: body };
 }
 
 /**
@@ -76,6 +110,8 @@ function draftFrom(req: ApiRequest): RequestDraft {
     headers: req.headers.map((row) => ({ ...row })),
     bodyType: req.bodyType,
     body: req.body,
+    bodyByType: bodySnapshot(req.bodyType, req.body, req.bodyByType),
+    bodyRows: rowsFrom(req.bodyType, req.bodyRows, req.body),
     // 授权配置也是对象（apiKey 变体有字段），同样得拷贝
     auth: { ...req.auth },
     settings: { ...req.settings },
@@ -89,6 +125,10 @@ function draftFrom(req: ApiRequest): RequestDraft {
  * 导出给压测（P6）复用：那边也要把当前草稿发成真正的请求。
  * 两边各写一份的话，将来 `RequestSpec` 多一个字段时必然只改一处 ——
  * 而症状是「压测打的请求和单发的不一样」，很难查。
+ *
+ * `bodyByType` / `bodyRows` 后端**不读**（执行只看 `body`），带上它们是因为
+ * 同一份 `RequestSpec` 也被当历史快照存下来 —— 不带的话，从历史里打开一条
+ * urlencoded 请求，键值表会退化成一行纯文本。
  */
 export function draftToSpec(draft: RequestDraft): RequestSpec {
   return {
@@ -98,6 +138,8 @@ export function draftToSpec(draft: RequestDraft): RequestSpec {
     headers: draft.headers,
     bodyType: draft.bodyType,
     body: draft.body,
+    bodyByType: bodySnapshot(draft.bodyType, draft.body, draft.bodyByType),
+    bodyRows: draft.bodyRows,
     auth: draft.auth,
     settings: draft.settings,
     folderId: draft.folderId,
@@ -119,6 +161,8 @@ function draftFromSpec(spec: RequestSpec): RequestDraft {
     headers: spec.headers.map((row) => ({ ...row })),
     bodyType: spec.bodyType,
     body: spec.body,
+    bodyByType: bodySnapshot(spec.bodyType, spec.body, spec.bodyByType),
+    bodyRows: rowsFrom(spec.bodyType, spec.bodyRows, spec.body),
     auth: { ...spec.auth },
     settings: { ...spec.settings },
     // 历史快照可能来自 P2/P3，那时没有这个字段 —— 缺失就是「无分类」。
@@ -159,6 +203,64 @@ function sleep(ms: number): Promise<void> {
 interface SaveTarget {
   id: number;
   draft: RequestDraft;
+}
+
+/** 一次执行的结果快照（就是 state 里那四个字段） */
+interface ResultSlot {
+  response: HttpResponsePayload | null;
+  error: ipc.IpcError | null;
+  cancelled: boolean;
+  finishedAt: number | null;
+}
+
+/**
+ * 每条请求最近一次执行的结果。
+ *
+ * ## 为什么要存
+ *
+ * 响应区是按**请求身份**存在的：发完 A 去看 B，再切回 A，上次的响应应该还在。
+ * 而 `openRequest` 会把草稿整个换掉 —— 结果不跟着存一份的话，切回来只剩空态，
+ * 用户得重发一次才能再看一眼刚才的返回。
+ *
+ * ## 为什么放模块级 `Map` 而不是 store 的 state
+ *
+ * 它是**只写不读的旁存**：组件读的始终是 store 顶层那几个字段，
+ * 槽只在「切走」「切回」两个瞬间被碰。放进 state 只会让每次发送都多触发
+ * 一轮与渲染无关的更新。
+ */
+const resultSlots = new Map<string, ResultSlot>();
+
+/**
+ * 槽的上限，超了丢最早放入的。
+ *
+ * 一个槽里躺着完整的响应体（可能是几 MB），不设上限就是慢性泄漏 ——
+ * 点开 200 个请求之后，内存里就真的压着 200 份响应。
+ */
+const MAX_RESULT_SLOTS = 40;
+
+/**
+ * 一条请求对应哪个槽。
+ *
+ * 只有**已保存的请求**才有槽：没保存的草稿没有稳定身份，切走再切回来
+ * 连 URL 都可能变了，拿旧结果填上去是张冠李戴 —— 比空着更坏。
+ * 历史快照同理（每次 `openSpec` 都是另一份内容），所以两者一律返回 `null`。
+ */
+function slotKey(sourceId: number | null): string | null {
+  return sourceId === null ? null : `req:${sourceId}`;
+}
+
+/** 把一份结果存进它的槽。`key` 为 `null` 时什么都不做（见 `slotKey`） */
+function stashResult(key: string | null, slot: ResultSlot): void {
+  if (key === null) return;
+  // 先删再插：`Map` 的迭代顺序就是插入顺序，这样「最早放入的」始终排在开头，
+  // 反复读写的那个槽不会因为一直没动过而被当成旧的淘汰掉
+  resultSlots.delete(key);
+  resultSlots.set(key, slot);
+  while (resultSlots.size > MAX_RESULT_SLOTS) {
+    const oldest = resultSlots.keys().next();
+    if (oldest.done) break;
+    resultSlots.delete(oldest.value);
+  }
 }
 
 /** 待写盘的定时器。放模块级而不是 state：它不需要触发重渲染 */
@@ -217,6 +319,10 @@ function draftFields(draft: RequestDraft): Partial<ApiRequest> {
     headers: draft.headers,
     bodyType: draft.bodyType,
     body: draft.body,
+    // 两个分槽字段**必须**一起落库：漏了 `bodyByType` 的表现是
+    // 「保存过再切类型，别的类型的内容还是没了」—— 而那正是这次要修的问题本身
+    bodyByType: bodySnapshot(draft.bodyType, draft.body, draft.bodyByType),
+    bodyRows: draft.bodyRows,
     // 授权**必须**落库：用户在授权页签改完之后多半不会点保存，
     // 靠的就是自动保存。漏了这一个字段的表现是「切走再切回来，授权没了」——
     // 而请求本身看起来完全正常
@@ -252,12 +358,26 @@ export interface RequestState {
   /** 已经点了取消、但后端还没回话 —— 按钮要立刻有反应 */
   cancelling: boolean;
 
+  /**
+   * 当前展示的那次执行的结果。
+   *
+   * 这几个字段**是按请求存的**：切到别的请求时它们会被存进 `resultSlots`，
+   * 切回来再取出来 —— 所以「发完 A 去看 B，再切回 A」时 A 的响应还在。
+   * 存取的时机只在 `openRequest` / `openSpec` 两处。
+   */
   response: HttpResponsePayload | null;
   error: ipc.IpcError | null;
   /** 上一次执行是被用户取消的（不是失败，所以要区别对待） */
   cancelled: boolean;
   /** 上一次执行结束的时间戳，用于「刚刚 / 3 秒前」这类相对时间 */
   finishedAt: number | null;
+  /**
+   * 上面四个字段属于哪一条请求。
+   *
+   * `null` = 没有稳定归属（新建的空白草稿、历史快照），那两种情况的结果
+   * 不缓存 —— 见 `slotKey` 里的理由。
+   */
+  resultKey: string | null;
 
   // ---- 打开内容 ----
   //
@@ -273,6 +393,15 @@ export interface RequestState {
   patch: (patch: Partial<RequestDraft>) => void;
   /** 整块替换键值表（params / headers 共用一套编辑器） */
   setRows: (which: "params" | "headers", rows: KeyValueItem[]) => void;
+  /**
+   * 切换请求体类型。
+   *
+   * 这是**唯一**允许改 `bodyType` 的入口 —— 走 `patch({ bodyType })` 会跳过
+   * 「把当前内容写回它自己那一格」这一步，切走再切回来内容就空了。
+   */
+  setBodyType: (bodyType: BodyType) => void;
+  /** 整块替换 urlencoded 的键值行，并同步 `body`（后端只认它） */
+  setBodyRows: (rows: KeyValueItem[]) => void;
 
   send: () => Promise<void>;
   cancel: () => Promise<void>;
@@ -302,6 +431,7 @@ export const useRequestStore = create<RequestState>((set, get) => ({
   error: null,
   cancelled: false,
   finishedAt: null,
+  resultKey: null,
 
   openRequest: (req) => {
     // 换请求前先把没落库的改动写回去 —— 否则「改完立刻点下一个」
@@ -313,16 +443,34 @@ export const useRequestStore = create<RequestState>((set, get) => ({
     // 即发即忘 —— 后端把它当成一次正常的用户取消。
     void get().cancel();
 
+    // 结果跟着请求走：先把上一条的结果存进它的槽，再从新那条的槽里取回来
+    const before = get();
+    stashResult(before.resultKey, {
+      response: before.response,
+      error: before.error,
+      cancelled: before.cancelled,
+      finishedAt: before.finishedAt,
+    });
+
+    const resultKey = slotKey(req?.id ?? null);
+    const slot = resultKey === null ? undefined : resultSlots.get(resultKey);
+
     set({
       draft: req ? draftFrom(req) : emptyDraft(),
       sourceId: req?.id ?? null,
       sourceName: req?.name ?? null,
       dirty: false,
-      // 结果跟着请求走：换了请求就不该再显示上一个的响应
-      response: null,
-      error: null,
-      cancelled: false,
-      finishedAt: null,
+      resultKey,
+      // `runId` 必须在这里清掉：上面那次 `cancel()` 是异步的，它靠 `send()`
+      // 收尾时「runId 还是不是自己」来判断有没有被顶掉。不清的话，
+      // 被取消的旧请求会把「已取消」写到刚打开的新请求头上 ——
+      // 而新请求的槽里明明还存着一份好好的响应，切回来就变成「已取消」了
+      runId: null,
+      cancelling: false,
+      response: slot?.response ?? null,
+      error: slot?.error ?? null,
+      cancelled: slot?.cancelled ?? false,
+      finishedAt: slot?.finishedAt ?? null,
     });
   },
 
@@ -330,6 +478,17 @@ export const useRequestStore = create<RequestState>((set, get) => ({
     cancelAutosave();
     void flushAutosave();
     void get().cancel();
+
+    // 历史快照是一次性的（`slotKey` 拿到 null 就返回 null），这一份的结果不缓存；
+    // 但**上一条**的结果要照常存好 —— 用户在历史里来回翻，切回某条请求时
+    // 它上次的响应还得在
+    const before = get();
+    stashResult(before.resultKey, {
+      response: before.response,
+      error: before.error,
+      cancelled: before.cancelled,
+      finishedAt: before.finishedAt,
+    });
 
     set({
       draft: draftFromSpec(spec),
@@ -339,6 +498,11 @@ export const useRequestStore = create<RequestState>((set, get) => ({
       sourceId: null,
       sourceName: name,
       dirty: false,
+      resultKey: null,
+      // 与 `openRequest` 同理：在跑的那次已被上面掐掉，
+      // 它的收尾不该再往这一份内容上写状态
+      runId: null,
+      cancelling: false,
       response: null,
       error: null,
       cancelled: false,
@@ -346,15 +510,57 @@ export const useRequestStore = create<RequestState>((set, get) => ({
     });
   },
 
-  // 下面两个是唯一会改草稿的入口，所以「标脏 + 排自动保存」写在这里就够，
+  // 下面几个是唯一会改草稿的入口，所以「标脏 + 排自动保存」写在这里就够，
   // 不需要每个调用点都记得调一次
-  patch: (patch) => {
-    set((s) => ({ draft: { ...s.draft, ...patch }, dirty: true }));
+  patch: (next) => {
+    set((s) => {
+      const draft = { ...s.draft, ...next };
+      // `body` 是当前类型那一格的**镜子**，改它就得同步原件 ——
+      // 否则切走再切回来，取回的是改动之前的值
+      if (next.body !== undefined) {
+        draft.bodyByType = bodySnapshot(s.draft.bodyType, next.body, s.draft.bodyByType);
+      }
+      return { draft, dirty: true };
+    });
     scheduleAutosave();
   },
 
   setRows: (which, rows) => {
     set((s) => ({ draft: { ...s.draft, [which]: rows }, dirty: true }));
+    scheduleAutosave();
+  },
+
+  setBodyType: (bodyType) => {
+    if (get().draft.bodyType === bodyType) return;
+
+    set((s) => {
+      const d = s.draft;
+      // 先把当前这份写回它自己的格子，再取新那格 —— 顺序反过来等于没存
+      const bodyByType = bodySnapshot(d.bodyType, d.body, d.bodyByType);
+      // `bodyRows` 刻意**不动**：它只服务 urlencoded 一种类型，切到别处再切
+      // 回来时那几行得原样还在（包括「未勾选」这种只存在于界面上的状态）。
+      // 若在这里从 body 重新解析，未勾选的行就悄悄没了。
+      return {
+        draft: { ...d, bodyType, bodyByType, body: bodyByType[bodyType] ?? "" },
+        dirty: true,
+      };
+    });
+    scheduleAutosave();
+  },
+
+  setBodyRows: (rows) => {
+    // 拼串在这里做一次，此后 `body` 就是权威 —— 保存、发送、压测三条路径
+    // 都只读它（见 lib/urlencoded 里「为什么序列化放在前端」）
+    const body = serializeUrlencoded(rows);
+    set((s) => ({
+      draft: {
+        ...s.draft,
+        bodyRows: rows,
+        body,
+        bodyByType: bodySnapshot(s.draft.bodyType, body, s.draft.bodyByType),
+      },
+      dirty: true,
+    }));
     scheduleAutosave();
   },
 
@@ -441,13 +647,18 @@ export const useRequestStore = create<RequestState>((set, get) => ({
     await flushAutosave();
   },
 
-  clearResult: () =>
+  clearResult: () => {
+    // 连槽一起清：只清顶层字段的话，切走再切回来那个被「关掉」的响应
+    // 会从槽里复活，看起来像是清不掉
+    const { resultKey } = get();
+    if (resultKey !== null) resultSlots.delete(resultKey);
     set({
       response: null,
       error: null,
       cancelled: false,
       finishedAt: null,
-    }),
+    });
+  },
 }));
 
 /**

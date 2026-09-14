@@ -22,10 +22,12 @@ export interface TokenState {
   /** 强制刷新 —— 走的是与业务请求同一个单飞锁 */
   refresh: (id: number) => Promise<boolean>;
 
+  /**
+   * 新建。收的是表单那份完整草稿，而不只是「名字 + 获取请求」——
+   * 后端那条命令只写最小的那一行，剩下的由这里补（理由见实现里的注释）。
+   */
   create: (
-    folderId: number,
-    name: string,
-    fetchRequestId: number,
+    draft: Omit<TokenSource, "id" | "createdAt" | "updatedAt">,
   ) => Promise<TokenSource | null>;
   save: (source: TokenSource) => Promise<TokenSource | null>;
   remove: (id: number) => Promise<boolean>;
@@ -101,14 +103,35 @@ export const useTokenStore = create<TokenState>((set, get) => ({
     }
   },
 
-  create: async (folderId, name, fetchRequestId) => {
+  create: async (draft) => {
     const workspaceId = currentWorkspaceId();
     if (workspaceId === null) return fail(null);
 
     try {
-      const created = await ipc.tokens.create(workspaceId, folderId, name, fetchRequestId);
+      const created = await ipc.tokens.create(
+        workspaceId,
+        draft.folderId,
+        draft.name,
+        draft.fetchRequestId,
+      );
+
+      // `create_token_source` 只写「名字 + 获取请求」两个字段（其余落到列默认值），
+      // 所以这里接着补一次全量保存，把用户在表单里填的提取路径、刷新请求、
+      // 提前量一起落库。
+      //
+      // 为什么不给那条命令再加 8 个参数：那要连着改 Rust 命令、仓储和
+      // 一整组测试，而 `save_token_source` 早就在往同一张表写同一批字段了 ——
+      // 两条路径维护同一份数据，迟早会有一份忘了改。
+      //
+      // 没配「刷新请求」时跳过这一趟：那是绝大多数配置的形状，
+      // 不值得为此多走一次 IPC。
+      const saved =
+        draft.refreshRequestId === null
+          ? created
+          : await ipc.tokens.save({ ...created, ...draft, workspaceId });
+
       await get().load();
-      return created;
+      return saved;
     } catch (e) {
       return fail(e);
     }

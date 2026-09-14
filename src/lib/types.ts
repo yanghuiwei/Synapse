@@ -117,7 +117,26 @@ export interface ApiRequest {
   params: KeyValueItem[];
   headers: KeyValueItem[];
   bodyType: BodyType;
+  /**
+   * **当前** `bodyType` 对应的那份内容，也是唯一会被真正发出去的一份。
+   *
+   * 它与下面两个字段的关系是「镜子与原件」：`bodyByType` 是每种类型各存
+   * 一份的原件，`body` 永远是当前选中那一格的副本。这样后端 `build_body`、
+   * 压测、MCP 三条读取路径都只需要看 `body`，一行都不用改。
+   */
   body: string;
+  /**
+   * 每种请求体类型各存一份的内容快照，形如 `{ json: "…", raw: "hello" }`。
+   *
+   * 键是 `string` 而不是 `BodyType`：库里可能留着更早版本写下的类型名，
+   * 用枚举做键会让整条记录读不出来（对应 Rust 侧 `BTreeMap<String, String>`）。
+   */
+  bodyByType: Record<string, string>;
+  /**
+   * 键值型请求体（当前只有 urlencoded）的行，形状与 `params` / `headers` 一致，
+   * 所以能直接复用键值表组件与占位符高亮。
+   */
+  bodyRows: KeyValueItem[];
   auth: AuthConfig;
   settings: RequestSettings;
   preScript: string;
@@ -228,6 +247,21 @@ export interface AppInfo {
   appVersion: string;
 }
 
+/**
+ * MCP 客户端的连接信息（P7）。
+ *
+ * 两个配置片段由后端拼（`mcp::config_gen`）—— 路径转义（反斜杠、空格）是
+ * **格式相关**的知识，前端再拼一遍就是第二份实现，两份迟早分叉。
+ */
+export interface McpSetup {
+  jsonSnippet: string;
+  yamlSnippet: string;
+  commandPath: string;
+  dbPath: string;
+  /** MCP 可执行文件是否真的在那个路径上；开发态没编过 bin 时为 false */
+  commandExists: boolean;
+}
+
 // ============================================================
 // 请求执行（P2）
 // ============================================================
@@ -245,6 +279,16 @@ export interface RequestSpec {
   headers: KeyValueItem[];
   bodyType: BodyType;
   body: string;
+  /**
+   * 每种请求体类型各存一份的内容快照。
+   *
+   * 后端**不读**这两个字段（执行只看 `body`）。放在这里是因为历史记录
+   * 存的就是一份 `RequestSpec` 快照 —— 不带上的话，从历史里打开一条
+   * urlencoded 请求，表格会退化成一行 `a=1&b=2` 纯文本。
+   */
+  bodyByType: Record<string, string>;
+  /** 键值型请求体（urlencoded）的行。后端同样不读 */
+  bodyRows: KeyValueItem[];
   auth: AuthConfig;
   settings: RequestSettings;
   /**

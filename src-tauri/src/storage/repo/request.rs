@@ -7,6 +7,8 @@
 //! `query_map` 的映射闭包只能返回 `rusqlite::Result`，
 //! 而 JSON 解析失败要冒泡成我们自己的错误类型（见 `parse_json_column` 的说明）。
 
+use std::collections::BTreeMap;
+
 use rusqlite::{Connection, Row};
 use serde_json::Value;
 
@@ -16,8 +18,8 @@ use crate::storage::now_iso;
 use crate::storage::repo::{opt_text, parse_json_column, to_json_column, ORDER_BY_SORT};
 
 const COLUMNS: &str = "id, folder_id, workspace_id, name, method, url, params, headers, \
-     body_type, body, auth, settings, pre_script, test_script, sort_order, \
-     created_at, updated_at, deleted_at";
+     body_type, body, body_by_type, body_rows, auth, settings, pre_script, test_script, \
+     sort_order, created_at, updated_at, deleted_at";
 
 fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
     let params_raw: String = row.get("params")?;
@@ -25,6 +27,8 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
     let auth_raw: String = row.get("auth")?;
     let settings_raw: String = row.get("settings")?;
     let body_type_raw: String = row.get("body_type")?;
+    let body_by_type_raw: String = row.get("body_by_type")?;
+    let body_rows_raw: String = row.get("body_rows")?;
 
     Ok(ApiRequest {
         id: row.get("id")?,
@@ -37,6 +41,11 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
         headers: parse_json_column::<Vec<KeyValueItem>>(&headers_raw, "request.headers")?,
         body_type: BodyType::parse(&body_type_raw),
         body: row.get("body")?,
+        body_by_type: parse_json_column::<BTreeMap<String, String>>(
+            &body_by_type_raw,
+            "request.body_by_type",
+        )?,
+        body_rows: parse_json_column::<Vec<KeyValueItem>>(&body_rows_raw, "request.body_rows")?,
         // 宽松解析：存量值是 `{}`（P2 起 auth 一直只做透传），见 AuthConfig 的注释
         auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "request.auth")?),
         settings: parse_json_column(&settings_raw, "request.settings")?,
@@ -138,20 +147,22 @@ pub fn create(
 pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
     let affected = conn.execute(
         "UPDATE request SET
-           folder_id   = ?2,
-           name        = ?3,
-           method      = ?4,
-           url         = ?5,
-           params      = ?6,
-           headers     = ?7,
-           body_type   = ?8,
-           body        = ?9,
-           auth        = ?10,
-           settings    = ?11,
-           pre_script  = ?12,
-           test_script = ?13,
-           sort_order  = ?14,
-           updated_at  = ?15
+           folder_id    = ?2,
+           name         = ?3,
+           method       = ?4,
+           url          = ?5,
+           params       = ?6,
+           headers      = ?7,
+           body_type    = ?8,
+           body         = ?9,
+           body_by_type = ?10,
+           body_rows    = ?11,
+           auth         = ?12,
+           settings     = ?13,
+           pre_script   = ?14,
+           test_script  = ?15,
+           sort_order   = ?16,
+           updated_at   = ?17
          WHERE id = ?1",
         rusqlite::params![
             req.id,
@@ -163,6 +174,8 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
             to_json_column(&req.headers, "request.headers")?,
             req.body_type.as_db_str(),
             req.body,
+            to_json_column(&req.body_by_type, "request.body_by_type")?,
+            to_json_column(&req.body_rows, "request.body_rows")?,
             serde_json::to_string(&req.auth)
                 .map_err(|e| AppError::Internal(format!("request.auth: {e}")))?,
             to_json_column(&req.settings, "request.settings")?,
@@ -217,10 +230,12 @@ pub fn duplicate(conn: &Connection, id: i64, name: &str) -> AppResult<ApiRequest
     conn.execute(
         "INSERT INTO request
            (folder_id, workspace_id, name, method, url, params, headers,
-            body_type, body, auth, settings, pre_script, test_script,
+            body_type, body, body_by_type, body_rows,
+            auth, settings, pre_script, test_script,
             sort_order, created_at, updated_at)
          SELECT folder_id, workspace_id, ?2, method, url, params, headers,
-                body_type, body, auth, settings, pre_script, test_script,
+                body_type, body, body_by_type, body_rows,
+                auth, settings, pre_script, test_script,
                 ?3, ?4, ?4
          FROM request WHERE id = ?1",
         rusqlite::params![id, name, next_order, now],
@@ -349,6 +364,9 @@ mod tests {
         assert_eq!(r.settings, RequestSettings::default());
         // 建表默认是 `'{}'`，读出来是「不注入授权」而不是报错
         assert_eq!(r.auth, AuthConfig::Inherit);
+        // 003 的两列默认是**空快照**：前端读到 `{}` 会用 body 兜底填当前类型
+        assert!(r.body_by_type.is_empty());
+        assert!(r.body_rows.is_empty());
     }
 
     #[test]
@@ -363,6 +381,12 @@ mod tests {
         r.headers = vec![KeyValueItem::new("Content-Type", "application/json")];
         r.body_type = BodyType::Json;
         r.body = r#"{"user":"a"}"#.into();
+        // 分槽快照与键值行：两者都是 JSON 列，必须与 params / headers 一样能原样往返
+        r.body_by_type = BTreeMap::from([
+            ("json".to_string(), r#"{"user":"a"}"#.to_string()),
+            ("raw".to_string(), "plain text".to_string()),
+        ]);
+        r.body_rows = vec![KeyValueItem::new("grant_type", "password")];
         r.auth = AuthConfig::Bearer {
             token: "{{token.access}}".into(),
         };
@@ -377,9 +401,23 @@ mod tests {
         assert_eq!(saved.body_type, BodyType::Json);
         assert_eq!(saved.params, r.params);
         assert_eq!(saved.headers, r.headers);
+        assert_eq!(saved.body_by_type, r.body_by_type);
+        assert_eq!(saved.body_rows, r.body_rows);
         assert_eq!(saved.auth, r.auth);
         assert_eq!(saved.settings, r.settings);
         assert_eq!(saved.pre_script, "console.log(1)");
+    }
+
+    /// 空快照读回来是**空 map / 空 vec**，不是报错 ——
+    /// 存量库那条路径（`{}` / `[]`）必须能正常读出请求，否则升级即白屏
+    #[test]
+    fn empty_body_snapshot_columns_read_back_as_empty() {
+        let conn = db();
+        let r = create(&conn, 1, None, "legacy").unwrap();
+        let again = get(&conn, r.id).unwrap();
+
+        assert!(again.body_by_type.is_empty());
+        assert!(again.body_rows.is_empty());
     }
 
     #[test]
@@ -461,6 +499,8 @@ mod tests {
         src.headers = vec![KeyValueItem::new("X-Trace", "1")];
         src.body_type = BodyType::Json;
         src.body = r#"{"u":"a"}"#.into();
+        src.body_by_type = BTreeMap::from([("json".to_string(), r#"{"u":"a"}"#.to_string())]);
+        src.body_rows = vec![KeyValueItem::new("k", "v")];
         src.settings.timeout_ms = 1_234;
         save(&conn, &src).unwrap();
 
@@ -478,6 +518,10 @@ mod tests {
         assert_eq!(copy.headers, src.headers);
         assert_eq!(copy.body_type, BodyType::Json);
         assert_eq!(copy.body, r#"{"u":"a"}"#);
+        // 分槽快照与键值行也得跟着抄 —— 漏了的话副本一切正常，
+        // 唯独切一次请求体类型就把别的类型的内容丢了，很难往「复制」上想
+        assert_eq!(copy.body_by_type, src.body_by_type);
+        assert_eq!(copy.body_rows, src.body_rows);
         assert_eq!(copy.settings.timeout_ms, 1_234);
         assert!(copy.deleted_at.is_none(), "副本必须是存活的");
         assert_eq!(copy.sort_order, 2, "追加到该文件夹末尾");

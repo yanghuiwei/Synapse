@@ -35,6 +35,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "folder_auth",
         sql: include_str!("../../migrations/002_folder_auth.sql"),
     },
+    Migration {
+        version: 3,
+        name: "body_by_type",
+        sql: include_str!("../../migrations/003_body_by_type.sql"),
+    },
 ];
 
 /// 代码里定义的最高版本号
@@ -141,7 +146,11 @@ mod tests {
     fn applies_all_migrations_on_empty_db() {
         let mut conn = open_memory();
         let applied = run(&mut conn).expect("migrate");
-        assert_eq!(applied, vec![1, 2], "fresh db should apply every migration");
+        assert_eq!(
+            applied,
+            vec![1, 2, 3],
+            "fresh db should apply every migration"
+        );
         assert_eq!(current_version(&conn).unwrap(), latest_version());
     }
 
@@ -158,7 +167,7 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 2, "version table must have one row per migration");
+        assert_eq!(rows, 3, "version table must have one row per migration");
     }
 
     /// schema 完整性：design.md §3.2 的表一张都不能少。
@@ -234,6 +243,33 @@ mod tests {
             .query_row("SELECT auth FROM folder WHERE id = 1", [], |r| r.get(0))
             .expect("folder.auth must exist after migration 2");
         assert_eq!(auth, "{}");
+    }
+
+    /// 003 也是 `ALTER TABLE`：存量库里请求体那两列必须补得上，
+    /// 且默认值是**空快照** —— 前端读到 `{}` 会用 `body` 兜底填当前类型，
+    /// 表现与升级前一致（不是「内容丢了」）。
+    #[test]
+    fn body_columns_are_added_with_empty_defaults() {
+        let mut conn = open_memory_with_pragmas();
+        run(&mut conn).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO workspace (id, name, created_at, updated_at)
+               VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO request (id, workspace_id, name, body, created_at, updated_at)
+               VALUES (1, 1, 'login', 'a=1&b=2', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+
+        let (by_type, rows): (String, String) = conn
+            .query_row(
+                "SELECT body_by_type, body_rows FROM request WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("request.body_by_type / body_rows must exist after migration 3");
+        assert_eq!(by_type, "{}");
+        assert_eq!(rows, "[]");
     }
 
     /// 外键必须真的生效（PRAGMA foreign_keys 是连接级开关，容易忘）

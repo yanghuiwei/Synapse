@@ -5,102 +5,17 @@ import { cn } from "@/lib/cn";
 import { formatBytes, formatMs } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
+import {
+  HIGHLIGHT_LIMIT,
+  JSON_TOKEN_CLASS,
+  PRETTY_LIMIT,
+  tokenizeJson,
+  tryPrettyJson,
+} from "@/lib/json";
 import type { HttpResponsePayload } from "@/lib/types";
 import { IconButton } from "@/features/ui/Button";
 
 export type ResponseTab = "body" | "headers" | "cookies" | "timeline";
-
-/**
- * 超过这个大小就不再「美化」。
- *
- * `JSON.parse` + `JSON.stringify` 在 2MB 上已经是几百毫秒的卡顿，
- * 而且美化后的字符串体积是原来的两三倍 —— 卡的是主线程，用户看到的是界面直接僵住。
- */
-const PRETTY_LIMIT = 2 * 1024 * 1024;
-
-/** 再往上是连语法高亮都别做：每个 token 一个 `<span>`，几十万个节点会把浏览器拖死 */
-const HIGHLIGHT_LIMIT = 400 * 1024;
-
-/** 试着重排成缩进 JSON；不是合法 JSON 就返回 null（不是错误） */
-function tryPrettyJson(body: string): string | null {
-  try {
-    return JSON.stringify(JSON.parse(body), null, 2);
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------
-// JSON 语法高亮
-// ---------------------------------------------------------------
-
-type TokenKind = "key" | "str" | "num" | "bool" | "null" | "punct" | "ws";
-
-interface JsonToken {
-  text: string;
-  kind: TokenKind;
-}
-
-/**
- * 一次正则扫完整段 JSON。
- *
- * 为什么不引 highlight.js / prism：为了一个只高亮 JSON 的场景，
- * 那是几十 KB 的依赖 + 一套主题系统；而 `--syn-*` 设计令牌本来就在 theme.css 里备好了。
- * 这个正则只做**分类**，不做校验 —— 输入已经是 `JSON.stringify` 的输出，
- * 所以不必考虑畸形输入。
- */
-const JSON_TOKEN_RE =
-  /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\bnull\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\],:])/g;
-
-const TOKEN_CLASS: Record<TokenKind, string> = {
-  key: "text-syn-key",
-  str: "text-syn-str",
-  num: "text-syn-num",
-  bool: "text-syn-bool",
-  null: "text-syn-null",
-  punct: "text-syn-punct",
-  ws: "",
-};
-
-function tokenizeJson(text: string): JsonToken[] {
-  const out: JsonToken[] = [];
-  let cursor = 0;
-
-  for (const match of text.matchAll(JSON_TOKEN_RE)) {
-    const start = match.index ?? 0;
-    const raw = match[0];
-    if (start > cursor) {
-      out.push({ text: text.slice(cursor, start), kind: "ws" });
-    }
-
-    const quoted = match[1];
-    const colon = match[2];
-    const literal = match[3];
-    const number = match[4];
-    const punct = match[5];
-
-    if (quoted !== undefined) {
-      // 引号后面跟着冒号 = 对象的键，否则是字符串值
-      out.push({ text: quoted, kind: colon !== undefined ? "key" : "str" });
-      if (colon !== undefined) out.push({ text: colon, kind: "punct" });
-    } else if (literal !== undefined) {
-      out.push({ text: raw, kind: "bool" });
-    } else if (number !== undefined) {
-      out.push({ text: raw, kind: "num" });
-    } else if (raw === "null") {
-      out.push({ text: raw, kind: "null" });
-    } else if (punct !== undefined) {
-      out.push({ text: raw, kind: "punct" });
-    }
-
-    cursor = start + raw.length;
-  }
-
-  if (cursor < text.length) {
-    out.push({ text: text.slice(cursor), kind: "ws" });
-  }
-  return out;
-}
 
 /** 复制按钮 —— 带 1.5 秒的「已复制」反馈 */
 function CopyButton({ text }: { text: string }) {
@@ -232,7 +147,7 @@ function BodyView({
         >
           {tokens
             ? tokens.map((token, i) => (
-                <span key={i} className={TOKEN_CLASS[token.kind]}>
+                <span key={i} className={JSON_TOKEN_CLASS[token.kind]}>
                   {token.text}
                 </span>
               ))

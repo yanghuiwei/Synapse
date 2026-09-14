@@ -205,6 +205,9 @@ export function RequestPane() {
   const cancelling = useRequestStore((s) => s.cancelling);
   const patch = useRequestStore((s) => s.patch);
   const setRows = useRequestStore((s) => s.setRows);
+  // 请求体类型不走 `patch` —— 它要先把当前内容写回分槽快照，见 `setBodyType`
+  const setBodyType = useRequestStore((s) => s.setBodyType);
+  const setBodyRows = useRequestStore((s) => s.setBodyRows);
   const send = useRequestStore((s) => s.send);
   const cancel = useRequestStore((s) => s.cancel);
 
@@ -299,8 +302,10 @@ export function RequestPane() {
           className="min-h-0 flex-1"
           bodyType={draft.bodyType}
           body={draft.body}
-          onBodyTypeChange={(bodyType) => patch({ bodyType })}
+          bodyRows={draft.bodyRows}
+          onBodyTypeChange={setBodyType}
           onBodyChange={(body) => patch({ body })}
+          onBodyRowsChange={setBodyRows}
         />
       ) : tab === "settings" ? (
         <div className="min-h-0 flex-1 overflow-auto">

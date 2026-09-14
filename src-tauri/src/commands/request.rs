@@ -42,6 +42,20 @@ pub async fn send_request(
     run_id: String,
     spec: RequestSpec,
 ) -> AppResult<HttpResponsePayload> {
+    send_request_with(&state, &run_id, &spec).await
+}
+
+/// [`send_request`] 的本体，收 `&AppState` 而不是 `State<'_, AppState>`。
+///
+/// 存在的理由只有一个：`tauri::State` **没有公开构造函数**，非 Tauri 进程
+/// （`reqly-mcp`）根本造不出来。MCP 的 `send_request` tool 复用这一份编排，
+/// 而不是自己重写一遍 —— 两边一旦分叉，症状是「桌面端点得对、AI 那边悄悄不对」，
+/// 而那种 bug 不会有人去查。
+pub async fn send_request_with(
+    state: &AppState,
+    run_id: &str,
+    spec: &RequestSpec,
+) -> AppResult<HttpResponsePayload> {
     if run_id.trim().is_empty() {
         return Err(AppError::InvalidInput {
             field: "runId",
@@ -62,7 +76,7 @@ pub async fn send_request(
 
     let pipeline = Pipeline::new(&state.pool, &state.clients, &state.tokens);
     let prepared = pipeline
-        .prepare(&spec, previous.as_deref(), Some(guard.token()))
+        .prepare(spec, previous.as_deref(), Some(guard.token()))
         .await?;
 
     // ⚠️ `guard` 是 RAII 句柄，必须活到请求结束 —— 提前丢掉会让登记表
@@ -73,7 +87,7 @@ pub async fn send_request(
     // 用户需要知道「你发出去的不是你以为的那串 URL」。
     payload.unresolved_placeholders = prepared.unresolved;
 
-    record_last_response(&state, &payload);
+    record_last_response(state, &payload);
     Ok(payload)
 }
 
@@ -85,7 +99,11 @@ pub async fn send_request(
 /// 「清空」而不是「保留上一次」是刻意的：`{{resp.$.xxx}}` 引用的是「你刚看到的那次响应」。
 /// 若在响应不可解析时留着旧值，就会出现「显示的是这一次的响应，但模板取的是上一次的字段」——
 /// 这种错没法从界面上看出来，是最贵的一类 bug。
-fn record_last_response(state: &AppState, payload: &HttpResponsePayload) {
+///
+/// 公开给 crate 外（MCP 侧：`reqly-mcp` 是独立的 bin target，只能看见 `pub`）——
+/// 两边的「最近一次响应」必须是同一套判定，否则 AI 发的请求和桌面端发的请求
+/// 会让 `{{resp.$.xxx}}` 指向不同的东西。
+pub fn record_last_response(state: &AppState, payload: &HttpResponsePayload) {
     let parsed = match payload.body_encoding {
         BodyEncoding::Text => serde_json::from_str::<serde_json::Value>(&payload.body).ok(),
         // Lossy 里可能混着替换字符，Binary 的 body 干脆是空的，都不该拿来当 JSON 用

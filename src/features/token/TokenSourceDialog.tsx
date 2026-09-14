@@ -61,9 +61,11 @@ export function TokenSourceDialog({ folderId, source, onClose }: TokenSourceDial
 
   const submit = async () => {
     setSaving(true);
+    // 两边都送整份草稿：新建这条路径下 store 会先建行、再把剩下 8 个字段
+    // （包括「刷新 Token 的请求」）补一次全量保存
     const done = source
       ? await save({ ...source, ...draft, name: draft.name.trim() })
-      : await create(draft.folderId, draft.name.trim(), draft.fetchRequestId);
+      : await create({ ...draft, name: draft.name.trim() });
     setSaving(false);
     if (done) onClose();
   };

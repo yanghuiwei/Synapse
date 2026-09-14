@@ -16,6 +16,20 @@ dist-ssr
 src-tauri/target
 src-tauri/gen/schemas
 
+# 凭据类文件一律不进仓库 —— 远端是公开仓库，而 Reqly 的定位就是
+# 「凭据只留在本机」（secret 存本地库、token 从接口取），
+# 真出现这类文件基本都是调试时随手丢下的，不该被提交。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials.json
+token.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

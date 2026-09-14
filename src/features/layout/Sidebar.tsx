@@ -6,6 +6,7 @@ import {
   Import,
   Layers,
   LoaderCircle,
+  Plug,
   Plus,
   Search,
   Settings,
@@ -28,6 +29,7 @@ import { EnvManager } from "@/features/env/EnvManager";
 import { ConnectedImportDialog } from "@/features/import/ImportDialog";
 import { HistoryList } from "@/features/history/HistoryList";
 import { RunList } from "@/features/loadtest/RunList";
+import { McpSetupPanel } from "@/features/mcp/McpSetupPanel";
 import { TrashBin } from "@/features/trash/TrashBin";
 
 /**
@@ -38,7 +40,7 @@ import { TrashBin } from "@/features/trash/TrashBin";
  * 于是「点按钮发生什么」会被拆到两个地方。现在是「表描述长相，
  * `runAction` 描述行为」。
  */
-type ActionId = "newRequest" | "newFolder" | "import" | "clearHistory" | "newEnv";
+type ActionId = "newRequest" | "newFolder" | "import" | "clearHistory" | "newEnv" | "mcp";
 
 interface SidebarAction {
   id: ActionId;
@@ -115,7 +117,10 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     titleKey: "nav.settings",
     emptyIcon: Settings,
     emptyTitleKey: "common.empty",
-    actions: [],
+    // 真正的设置页要到 P8 才排上；这一栏现在只放「连接 AI 客户端」。
+    // 它够格单独占个位置：配置片段要粘到**别的软件**里才生效，
+    // 用户在这儿复制完就切窗口走了，不会回来找第二处入口。
+    actions: [{ id: "mcp", labelKey: "mcp.entry", icon: Plug, primary: true }],
     searchable: false,
   },
 };
@@ -228,6 +233,10 @@ export function Sidebar() {
   const setHistoryKeyword = useHistoryStore((s) => s.setKeyword);
 
   const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
+  // 「新建环境」「导入」走 ui store，是因为对话框的宿主在别的子树里。
+  // 这一个不同：按钮和面板都在本组件内，local state 就够了 —— 多搬一个
+  // 全局状态出去，只会让「谁控制这个框」变得需要跨文件才能读出来。
+  const [mcpOpen, setMcpOpen] = useState(false);
 
   const runAction = (id: ActionId) => {
     switch (id) {
@@ -249,6 +258,9 @@ export function Sidebar() {
       case "import":
         // 与「新建环境」同一个理由：按钮在标题区，对话框挂在下面
         openImport();
+        break;
+      case "mcp":
+        setMcpOpen(true);
         break;
     }
   };
@@ -347,6 +359,10 @@ export function Sidebar() {
       {/* 挂在侧栏根节点上（它是个 portal），所以切板块不会把用户正在填的
           导入内容卸掉 —— 填到一半去别的板块看一眼是常事 */}
       <ConnectedImportDialog />
+
+      {/* 设置栏现在唯一的实体就是这个面板。开着它去别的板块核对路径是常事，
+          所以同样挂在根节点，不随板块切换卸载 */}
+      {mcpOpen ? <McpSetupPanel onClose={() => setMcpOpen(false)} /> : null}
     </aside>
   );
 }

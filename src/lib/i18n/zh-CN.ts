@@ -109,6 +109,8 @@ export const zhCN = {
   "request.bodyFormUrlencoded": "表单 (x-www-form-urlencoded)",
   "request.bodyFormData": "表单 (multipart)",
   "request.bodyBinary": "二进制文件",
+  "request.bodyFormat": "美化",
+  "request.bodyFormatFailed": "这段还不是合法 JSON，没法美化",
   "request.followRedirects": "自动跟随重定向",
   "request.verifyTls": "校验 TLS 证书",
   "request.timeout": "超时（毫秒）",
@@ -261,6 +263,10 @@ export const zhCN = {
   "token.fetchRequestHint": "要在这个分类下先建好一个「登录 / 换 token」的请求，这里选它",
   "token.pickRequest": "选择一个请求…",
   "token.noRequestInFolder": "这个分类下还没有请求",
+  "token.refreshRequest": "刷新 Token 的请求",
+  "token.refreshRequestHint": "想用另一个接口换 Token 就选它；留空则复用上面那个",
+  "token.refreshRequestSame": "与「获取 Token 的请求」相同",
+  "token.refreshRequestGone": "（这个请求已经不在当前分类下了）",
   "token.extractTitle": "从响应里取什么",
   "token.accessPath": "access_token 路径",
   "token.refreshPath": "refresh_token 路径",
@@ -597,20 +603,11 @@ export const zhCN = {
   "ai.allowSelfSignedHint": "公司内网网关常用自签证书，开启后跳过校验",
 
   // ---- MCP ----
-  "mcp.title": "MCP 服务",
-  "mcp.enable": "启用本机 MCP 服务",
-  "mcp.description": "让 AI 客户端（WorkBuddy / Claude / Hermes 等）直接读写你的接口集合",
-  "mcp.stdioHint": "stdio：在客户端配置里指向 Reqly 的可执行文件",
-  "mcp.httpHint": "HTTP：本机监听端口，供远程或容器内的客户端连接",
-  "mcp.port": "监听端口",
-  "mcp.token": "访问令牌",
-  "mcp.tokenHint": "HTTP 通道的连接凭据，客户端需带 Authorization: Bearer <token>",
-  "mcp.regenerateToken": "重新生成",
-  "mcp.copyConfig": "复制配置",
-  "mcp.configFor": "为 {client} 生成配置",
-  "mcp.configCopied": "配置已复制到剪贴板",
-  "mcp.clients": "客户端",
-  "mcp.tools": "可用工具",
+  //
+  // 这里原本有一组「应用内开关 + 监听端口 + 访问令牌」的占位文案，P7 落地后作废：
+  // 实际形态是独立进程，由客户端自己拉起（stdio）或我们单开一个只绑回环的端口（HTTP），
+  // 既没有开关也没有令牌 —— 留着会让做设置页的人照着写出不存在的字段。
+  // 真正在用的文案在文件末尾的「MCP 客户端连接（P7）」一节。
 
   // ---- 工作区 ----
   "workspace.default": "默认工作区",
@@ -629,6 +626,7 @@ export const zhCN = {
 
   "request.bodyPlaceholder": "在这里粘贴或输入请求体…",
   "request.bodyJsonHint": "发送前会在本地校验一次 JSON，不合法的写法不用白跑一趟网络",
+  "request.bodyUrlencodedHint": "这些键值对会拼成 a=1&b=2 发出去，{{…}} 占位符原样保留",
   "request.placeholderHint": "{{…}} 是占位符，发送前解析",
   "request.unsupportedBody": "{type} 暂未支持，P2 只做 JSON / 文本",
   "request.sendShortcut": "发送（Ctrl+Enter）",
@@ -696,6 +694,31 @@ export const zhCN = {
   "error.importDetect": "没能从内容里认出接口格式",
   "error.importJson": "文件不是合法的 JSON",
   "error.importParse": "格式认出来了，但里面有内容解析不了",
+
+  // ---- MCP 客户端连接（P7） ----
+  //
+  // `mcp.missingBin` 是这一块唯一会让人踩坑的地方：配置片段语法完全正确，
+  // 但 exe 还没编出来。必须把「先编一次」说出来，否则用户会反复重连找不到原因。
+  "mcp.entry": "连接 AI 客户端",
+  "mcp.entryHint": "生成可直接粘贴的 MCP 配置片段",
+  "mcp.title": "连接 AI 客户端",
+  "mcp.subtitle": "把 Reqly 暴露成 MCP 工具，让 AI 直接读写这里的接口集合",
+  "mcp.loading": "正在读取配置…",
+  "mcp.loadFailed": "读不到 MCP 配置信息",
+  "mcp.missingBin": "没找到 reqly-mcp.exe。先在项目根目录跑一次 pnpm mcp:build —— 这段配置本身没错，但客户端会连不上。",
+  "mcp.copy": "复制",
+  "mcp.copied": "已复制",
+  "mcp.jsonLabel": "JSON —— WorkBuddy / Claude Code / Cursor",
+  "mcp.yamlLabel": "YAML —— Hermes Agent",
+  "mcp.pathsTitle": "路径",
+  "mcp.commandPath": "MCP 可执行文件",
+  "mcp.dbPath": "数据库",
+  "mcp.transportTitle": "两条通道",
+  "mcp.stdio": "stdio：客户端自己拉起进程，最省事，推荐",
+  "mcp.http": "HTTP：监听 127.0.0.1:7777/mcp，只绑回环，给同机的多个客户端共用",
+  "mcp.readonly": "加 --read-only 启动，所有写操作会被拒 —— AI 只能看，不能改",
+  "mcp.toolsTitle": "13 个工具",
+  "mcp.tools": "只读 4 个：文件夹 / 请求 / 详情 / 环境变量。可写 9 个：新建 / 修改 / 删除 / 移动 / 发送 / 压测 / 刷新 Token / 写变量 / 导入 curl。",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

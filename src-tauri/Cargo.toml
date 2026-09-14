@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+# 有两个 bin 目标（桌面端 `reqly` + `bin/reqly-mcp.rs`）之后，`cargo run` 就不再有唯一解。
+# Tauri CLI 拉起 dev 时执行的正是 `cargo run --no-default-features`（不带 `--bin`），
+# 少了这行会直接报 `could not determine which binary to run` —— 而两个 bin 都是要长期存在的，
+# 所以必须在这里钉一个默认值，而不是把 `mcp` 那个从自动发现里摘出去。
+default-run = "reqly"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -27,7 +32,14 @@ r2d2 = "0.8.10"
 r2d2_sqlite = "0.35.0"
 thiserror = "2.0.20"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio = { version = "1.53.1", features = [
+  "rt-multi-thread",
+  "sync",
+  "macros",
+  "time",
+  # TcpListener：MCP 的回环 HTTP 通道要自己监听端口（stdio 通道不需要）
+  "net",
+] }
 tokio-util = { version = "0.7.19", default-features = false }
 # reqwest 必须关掉 default features：默认会拉 native-tls(OpenSSL)，那是"要求系统装 OpenSSL"的老路。
 # 用 rustls + **系统根证书**（native-roots）而不是 webpki-roots：
@@ -48,6 +60,27 @@ reqwest = { version = "0.12.28", default-features = false, features = [
   "multipart",
   "stream",
 ] }
+
+
+# --- MCP Server（P7）---
+# rmcp 是 MCP 官方 Rust SDK，对齐 MCP 规范 2026-07-28（含 stateless 的 server/discover）。
+# 保留默认 features（base64 / macros / server），另外显式开：
+#   transport-io                        → stdio 通道（被 AI 客户端 spawn）
+#   transport-streamable-http-server    → 回环 HTTP 通道（自带 SSE 会话管理）
+# schemars 已由 server 特性带入，这里再写一遍是为了表明「tool 参数靠它生成 JSON Schema」。
+rmcp = { version = "3.3", features = [
+  "server",
+  "macros",
+  "schemars",
+  "transport-io",
+  "transport-streamable-http-server",
+] }
+
+# StreamableHttpService 是个 tower::Service，本身不带 listener，
+# 需要外面套一层真正监听端口的 HTTP server。用 axum 的 router + serve。
+# 关掉默认 features 只留 http1 + tokio：MCP 是回环上的 JSON/SSE，
+# 不需要 TLS、压缩、ws、multipart 这些。
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

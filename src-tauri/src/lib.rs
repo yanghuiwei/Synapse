@@ -9,6 +9,7 @@ pub mod error;
 pub mod http;
 pub mod importer;
 pub mod loadtest;
+pub mod mcp;
 pub mod storage;
 pub mod template;
 
@@ -65,40 +66,53 @@ fn resolve_db_path(app: &tauri::AppHandle) -> AppResult<PathBuf> {
     Ok(dir.join(DB_FILE_NAME))
 }
 
-fn init_storage(app: &tauri::AppHandle) -> AppResult<AppState> {
-    let db_path = resolve_db_path(app)?;
-    let pool = pool::create_pool(&db_path)?;
+impl AppState {
+    /// 从数据目录建起整套运行时：建池 → 跑迁移 → 保证默认工作区。
+    ///
+    /// 桌面端与 MCP 侧共用这一条启动路径。区别只在路径从哪来 —— 桌面端由
+    /// [`resolve_db_path`] 从 `AppHandle` 反推，MCP 那个独立可执行文件则直接
+    /// 吃 `--db` 参数，所以这里收的是**已经解析好的**路径。
+    ///
+    /// 日志一律走 **stderr**：MCP 的 stdio 通道把 stdout 当作 JSON-RPC 流，
+    /// 往 stdout 写一行日志就会污染协议、让客户端握手直接失败。
+    pub fn new(db_path: PathBuf) -> AppResult<Self> {
+        let pool = pool::create_pool(&db_path)?;
 
-    {
-        let mut conn = pool.get()?;
+        {
+            let mut conn = pool.get()?;
 
-        let applied = migrate::run(&mut conn)?;
-        if applied.is_empty() {
-            println!(
-                "[reqly] schema up to date (v{})",
-                migrate::current_version(&conn)?
+            let applied = migrate::run(&mut conn)?;
+            if applied.is_empty() {
+                eprintln!(
+                    "[reqly] schema up to date (v{})",
+                    migrate::current_version(&conn)?
+                );
+            } else {
+                eprintln!("[reqly] applied migrations: {applied:?}");
+            }
+
+            let ws = repo::workspace::ensure_default(&conn)?;
+            eprintln!(
+                "[reqly] db ready: {} (workspace #{})",
+                db_path.display(),
+                ws.id
             );
-        } else {
-            println!("[reqly] applied migrations: {applied:?}");
         }
 
-        let ws = repo::workspace::ensure_default(&conn)?;
-        println!(
-            "[reqly] db ready: {} (workspace #{})",
-            db_path.display(),
-            ws.id
-        );
+        Ok(Self {
+            pool,
+            db_path,
+            clients: ClientCache::new(),
+            inflight: InflightRegistry::new(),
+            tokens: TokenRefresher::new(),
+            last_response: Mutex::new(None),
+            loadtests: LoadtestRegistry::new(),
+        })
     }
+}
 
-    Ok(AppState {
-        pool,
-        db_path,
-        clients: ClientCache::new(),
-        inflight: InflightRegistry::new(),
-        tokens: TokenRefresher::new(),
-        last_response: Mutex::new(None),
-        loadtests: LoadtestRegistry::new(),
-    })
+fn init_storage(app: &tauri::AppHandle) -> AppResult<AppState> {
+    AppState::new(resolve_db_path(app)?)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -184,6 +198,8 @@ pub fn run() {
             commands::loadtest::get_loadtest_chart,
             commands::loadtest::delete_loadtest_run,
             commands::loadtest::export_loadtest_report,
+            // MCP（P7）
+            commands::mcp::get_mcp_setup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

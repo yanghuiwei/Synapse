@@ -8,6 +8,8 @@
 //! * 结构还在演化（auth）→ 先用 [`serde_json::Value`] 占位并标注 TODO，
 //!   避免现在拍一个 P2/P4 就会推翻的 schema
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -317,7 +319,21 @@ pub struct ApiRequest {
     pub params: Vec<KeyValueItem>,
     pub headers: Vec<KeyValueItem>,
     pub body_type: BodyType,
+    /// 当前 `body_type` 对应的那份内容，**原样发出**（见 `http::execute::build_body`）。
     pub body: String,
+    /// 每种 `body_type` 各一份的内容快照，形如 `{"json":"{…}","raw":"hello"}`。
+    ///
+    /// 键用 `String` 而不是 `BodyType`：用户库里可能留着更早版本写下的类型名，
+    /// 拿枚举当键会让**整条记录**反序列化失败，而这里既定的语义是
+    /// 「未知值退化成 none、其余字段照读」（见 [`BodyType::parse`]）。
+    ///
+    /// 执行路径**从不读它** —— `build_body` 只看 `body`；这一列纯粹服务于
+    /// 编辑器「切走再切回来内容还在」。用 `BTreeMap` 是为了键有序，
+    /// 写回库里时 diff 稳定。
+    pub body_by_type: BTreeMap<String, String>,
+    /// 键值型请求体（当前只有 urlencoded）的行。与 `params` / `headers` 同构，
+    /// 所以键值表组件、占位符高亮都能直接复用。
+    pub body_rows: Vec<KeyValueItem>,
     /// 授权配置。P4 起定稿（design.md §4.4）。
     pub auth: AuthConfig,
     pub settings: RequestSettings,

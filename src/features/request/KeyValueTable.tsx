@@ -26,10 +26,17 @@ function isBlankRow(row: KeyValueItem | undefined): row is undefined | never {
  * 这一行是**渲染时补出来的**，不在 `rows` 里 —— 否则每次保存都会往库里
  * 塞一行空的。一旦用户在上面敲了字，它就被下面 `patchRow` 的
  * 「改整个 view」方式实体化进数组，空行随即在末尾重新出现。
+ *
+ * 条件是「**末尾那行不是空的**就补一个」。
+ * 反过来写（只在末尾已经为空时才补）会同时出两个毛病：
+ *   * 末行非空时不给空行 —— 界面上就没有可下笔的地方，加不了新行。
+ *     从外部灌入的行（urlencoded 从 `body` 解析出来的、导入器写进去的）
+ *     恰好全都不以空行结尾，所以那条路径上是必然踩到。
+ *   * 末行已空时再补一个 —— 末尾会并排出现两个空行。
  */
 function withTrailingBlank(rows: readonly KeyValueItem[]): KeyValueItem[] {
   const list = rows.slice();
-  if (isBlankRow(list[list.length - 1]).valueOf() || list.length === 0) {
+  if (list.length === 0 || !isBlankRow(list[list.length - 1])) {
     list.push({ key: "", value: "", enabled: true });
   }
   return list;

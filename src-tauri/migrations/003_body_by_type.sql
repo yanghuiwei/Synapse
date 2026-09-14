@@ -1,0 +1,31 @@
+-- ============================================================
+-- Reqly 003_body_by_type.sql —— 请求体按类型各存一份
+-- ------------------------------------------------------------
+-- 001 里 request 只有一对 `body_type` + `body`，于是**切一次类型，
+-- 上一种类型写的东西就被盖掉了**：在 form-urlencoded 里填完表格、
+-- 切回 json 看一眼再切回来，表格没了。这不是「设计如此」，
+-- 是数据根本没有地方放。
+--
+-- 两列的职责分得很清：
+--
+--   body_by_type  该请求**每一种类型各一份**的内容快照，JSON 对象、值是字符串，
+--                 形如 `{"json":"{…}","raw":"hello","urlencoded":"a=1&b=2"}`。
+--                 键用 `String` 而不是 `BodyType` 枚举：用户库里可能留着更早
+--                 版本写下的类型名，拿枚举当键会让**整条记录**读不出来，
+--                 而 `BodyType::parse` 的既有语义是「未知值退化成 none」。
+--
+--   body_rows     键值型请求体（当前只有 urlencoded）的行，形状与
+--                 params / headers 完全一致（`[{key,value,enabled,desc}]`），
+--                 这样键值表组件和它的占位符高亮能直接复用。
+--
+-- ⚠️ **`body` 列保持不动，语义也不变**：它始终是「当前 body_type 对应的
+-- 那份内容」。后端 `build_body` / 压测 / MCP 三条读取路径都只认 `body`，
+-- 这样它们一行都不用改 —— 分槽只是给编辑器多留了几份备份。
+--
+-- 存量库跑到这里时两列取默认值：`body_by_type = '{}'`、
+-- `body_rows = '[]'`；前端读到时用 `body` 兜底填当前类型，
+-- 表现与升级前完全一致。
+-- ============================================================
+
+ALTER TABLE request ADD COLUMN body_by_type TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE request ADD COLUMN body_rows    TEXT NOT NULL DEFAULT '[]';

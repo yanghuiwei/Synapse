@@ -10,6 +10,7 @@ pub mod folder;
 pub mod history;
 pub mod import_;
 pub mod loadtest;
+pub mod mcp;
 pub mod request;
 pub mod settings;
 pub mod token;
