@@ -11,6 +11,12 @@ name = "reqly_mcp"
 name = "reqly-mcp"
 path = "src/main.rs"
 
+[build-dependencies]
+# 把 VC 运行时静态链进来，见 `build.rs` 的说明。桌面端由 `tauri-build` 内嵌同一套逻辑，
+# 本 package 是独立 crate、不跑它，所以必须自己补上 —— 否则产出的 exe 硬导入
+# `VCRUNTIME140.dll`，干净 Windows 上会直接启动失败。
+static_vcruntime = "3.0"
+
 [dependencies]
 # 核心层（存储 / HTTP 执行 / 模板 / 压测 / 导入器 / 13 个操作）。
 # **这条依赖就是「不链 tauri」的保证** —— reqly-core 的 Cargo.toml 里没有 tauri。
