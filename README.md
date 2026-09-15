@@ -32,7 +32,7 @@
 | **响应面板** | 状态码 / 耗时 / 大小；格式化 JSON；响应头；原始报文 |
 | **历史与回收站** | 每次发送落 `history`；全局软删除（`deleted_at`），回收站可还原 / 彻底删除 |
 | **变量与 Token** | 环境（Environment）→ 变量；`{{var}}` 占位符；标记 secret 的变量不回显；Token 源绑定到 Folder，命名空间占位符 `{{token.access}}`，同源并发刷新走单飞锁 |
-| **导入器** | `curl` 命令；Postman v2.1 集合（apipost 导出走这条兼容路径）；**HAR 1.2**（浏览器 DevTools / Charles 抓包导出，按域名分文件夹、自动滤掉图片/JS/CSS 这类静态资源）；本工具自有 JSON 的导入导出。**OpenAPI 3.x 尚未实现**（`core/src/importer/` 里没有这个解析器，见路线图 P5 的说明） |
+| **导入器** | `curl` 命令；Postman v2.1 集合（apipost 导出走这条兼容路径）；**HAR 1.2**（浏览器 DevTools / Charles 抓包导出，按域名分文件夹、自动滤掉图片/JS/CSS 这类静态资源）；本工具自有 JSON 的导入导出。**OpenAPI 3.x 主动裁剪**（2026-09-15 决定不做，按需再迭代 —— 见路线图 P5） |
 | **压测** | 常驻 worker + 原子领号控并发；成功率 / P50 / P90 / P95 / P99 / TPS / 有效 RPS；延迟 + RPS 双轴折线、延迟直方图、最近 50 条失败样本；**一键导出 HTML 报表**并在系统程序中打开 |
 | **MCP Server**（P7） | 13 个 tool（snake_case 命名 + `readOnlyHint` 注解），stdio 与回环 HTTP 两种传输，只读模式，一键生成 WorkBuddy / Claude Code / Cursor 的 JSON 片段与 Hermes 的 YAML 片段 |
 | **命令行 CLI**（P8-A） | 15 条命令，覆盖集合 / 请求 / 环境 / 发请求 / 压测 / Token / 导入；`--json` 输出与 MCP 返回形状一致，可直接 `\| jq` |
@@ -312,15 +312,13 @@ reqly/
 | P2 | 请求闭环与六类错误分离 | ✅ |
 | P3 | 历史、软删除与回收站 | ✅ |
 | P4 | 环境变量与 Token 源 | ✅ |
-| P5 | 导入器：curl ✅ · Postman v2.1 ✅ · **HAR 1.2 ✅** · **OpenAPI 3.x ❌ 未实现** | ⚠️ |
+| P5 | 导入器：curl ✅ · Postman v2.1 ✅ · **HAR 1.2 ✅** · OpenAPI 3.x 主动裁剪（见「非目标」） | ✅ |
 | P6 | 并发压测与报表导出 | ✅ |
 | P7 | MCP Server：13 个 tool、stdio + 回环 HTTP、配置片段生成、只读模式 | ✅ |
 | P8-A | 拆 crate（core / mcp / cli）+ CLI 通道 + 外部改动自动刷新 + 两个 sidecar 进安装包 | ✅ |
 | P8-② | 应用标识改 `com.reqly.desktop` + 老数据目录一次性迁移（含 WAL）+ Windows 打包只出 NSIS | ✅ |
 | P8-④ | 修 9 处旧数据目录口径（`--help` 教人连旧库）+ NSIS 钩子把 CLI 加进用户 PATH | ✅ |
 | P8 | 打磨：命令面板 `Ctrl+K`、整包导入导出、自动更新、图标、关于页、体积优化 | ⏳ |
-| P9 | AI Provider：任意 OpenAI 兼容端点（含自建网关）、`baseUrl` 原样使用、连通性测试回原始报文 | — |
-| P10 | 内置 AI 助手：自然语言生成请求 / 解释响应 / 生成断言（可选，依赖 P9） | — |
 
 ---
 
@@ -331,6 +329,15 @@ reqly/
 - 抓包代理
 - 专业级压测（ramp-up、RPS 曲线、分布式加压）
 - 插件市场
+- **应用内置 AI**（原 P9 AI Provider 配置层 + P10 内置助手）—— 2026-09-15 裁剪。
+  本工具的 AI 能力**只从外部 Agent 进来**：MCP（13 个 tool）与 CLI（15 条命令）。
+  理由：内置 provider / 对话面板要额外维护认证、自签证书、网关兼容、提示词一整套，
+  而「让 AI 去找接口、改参数、发请求」这件事外部 Agent 做得更好 ——
+  该由工具提供的是**干净的数据与通道**，不是另一个聊天框。
+  仍为 AI 保留的：MCP 只读模式、外部改动自动刷新、配置片段生成。
+- **OpenAPI 3.x / 2.0 导入** —— 2026-09-15 裁剪，按需再迭代。
+  已有 curl / Postman v2.1 / HAR 1.2 三条路径覆盖日常。真要恢复：`core/src/importer/`
+  加一个解析器即可，但指纹必须排在 Postman 的 `info` 分支**之前**，且要先定 YAML 取舍（见 `docs/plan.md` §22）。
 
 ---
 

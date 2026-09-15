@@ -589,19 +589,10 @@ export const zhCN = {
   "settings.clearAllHint": "会删除所有集合、历史与环境，操作不可撤销",
 
   // ---- AI ----
-  "ai.provider": "AI 服务",
-  "ai.newProvider": "新建服务",
-  "ai.providerName": "名称",
-  "ai.baseUrl": "接口地址",
-  "ai.baseUrlHint": "OpenAI 兼容端点，填到 /v1 为止，例如 https://gw.example.com/v1",
-  "ai.apiKey": "API Key",
-  "ai.model": "模型",
-  "ai.testConnection": "测试连接",
-  "ai.testing": "测试中…",
-  "ai.testOk": "连接正常",
-  "ai.testFailed": "连接失败：{reason}",
-  "ai.allowSelfSigned": "允许自签证书",
-  "ai.allowSelfSignedHint": "公司内网网关常用自签证书，开启后跳过校验",
+  //
+  // 这里原本有一组「AI Provider 配置 + 连通性测试」的文案（P9 / P10），
+  // 2026-09-15 范围收缩时作废：本工具的 AI 能力**只从外部 Agent 进来**（MCP / CLI 两条通道），
+  // 应用内不再内置 provider 配置与对话面板 —— 留着会让做设置页的人照着写出不存在的字段。
 
   // ---- MCP ----
   //

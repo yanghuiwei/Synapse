@@ -23,7 +23,7 @@
 | 决策项     | 结论                          | 说明                                                     |
 | ------- | --------------------------- | ------------------------------------------------------ |
 | 界面语言    | **本期只做中文**                  | 架构预留 `t('key')` 包裹与 `zh-CN` 资源文件，后续加语言不改业务代码（§9.1）      |
-| AI 接口配置 | **支持任意 OpenAI 兼容第三方端点**     | 不绑定官方 API；必须能指向公司自建网关，而非只留一个 `apiKey` 输入框（§8.5）        |
+| AI 接口配置 | ~~支持任意 OpenAI 兼容第三方端点~~ → **已裁剪（2026-09-15）** | 原计划给应用内置 provider 配置层（§8.5）。现决定：**AI 能力只从外部 Agent 进来**（MCP / CLI），应用内不做 —— 见 §0.2 与 `plan.md` §22 |
 | MCP 客户端 | **WorkBuddy / Hermes / Claude Code 全支持** | 协议一致，仅配置文件格式不同（JSON vs YAML）；配置生成器同时产出两种（§8.1） |
 
 ### 0.2 非目标（本期明确不做）
@@ -33,6 +33,9 @@
 - ❌ 抓包代理（Proxy / Interceptor）
 - ❌ 专业级压测（ramp-up、RPS 曲线、分布式加压）
 - ❌ 插件市场
+- ❌ **应用内置 AI**（原 P9 AI Provider 配置层 + P10 内置助手，2026-09-15 裁剪）——
+  AI 能力只从外部 Agent 经 MCP / CLI 进入，应用内不设 provider 配置与对话面板
+- ❌ **OpenAPI 3.x / 2.0 导入**（2026-09-15 裁剪，按需再迭代）
 
 ---
 
@@ -40,7 +43,7 @@
 
 | # | 你的需求                             | 设计落点                                                         | 章节          |
 | - | -------------------------------- | ------------------------------------------------------------ | ----------- |
-| 1 | 导入接口数据（apipost / curl）           | 统一 Importer 层，Rust 侧解析；额外白送 Postman v2.1 / OpenAPI 3.x / HAR | §5          |
+| 1 | 导入接口数据（apipost / curl）           | 统一 Importer 层，Rust 侧解析；额外覆盖 Postman v2.1 / HAR 1.2（OpenAPI 见 §0.2） | §5          |
 | 2 | 多方法请求 + 授权刷新 token + 占位符匹配 token | Token Provider 机制 + 命名空间占位符 `{{token.access}}`               | §4.3 / §4.4 |
 | 3 | 请求历史记录 + 删除回收站                   | `history` 表 + 全局软删除 `deleted_at`                             | §3.3        |
 | 4 | 暗色 / 浅色主题切换                      | CSS 变量双主题 + 跟随系统                                             | §6.1        |
@@ -423,7 +426,7 @@ Apipost 导出两条路径，都支持：
 | 格式                            | 工作量                | 价值              |
 | ----------------------------- | ------------------ | --------------- |
 | **Postman Collection v2.1**   | 复用 apipost 主解析器，≈0 | 极高（生态最大）        |
-| **OpenAPI 3.x / Swagger 2.0** | 中                  | 高（按 tag 自动分文件夹） |
+| ~~**OpenAPI 3.x / Swagger 2.0**~~ | — | **已裁剪（2026-09-15，按需再迭代）** —— 见 §0.2 |
 | **HAR 1.2**（浏览器 F12 导出）       | 低                  | 高（比 curl 批量强得多） |
 | **reqly 自有 JSON**             | 极低                 | 必做（导入导出一体）      |
 
@@ -745,38 +748,23 @@ run_load_test(42, C=50, N=500)     → 成功率 100%，P95=87ms
 
 ---
 
-### 8.5 AI Provider 配置层（为内置 AI 助手预留）
+### 8.5 ~~AI Provider 配置层~~（2026-09-15 裁剪，本节原有设计作废）
 
-> 你的 AI 能力来自**公司自建网关**，不是 OpenAI / DeepSeek 官方。所以 provider 层从第一天起就必须是"任意 OpenAI 兼容端点"，而不是"选一个厂商 + 填个 key"。
-> **本期只落配置层与连通性测试，不做助手 UI**（排在 §11 的 P9）。
+原计划给应用内置一个 OpenAI 兼容的 provider 配置层（`ai_provider` 表 + `src-tauri/src/ai/`
++ 连通性测试按钮），为 P10 内置助手铺路。**现已裁剪**：本工具的 AI 能力**只从外部 Agent 进来**
+（MCP 13 个 tool + CLI 15 条命令），应用内不做 provider 配置与对话面板 —— 见 §0.2 与 `plan.md` §22。
 
-配置模型：
+裁剪时留下的两点判断（都是从原设计里抠出来的）：
 
-| 字段                 | 必填  | 说明                                                                 |
-| ------------------ | --- | ------------------------------------------------------------------ |
-| `name`             | ✅   | 显示名，如 `公司网关`                                                       |
-| `baseUrl`          | ✅   | 完整前缀，如 `https://ai-gw.corp.local/v1`。**原样使用，不做任何拼接或补全猜测**            |
-| `apiKey`           | ✅   | 只存系统密钥串（`keyring`），不落 SQLite 明文；也支持写 `${ENV_VAR}` 引用              |
-| `model`            | ✅   | 模型 ID，如 `qwen-max` 或内部模型名                                           |
-| `authStyle`        | —   | `bearer`（默认）/ `api-key-header`（Azure 风格，用 `api-key` 头）/ `custom`    |
-| `extraHeaders`     | —   | 自定义头。公司网关常需要 `X-Tenant-Id` 之类的头，必须可配                                |
-| `timeoutMs`        | —   | 默认 60000                                                           |
-| `supportsStream`   | —   | 是否走 SSE 流式                                                         |
-| `allowInvalidCert` | —   | 内网自签证书专用开关（与请求引擎的同类设置共用实现）                                          |
-| `proxyUrl`         | —   | 需要经代理时复用请求引擎的代理配置，不另造一套                                             |
-| `isDefault`        | —   | 默认 provider                                                        |
+- 内网网关形态不统一（`http://10.x.x.x:8080/v1`、自签证书、`X-Tenant-Id` 这类自定义头），
+  真要支持就得自带 `authStyle` / `extraHeaders` / `allowInvalidCert` / `proxyUrl` 一整套 ——
+  这是**长期维护面**，不是一次性功能点。
+- 「原始报文排障」确实有用，但那本来就是**请求引擎**已有的能力：用本工具直接发一条
+  `POST /chat/completions` 就能看到状态码与错误体，不必为它单建一层。
+- 剩下真正不可替代的那部分（让 AI 自己找接口、改参数、发请求）**外部 Agent 已经做得更好**，
+  所以工具只需要提供干净的数据与通道 —— 这正是 MCP / CLI 在做的事。
 
-五条设计要求：
-
-1. **`baseUrl` 完全由用户输入，不预设、不补全、不校验域名。** 内网网关常是 `http://10.x.x.x:8080/v1` 这种形态，任何"智能补全"都是添乱。
-2. **必须有连通性测试按钮。** 填完直接打一次 `GET /models` 或最小 `POST /chat/completions`，把**原始响应（含状态码 + 错误体）原样显示**——内网排障时，原始报文比"连接失败"有用一百倍。
-3. **必须支持自签名证书**，否则内网网关根本连不上。
-4. **Provider 配置与 MCP 完全解耦**：不用 AI 助手的人不该被多出来的概念干扰；provider 表为空时，相关 UI 整块隐藏。
-5. **不引入任何厂商 SDK**，只用 `reqwest` 打 OpenAI 兼容 HTTP 接口——换网关零代码改动。
-
-存储：新增表 `ai_provider`（`baseUrl` / `model` / `authStyle` / `extraHeaders` JSON / `allowInvalidCert` / `proxyUrl` / `isDefault`），`apiKey` 仅存 keyring 引用键。
-
-Rust 模块：`src-tauri/src/ai/`（`provider.rs` 配置模型与校验、`client.rs` OpenAI 兼容客户端、`test_connection.rs` 连通性测试）。
+真要恢复：完整设计在本次改动之前的 `design.md` 版本里（git 历史可查）。
 
 ---
 
@@ -909,13 +897,12 @@ E:\H_Req\reqly\
       │  ├─ mod.rs pool.rs migrate.rs models.rs
       │  └─ repo/ folder.rs request.rs history.rs env.rs token.rs loadtest.rs
       ├─ importer/
-      │  ├─ mod.rs curl.rs tokenizer.rs apipost.rs postman.rs openapi.rs har.rs
+      │  ├─ mod.rs curl.rs tokenizer.rs apipost.rs postman.rs har.rs
       ├─ loadtest/
       │  ├─ mod.rs engine.rs stats.rs report.rs
       ├─ mcp/
       │  ├─ mod.rs server.rs tools.rs transport.rs
       │  └─ config_gen.rs                  # 生成 JSON / YAML 两种客户端配置（§8.1）
-      ├─ ai/                               # AI Provider，本期只落配置层 + 连通性测试（§8.5）
       │  ├─ mod.rs provider.rs client.rs test_connection.rs
       └─ bin/
          └─ reqly-mcp.rs                   # 独立 MCP 可执行文件
@@ -934,7 +921,7 @@ E:\H_Req\reqly\
 | **P2** | 核心请求闭环     | HTTP 引擎 + 请求编辑器 + 响应查看器                      | 能发 GET/POST 到 `httpbin.org`，正确显示状态/耗时/JSON；`Ctrl+Enter` 可用 |
 | **P3** | 集合与历史      | 文件夹树 CRUD + 拖拽移动 + 历史 + 回收站                  | 建 3 层文件夹；拖拽移动后层级正确；删除进回收站可还原                               |
 | **P4** | 变量与 Token  | 环境变量 + 占位符 + **Token 自动刷新**                  | `{{env.x}}` 生效；token 过期自动刷新；并发 5 请求只打 1 次刷新                |
-| **P5** | 导入器        | curl / apipost / postman / openapi / HAR     | 三种浏览器 Copy as cURL 均正确解析；apipost 导出文件 100% 条目导入            |
+| **P5** | 导入器        | curl / apipost / postman / HAR（OpenAPI 已裁剪） | 三种浏览器 Copy as cURL 均正确解析；apipost 导出文件 100% 条目导入            |
 | **P6** | 压测         | 并发引擎 + 实时面板 + HTML/CSV 报表                    | 500 请求 / 50 并发跑完；P95 与 `ab` 结果偏差 <10%；报表可导出打开              |
 | **P7** | MCP Server | stdio + HTTP 双通道 + 13 tools                  | Claude Code 连上后能完成 §8.4 的完整工作流                             |
 | **P8** | 打磨         | 命令面板、快捷键、导出、自动更新、打包                          | 生成 <10MB 安装包；`Ctrl+K` 可跳转任意请求                              |
@@ -943,10 +930,9 @@ E:\H_Req\reqly\
 
 | Phase   | 名称             | 交付物                                            | 验收标准（可验证）                                                        |
 | ------- | -------------- | ---------------------------------------------- | ---------------------------------------------------------------- |
-| **P9**  | AI Provider    | 设置页配置任意 OpenAI 兼容端点 + 连通性测试（§8.5）              | 能指向公司内网网关跑通一次 `/chat/completions`；失败时原样显示状态码与错误体；自签证书可连           |
-| **P10** | 内置 AI 助手（可选）   | 侧边对话面板：自然语言生成请求 / 解释响应 / 生成断言                  | 用 P9 的 provider 生成一个可直接执行的请求；provider 表为空时整块 UI 隐藏                |
+| ~~**P9** / **P10**~~ | ~~AI Provider + 内置助手~~ | **已裁剪（2026-09-15）** —— AI 能力只从外部 Agent 进入（MCP / CLI） | 见 §0.2 |
 
-**关键路径**：P1 → P2 → P4 → P6 → P7。P3/P5 可与 P6 并行；**P9 完全独立，可随时插入**；P10 依赖 P9。
+**关键路径**：P1 → P2 → P4 → P6 → P7 → P8。P3 / P5 可与 P6 并行；**P9 / P10 已裁剪（见 §0.2）**。
 
 **P7 验收补充**：WorkBuddy 与 Hermes **各连一次**，13 个 tool 全部被发现，且 `readOnlyHint` / `destructiveHint` 注解被客户端正确识别（Hermes 侧表现为只读 tool 免审批、`delete_request` 弹确认）。
 
@@ -974,7 +960,7 @@ E:\H_Req\reqly\
 | 1 | 项目名       | 暂定 `Reqly`，未提出异议即沿用                                                   | 待一句话确认 |
 | 2 | 双语        | **本期只做中文**，但全文案走 `t()` + `zh-CN.ts`，后端错误用错误码（§9.1）                     | ✅ 已定   |
 | 3 | 工作区数量     | 数据层支持多工作区，UI 默认只显示一个，暂不做切换器                                          | 按默认推进  |
-| 4 | AI Provider | **必须支持任意 OpenAI 兼容第三方端点**（指向公司自建网关），本期只落配置层，助手 UI 排 P10（§8.5）        | ✅ 已定   |
+| 4 | ~~AI Provider~~ | **已裁剪（2026-09-15）**：应用内不做 AI，能力只从外部 Agent（MCP / CLI）进来 —— 原「必须支持任意 OpenAI 兼容端点」的要求作废 | 🔄 改为不做 |
 | 5 | MCP 客户端   | **WorkBuddy / Hermes / Claude Code 全支持**，JSON + YAML 双格式配置生成器（§8.1）     | ✅ 已定   |
 
 **残余决策（不阻塞开工，采用默认值即可，随时可推翻）**：
