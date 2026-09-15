@@ -12,10 +12,15 @@
 //! 把大响应落成文件、可以只在需要时调用（不占上下文）、可以接进任何管道与脚本。
 //! 两者不是替代关系 —— **查和聊走 MCP，批处理与管道走 CLI**。
 //!
-//! ## 13 个操作只有一份实现
+//! ## 操作只有一份实现
 //!
 //! 全部来自 `reqly_core::service::ops`（MCP tool 调的是同一个 `Ops`）。
 //! 这里只做三件事：解析参数、调 `Ops`、把结果摆成人能读的样子。
+//!
+//! `Ops` 里一共 15 条，MCP 只暴露其中 13 条（那张 tool 表有测试钉着数量）——
+//! 多出来的 `folders create` / `env create` 是 CLI 独有的管理类入口。
+//! 它们同样收在 `Ops` 里而不是在 CLI 里另开一份实现：共用的编排不该分叉，
+//! 「暴露哪几个给 AI」是 MCP 侧的决定。见 `ops.rs` 模块头「13 与 15」。
 //!
 //! ## 退出码
 //!
@@ -38,10 +43,11 @@ use serde::Serialize;
 
 use reqly_core::error::{AppError, AppResult};
 use reqly_core::service::ops::{
-    CreateRequestRequest, DeleteRequestRequest, GetRequestRequest, ImportCurlRequest,
-    KeyValueInput, ListEnvironmentsRequest, ListFoldersRequest, ListRequestsRequest,
-    MoveRequestRequest, Ops, RefreshTokenRequest, RequestFields, RunLoadTestRequest,
-    SendRequestRequest, SetEnvVarRequest, UpdateRequestRequest, DEFAULT_MAX_BODY_BYTES,
+    CreateEnvironmentRequest, CreateFolderRequest, CreateRequestRequest, DeleteRequestRequest,
+    GetRequestRequest, ImportCurlRequest, KeyValueInput, ListEnvironmentsRequest,
+    ListFoldersRequest, ListRequestsRequest, MoveRequestRequest, Ops, RefreshTokenRequest,
+    RequestFields, RunLoadTestRequest, SendRequestRequest, SetEnvVarRequest, UpdateRequestRequest,
+    DEFAULT_MAX_BODY_BYTES,
 };
 use reqly_core::AppState;
 
@@ -54,6 +60,7 @@ const EXIT_USAGE: u8 = 2;
 const EXAMPLES: &str = "\
 示例：
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db folders
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db folders create --name RMS-报价权限
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db requests list --query 用户
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db requests get 12
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db send 12 --header \"X-Debug: 1\"
@@ -79,7 +86,7 @@ struct Cli {
     #[arg(long, global = true, env = "REQLY_DB", value_name = "PATH")]
     db: Option<PathBuf>,
 
-    /// 只读模式：9 个写操作一律返回 E_READ_ONLY，不会改到库
+    /// 只读模式：11 个写操作一律返回 E_READ_ONLY，不会改到库
     #[arg(long, global = true)]
     read_only: bool,
 
@@ -97,7 +104,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 列出文件夹（平铺返回，按 parentId 自行组树）
+    /// 文件夹：列出（默认）或新建
     Folders(FoldersArgs),
     /// 请求的增删改查
     #[command(subcommand)]
@@ -118,11 +125,35 @@ enum Command {
     Import(ImportCommand),
 }
 
+/// `folders` 的参数与子命令。
+///
+/// `--workspace` 挂在**这一层**而不是各自的子命令里：`folders`（默认列出）与
+/// `folders create` 都要用它，两边各声明一次会出现
+/// 「`folders --workspace 1 create --workspace 2`」这种谁生效要靠实现细节定的形状。
 #[derive(Args)]
 struct FoldersArgs {
     /// 工作区 id；省略 = 当前（唯一）工作区
     #[arg(long)]
     workspace: Option<i64>,
+    /// 省略子命令 = `list`。做成「可选子命令」而不是直接把 `folders` 改成分组，
+    /// 是为了让 `reqly-cli folders` 这条既有用法一个字都不用改。
+    #[command(subcommand)]
+    command: Option<FoldersCommand>,
+}
+
+#[derive(Subcommand)]
+enum FoldersCommand {
+    /// 列出文件夹（平铺返回，按 parentId 自行组树）
+    List,
+    /// 新建一个文件夹
+    Create {
+        /// 文件夹名（必填）
+        #[arg(long)]
+        name: String,
+        /// 父文件夹 id；省略 = 工作区根
+        #[arg(long, value_name = "FOLDER_ID")]
+        parent: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,6 +284,14 @@ enum EnvCommand {
         #[arg(long)]
         workspace: Option<i64>,
     },
+    /// 新建一个空环境（变量接着用 `env set` 写；激活要在桌面端切）
+    Create {
+        /// 环境名
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        workspace: Option<i64>,
+    },
     /// 写一个变量：同名改写，没有就追加（按非密文处理）
     Set {
         /// 环境 id
@@ -374,14 +413,27 @@ async fn run(cli: &Cli, db: PathBuf) -> AppResult<String> {
     let json = cli.json;
 
     match &cli.command {
-        Command::Folders(args) => {
-            let response = ops
-                .list_folders(ListFoldersRequest {
-                    workspace_id: args.workspace,
-                })
-                .await?;
-            emit(json, response, render::folders)
-        }
+        Command::Folders(args) => match &args.command {
+            // 不给子命令 = list：`reqly-cli folders` 这条既有用法不变
+            None | Some(FoldersCommand::List) => {
+                let response = ops
+                    .list_folders(ListFoldersRequest {
+                        workspace_id: args.workspace,
+                    })
+                    .await?;
+                emit(json, response, render::folders)
+            }
+            Some(FoldersCommand::Create { name, parent }) => {
+                let folder = ops
+                    .create_folder(CreateFolderRequest {
+                        workspace_id: args.workspace,
+                        parent_id: *parent,
+                        name: name.clone(),
+                    })
+                    .await?;
+                emit(json, folder, render::folder_created)
+            }
+        },
 
         Command::Requests(command) => match command {
             RequestsCommand::List { folder, query } => {
@@ -446,6 +498,15 @@ async fn run(cli: &Cli, db: PathBuf) -> AppResult<String> {
         },
 
         Command::Env(command) => match command {
+            EnvCommand::Create { name, workspace } => {
+                let environment = ops
+                    .create_environment(CreateEnvironmentRequest {
+                        workspace_id: *workspace,
+                        name: name.clone(),
+                    })
+                    .await?;
+                emit(json, environment, render::environment_block)
+            }
             EnvCommand::List { workspace } => {
                 let response = ops
                     .list_environments(ListEnvironmentsRequest {

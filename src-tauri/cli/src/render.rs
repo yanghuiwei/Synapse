@@ -16,9 +16,9 @@ use std::fmt::Write as _;
 
 use reqly_core::error::AppError;
 use reqly_core::service::ops::{
-    DeleteRequestResponse, EnvironmentDto, ImportCurlResponse, ListEnvironmentsResponse,
-    ListFoldersResponse, ListRequestsResponse, RefreshTokenResponse, RequestDetail, RequestSummary,
-    RunLoadTestResponse, SendRequestResponse,
+    DeleteRequestResponse, EnvironmentDto, FolderSummary, ImportCurlResponse,
+    ListEnvironmentsResponse, ListFoldersResponse, ListRequestsResponse, RefreshTokenResponse,
+    RequestDetail, RequestSummary, RunLoadTestResponse, SendRequestResponse,
 };
 
 /// 终端里这个字符占几格。只处理「中日韩越全角」与「其余算一格」两种。
@@ -129,6 +129,19 @@ pub fn folders(response: &ListFoldersResponse) -> String {
     out.push_str(&table(&["ID", "PARENT", "名称", "TOKEN源"], &rows));
     out.push('\n');
     out
+}
+
+/// `folders create` 出来的那一个文件夹。形状与列表里的一行一致。
+pub fn folder_created(folder: &FolderSummary) -> String {
+    format!(
+        "#{} {}（parent {}）\n",
+        folder.id,
+        folder.name,
+        folder
+            .parent_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "无（工作区根）".into())
+    )
 }
 
 pub fn requests(response: &ListRequestsResponse) -> String {
@@ -277,6 +290,10 @@ pub fn response(response: &SendRequestResponse) -> String {
         response.http_version, response.status, response.status_text
     );
     let _ = writeln!(out, "{}", response.url);
+    // 回显这次**实际**用的请求体类型：是 `none` 就说明一个字节都没发。
+    // 这是「body 静默没发出去」最后的观测点 —— 出了偏差在这里一眼能看见，
+    // 不必去怀疑服务端。
+    let _ = writeln!(out, "请求体类型: {}", response.body_type);
     let _ = writeln!(
         out,
         "总耗时 {}ms（TTFB {}ms / 下载 {}ms）{}",

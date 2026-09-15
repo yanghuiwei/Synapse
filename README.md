@@ -37,7 +37,7 @@
 | **导入器** | `curl` 命令；Postman v2.1 集合（apipost 导出走这条兼容路径）；**HAR 1.2**（浏览器 DevTools / Charles 抓包导出，按域名分文件夹、自动滤掉图片/JS/CSS 这类静态资源）；本工具自有 JSON 的导入导出。**OpenAPI 3.x 主动裁剪**（2026-09-15 决定不做，按需再迭代 —— 见路线图 P5） |
 | **压测** | 常驻 worker + 原子领号控并发；成功率 / P50 / P90 / P95 / P99 / TPS / 有效 RPS；延迟 + RPS 双轴折线、延迟直方图、最近 50 条失败样本；**一键导出 HTML 报表**并在系统程序中打开 |
 | **MCP Server**（P7） | 13 个 tool（snake_case 命名 + `readOnlyHint` 注解），stdio 与回环 HTTP 两种传输，只读模式，一键生成 WorkBuddy / Claude Code / Cursor 的 JSON 片段与 Hermes 的 YAML 片段 |
-| **命令行 CLI**（P8-A） | 13 条叶子命令，覆盖集合 / 请求 / 环境 / 发请求 / 压测 / Token / 导入；`--json` 输出与 MCP 返回形状一致，可直接 `\| jq` |
+| **命令行 CLI**（P8-A） | 15 条叶子命令，覆盖集合 / 请求 / 环境 / 发请求 / 压测 / Token / 导入；`--json` 输出与 MCP 返回形状一致，可直接 `\| jq` |
 | **外部改动自动刷新**（P8-A） | AI 在另一个进程里改了库（MCP 或 CLI），桌面端自动发现并刷新列表（1 秒轮询 + 1.2 秒去抖）—— 不用切板块、不用重启 |
 | **主题** | 浅色 / 深色 / 跟随系统，纯 CSS 变量双主题 |
 
@@ -62,7 +62,7 @@
 | 响应体 | 硬截 **64KB**（活着一整条通道，大响应会堵住对话） | 可 `--max-body-bytes 0` 不截，适合把大响应落成文件 |
 | 上下文成本 | 13 个 tool 的 schema 常驻对话上下文 | 零 —— 需要时 `--help` 现查 |
 | 结果可加工 | 协议帧，不能直接 `\| jq` | `--json` 是干净 JSON，随便 `\| jq` |
-| 写操作保护 | 只读模式下 4 个只读 tool 免审批、写操作按 `readOnlyHint` 弹确认 | `--read-only` 让 9 个写操作返回 `E_READ_ONLY` |
+| 写操作保护 | 只读模式下 4 个只读 tool 免审批、写操作按 `readOnlyHint` 弹确认 | `--read-only` 让 11 个写操作返回 `E_READ_ONLY` |
 
 ### MCP
 
@@ -94,11 +94,15 @@ reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" folders
 reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" requests list --query 用户
 reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" requests get 12
 reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" send 12 --header "X-Debug: 1"
-reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" send --method POST --url https://httpbin.org/post --body '{"a":1}'
+# ⚠️ PowerShell 会给原生程序重新拼一次参数，`--body '{"a":1}'` 里的双引号会被吃掉
+# （实测变成 `{a:1}`）。转义一下，或干脆用 --body-file。
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" send --method POST --url https://httpbin.org/post --body '{\"a\":1}'
 reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" import curl --file request.txt --json | jq '.created'
 ```
 
-命令树（**13 条叶子命令** + 分组节点）：`folders` · `requests {list,get,create,update,move,delete}` · `env {list,set}` · `send` · `loadtest run` · `token refresh` · `import curl`。
+命令树（**15 条叶子命令** + 分组节点）：`folders {list,create}` · `requests {list,get,create,update,move,delete}` · `env {create,list,set}` · `send` · `loadtest run` · `token refresh` · `import curl`。
+
+`folders` 不给子命令时等于 `folders list`（这条用法没变）。CLI 比 MCP 多两条 —— 编排（`service/ops.rs`）是同一份 15 个操作，MCP 只把其中 13 个开给 AI。
 
 只想单独构建两个入口、不为整包等一次 release 编译：
 
@@ -112,6 +116,8 @@ pnpm cli:build      # = cargo build -p reqly-cli
 - **不进 argv 的密钥**：`env set 1 API_KEY`（值省略）会从 stdin 读一行 —— Windows 上命令行参数在进程列表里可见。
 - **退出码两档**：`1` = 业务失败（带 `E_*` 错误码）、`2` = 用法错误。不给「网络错」单独一档，因为网络错本来就带 `E_DNS` / `E_CONN_REFUSED` / `E_TLS` 这类细分码，判 `code` 比判数字精确。
 - **分隔符按位置定**：`--header "K: V"` 按 `:` 切、`--param "K=V"` 按 `=` 切（header 值里常有 `=`，param 值里常有 `:`）。
+- **`--body` 不必再配 `--body-type`**：给了请求体、没给类型时按 `json` 发出去，并回显**实际用的**那个类型（`--json` 的 `bodyType`、人读输出的「请求体类型」）。反过来，`bodyType` 是 `none` 却带着非空 body 会**直接报错** `E_INVALID_INPUT`（`field: bodyType`）—— 这一对组合过去是静默把 body 丢掉，现场看起来像服务端坏了。`bodyType = none` + **空** body 仍然是合法的「确实不发请求体」。
+- **建目录 / 建环境也能从 CLI 做**：`folders create --name <名字> [--parent <id>]`、`env create --name <名字>`。这两条是 CLI 独有的管理类入口，MCP 的 tool 表刻意不含它们（见下）。
 
 安装包会把 `reqly-cli.exe` 放进 `%LOCALAPPDATA%\reqly\`（安装模式是 `currentUser`，不写 Program Files），**并把它加进当前用户的 PATH** —— 装完重开一个终端就能直接敲 `reqly-cli`。两条刻意的边界（都在 `src-tauri/nsis/path-hook.nsh`）：
 
@@ -195,14 +201,14 @@ $key.Close()   # 重开终端生效
 │    loadtest/  并发引擎 · 统计 · 分位 · 报表                │
 │    importer/  curl · postman · har · reqly                │
 │    template/  变量 / Token 占位符解析                      │
-│    service/   13 个操作的编排层（ops.rs）                  │
+│    service/   15 个操作的编排层（ops.rs）                  │
 │    mcp/       客户端配置片段生成                           │
 └──────┬──────────────────────────────────┬────────────────┘
        │                                  │
 ┌──────▼───────────────┐   ┌──────────────▼────────────────┐
 │ src-tauri/mcp/       │   │ src-tauri/cli/                │
 │ reqly-mcp            │   │ reqly-cli                     │
-│ 13 tool · 只读模式   │   │ 13 条命令 · --json            │
+│ 13 tool · 只读模式   │   │ 15 条命令 · --json            │
 │ 7.4 MB               │   │ 5.5 MB                        │
 └──────────────────────┘   └───────────────────────────────┘
 ```
@@ -463,7 +469,7 @@ reqly/
 - 专业级压测（ramp-up、RPS 曲线、分布式加压）
 - 插件市场
 - **应用内置 AI**（原 P9 AI Provider 配置层 + P10 内置助手）—— 2026-09-15 裁剪。
-  本工具的 AI 能力**只从外部 Agent 进来**：MCP（13 个 tool）与 CLI（13 条叶子命令）。
+  本工具的 AI 能力**只从外部 Agent 进来**：MCP（13 个 tool）与 CLI（15 条叶子命令）。
   理由：内置 provider / 对话面板要额外维护认证、自签证书、网关兼容、提示词一整套，
   而「让 AI 去找接口、改参数、发请求」这件事外部 Agent 做得更好 ——
   该由工具提供的是**干净的数据与通道**，不是另一个聊天框。

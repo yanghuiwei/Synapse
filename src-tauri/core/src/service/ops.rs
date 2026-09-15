@@ -1,4 +1,16 @@
-//! 13 个操作的实现体 —— MCP tool 与 CLI 子命令共用同一份。
+//! 15 个操作的实现体 —— MCP tool 与 CLI 子命令共用同一份。
+//!
+//! ## 13 与 15：暴露的数量与实现的数量不是一回事
+//!
+//! `Ops` 现在有 **15 个**操作，而 MCP 只暴露其中 **13 个**（那张 tool 表有测试
+//! 钉着「数量必须是 13」，见 `mcp/src/server.rs` 的 `EXPECTED`）。多出来的两条是
+//! [`Ops::create_folder`] 与 [`Ops::create_environment`]：桌面端早就能建，
+//! 但 MCP 与 CLI 都没有入口，于是「按需求建目录、按测试/预发切环境」这条自动化
+//! 路走不通（缺陷单 B3 / B4 —— 一个工作流跑通全流程时实测出来的）。
+//!
+//! 收在 `Ops` 而不是另开一份「CLI 专用实现」：这一层本来就是 MCP 与 CLI
+//! **共用的编排**，暴露其中哪几个子集是 MCP 的事 —— 编排逻辑不该因此分叉。
+//! 将来要开给 AI，只需在 `server.rs` 补两条 `#[tool]` 并同步那张注解表。
 //!
 //! ## 为什么在这里而不是在 `mcp/`
 //!
@@ -44,7 +56,10 @@ use crate::service::collection::ensure_usable_folder;
 use crate::service::import::{import_into_folder, Conflict, ImportLabels, ImportSource};
 use crate::service::loadtest::{discard_run, persist_outcome, stored_run_config};
 use crate::service::request::send_request_with;
-use crate::storage::models::{ApiRequest, BodyType, HttpVersion, KeyValueItem};
+use crate::service::validate::clean_name;
+use crate::storage::models::{
+    ApiRequest, BodyType, EnvVar, Environment, Folder, HttpVersion, KeyValueItem,
+};
 use crate::storage::{repo, with_conn};
 use crate::AppState;
 
@@ -457,6 +472,31 @@ pub struct DeleteRequestRequest {
     pub request_id: i64,
 }
 
+/// 新建文件夹。
+///
+/// **MCP 不暴露这条**（见模块头「13 与 15」）—— 它只服务于 CLI 的 `folders create`。
+/// 仍然派生 `JsonSchema`：「出入参只定义一份」是这一层的原则，
+/// 将来要开给 AI 就不必再动类型。
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFolderRequest {
+    #[serde(default, alias = "workspaceId")]
+    pub workspace_id: Option<i64>,
+    /// 父文件夹。省略 = 工作区根
+    #[serde(default, alias = "parentId")]
+    pub parent_id: Option<i64>,
+    pub name: String,
+}
+
+/// 新建环境。**MCP 不暴露这条**，理由同 [`CreateFolderRequest`]。
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateEnvironmentRequest {
+    #[serde(default, alias = "workspaceId")]
+    pub workspace_id: Option<i64>,
+    pub name: String,
+}
+
 // ============================================================
 // tool 出参
 // ============================================================
@@ -490,6 +530,12 @@ pub struct SendRequestResponse {
     pub http_version: String,
     pub url: String,
     pub redirected: bool,
+    /// **这次实际采用的请求体类型**。
+    ///
+    /// 回显它是为了消掉「body 到底发出去没有」这个猜：给了 body 而没指定类型时
+    /// 这里是推断出来的 `json`（见 [`infer_body_type`]）；是 `none` 就说明一个字节
+    /// 都没发。曾经的静默丢弃正是靠这个字段变得可见。
+    pub body_type: String,
     pub headers: Vec<HeaderDto>,
     /// 响应体。超过 64KB 时只给前面一段，`bodyTruncated` 为 true。
     pub body: String,
@@ -590,7 +636,7 @@ impl Ops {
         }
     }
 
-    /// 只读模式的唯一闸门：9 个写操作的第一行都是它。
+    /// 只读模式的唯一闸门：11 个写操作的第一行都是它。
     ///
     /// `tool` 是**调用方**的操作名（MCP 传 tool 名，CLI 传子命令名）——
     /// 错误里带上它，调用者才能说清「是哪个操作被拦了」，而不是给一句笼统的拒绝。
@@ -614,16 +660,7 @@ impl Ops {
 
         Ok(ListFoldersResponse {
             workspace_id,
-            folders: folders
-                .into_iter()
-                .map(|folder| FolderSummary {
-                    id: folder.id,
-                    parent_id: folder.parent_id,
-                    name: folder.name,
-                    sort_order: folder.sort_order,
-                    is_token_source: folder.is_token_source,
-                })
-                .collect(),
+            folders: folders.into_iter().map(summarise_folder).collect(),
         })
     }
 
@@ -682,25 +719,7 @@ impl Ops {
 
         let environments = rows
             .into_iter()
-            .map(|(env, vars)| EnvironmentDto {
-                id: env.id,
-                name: env.name,
-                is_active: env.is_active,
-                vars: vars
-                    .into_iter()
-                    .map(|var| EnvVarDto {
-                        key: var.key,
-                        // ★ 不打码就是把 secret 直接交给 AI —— §8.3 明令禁止
-                        value: if var.is_secret {
-                            MASK.to_string()
-                        } else {
-                            var.value
-                        },
-                        is_secret: var.is_secret,
-                        enabled: var.enabled,
-                    })
-                    .collect(),
-            })
+            .map(|(env, vars)| environment_dto(env, vars))
             .collect();
 
         Ok(ListEnvironmentsResponse {
@@ -782,24 +801,7 @@ impl Ops {
         })
         .await?;
 
-        Ok(EnvironmentDto {
-            id: env.id,
-            name: env.name,
-            is_active: env.is_active,
-            vars: vars
-                .into_iter()
-                .map(|var| EnvVarDto {
-                    key: var.key,
-                    value: if var.is_secret {
-                        MASK.to_string()
-                    } else {
-                        var.value
-                    },
-                    is_secret: var.is_secret,
-                    enabled: var.enabled,
-                })
-                .collect(),
-        })
+        Ok(environment_dto(env, vars))
     }
 
     /// 发一次真实请求。响应体 64KB 截断、敏感响应头打码。
@@ -813,9 +815,12 @@ impl Ops {
         // 否则 `InflightRegistry` 里两条并发请求会互相覆盖。
         let run_id = next_run_id();
 
+        // 先取出来：`send_request_with` 之后 `spec` 还活着，但把「这次用的类型」
+        // 显式传给 DTO 而不是让 DTO 去猜，能让回显这件事只有一个来源。
+        let body_type = spec.body_type;
         let payload = send_request_with(&self.state, &run_id, &spec).await?;
 
-        Ok(response_dto(payload, self.max_body_bytes))
+        Ok(response_dto(payload, self.max_body_bytes, body_type))
     }
 
     /// 跑一轮压测，阻塞到结束（最多 [`LOADTEST_TIMEOUT`]）。
@@ -839,6 +844,10 @@ impl Ops {
 
         let request = self.load_request(req.request_id).await?;
         let spec = RequestSpec::from(&request);
+        // 与单发同一道校验。压测这里比单发更要紧：一整轮几百个请求都不带 body，
+        // 测出来的是「服务端 400 有多快」，而报告上只体现为成功率不高 ——
+        // 人会去查服务端，不会想到是 body 没发出去。
+        ensure_body_type_consistent(spec.body_type, &spec.body)?;
         let stored = stored_run_config(&spec, &config)?;
 
         let run = with_conn(&self.state.pool, move |conn| {
@@ -1066,6 +1075,52 @@ impl Ops {
         })
     }
 
+    // ---- 只给 CLI 的 2 个（MCP 的 tool 表刻意不暴露，见模块头「13 与 15」） ----
+
+    /// 新建文件夹。父节点必须是「存活 + 同工作区」—— 与建请求共用同一条校验
+    /// （[`ensure_usable_folder`]），否则会建出树里看不见的孤儿。
+    pub async fn create_folder(&self, req: CreateFolderRequest) -> AppResult<FolderSummary> {
+        self.writable("create_folder")?;
+
+        let workspace_id = self.resolve_workspace(req.workspace_id).await?;
+        // 名字规则与桌面端是同一份实现（长度上限必须是同一个数，见 `service::validate`）
+        let name = clean_name(&req.name, "name")?;
+        let parent_id = req.parent_id;
+
+        let folder = with_conn(&self.state.pool, move |conn| {
+            if let Some(parent_id) = parent_id {
+                ensure_usable_folder(conn, parent_id, workspace_id, "parentId")?;
+            }
+            repo::folder::create(conn, workspace_id, parent_id, &name)
+        })
+        .await?;
+
+        Ok(summarise_folder(folder))
+    }
+
+    /// 新建环境。建出来是个空环境且 `is_active = 0`，变量接着用 `set_env_var` 写。
+    ///
+    /// 刻意不提供「顺手激活它」：激活位是**用户的状态**，不是这次创建的一部分。
+    /// 这与 [`Ops::check_environment`] 拒绝隐式切环境是同一条理由。
+    pub async fn create_environment(
+        &self,
+        req: CreateEnvironmentRequest,
+    ) -> AppResult<EnvironmentDto> {
+        self.writable("create_environment")?;
+
+        let workspace_id = self.resolve_workspace(req.workspace_id).await?;
+        let name = clean_name(&req.name, "name")?;
+
+        let (env, vars) = with_conn(&self.state.pool, move |conn| {
+            let env = repo::env::create(conn, workspace_id, &name)?;
+            let vars = repo::env::list_vars(conn, env.id)?;
+            Ok((env, vars))
+        })
+        .await?;
+
+        Ok(environment_dto(env, vars))
+    }
+
     // ---- 内部工具 ----
 
     /// 解析要用哪个工作区：给了 id 就校验它存在，没给就用当前（唯一）的那个。
@@ -1133,6 +1188,18 @@ impl Ops {
             spec.folder_id = req.folder_id;
         }
 
+        // ⚠️ 下面两行的**顺序是契约：先推断、后校验**。反过来的话
+        // `--body '{\"a\":1}'`（没给 type）会先被判成「none + 非空 body」直接报错，
+        // 于是 B1 等于没修 —— 从一个坑换到另一个坑。
+        //
+        // 推断只在**调用方这次给了 body** 时生效。已保存请求自带的 `body_type`
+        // 是用户的持久选择（`none` 就是「不发请求体」），一次 send 不该改写它；
+        // 那种情况交给下面的硬校验去拦，同样是显式失败而不是静默。
+        if req.body.is_some() {
+            infer_body_type(&mut spec.body_type, &spec.body, req.body_type.is_some());
+        }
+        ensure_body_type_consistent(spec.body_type, &spec.body)?;
+
         Ok(spec)
     }
 
@@ -1183,7 +1250,14 @@ impl Ops {
 }
 
 /// 把一次响应收成回给 AI 的形状（截断 + 打码）。
-fn response_dto(payload: HttpResponsePayload, max_body_bytes: usize) -> SendRequestResponse {
+///
+/// `body_type` **不来自响应**（HTTP 响应里没有这个概念）—— 它是这次请求实际用的
+/// 那个类型，由调用方从 `RequestSpec` 传进来，只为回显。
+fn response_dto(
+    payload: HttpResponsePayload,
+    max_body_bytes: usize,
+    body_type: BodyType,
+) -> SendRequestResponse {
     let headers = payload
         .headers
         .iter()
@@ -1201,6 +1275,7 @@ fn response_dto(payload: HttpResponsePayload, max_body_bytes: usize) -> SendRequ
         http_version: payload.http_version,
         url: payload.url,
         redirected: payload.redirected,
+        body_type: body_type.as_db_str().to_string(),
         headers,
         body,
         body_encoding: match payload.body_encoding {
@@ -1266,6 +1341,57 @@ fn truncate_body(body: String, limit: usize) -> (String, bool) {
     (out, true)
 }
 
+/// `body` 去掉首尾空白后是否真的有内容。
+///
+/// 判据刻意不是 `is_some()`：`--body ""` 与 `--body "  "` 都是「用户写了、
+/// 但什么都没写」，把它们当成有内容会推断出一个没人要的 `json`。
+fn has_body(body: &str) -> bool {
+    !body.trim().is_empty()
+}
+
+/// 补齐「给了 body 却没给 bodyType」这一步。
+///
+/// ## 这就是 B1 的修法，以及为什么只在 `type_given == false` 时才动
+///
+/// 原来的行为是：`body_type` 默认 `none`，而 `none` 在执行层等于
+/// 「一个字节都不发」（`http::execute::build_body` 的 `None => (None, None)`）。
+/// 于是 `send --body '{"empId":0}'` 把 body 存进 spec、发出去却是空的，
+/// **零报错** —— 现场看起来像服务端坏了（服务端回 400「no JSON tokens」）。
+///
+/// 推断成 `json` 而不是 `raw`：`--body` 的用法十有八九是贴一段 JSON，
+/// 猜错的代价也只是多一个 `Content-Type: application/json`（用户显式给了
+/// `Content-Type` 时那个头不会被覆盖，见 `build_headers` 之后的那段）。
+///
+/// `type_given` 为真时一概不动 —— 用户说了 `raw` 就是 `raw`；
+/// 说了 `none` 又带 body 属自相矛盾，交给 [`ensure_body_type_consistent`] 报错，
+/// 而不是替他改一个。
+fn infer_body_type(body_type: &mut BodyType, body: &str, type_given: bool) {
+    if !type_given && *body_type == BodyType::None && has_body(body) {
+        *body_type = BodyType::Json;
+    }
+}
+
+/// `body_type = none` 却又带着非空 `body` —— 这个状态一律拒绝。
+///
+/// 三个来源、同一个处置（显式失败，绝不静默）：
+/// 1. 调用方显式写了 `--body-type none` 同时给了 body（自相矛盾的输入）；
+/// 2. 库里的**存量数据**：老版本的 `create --body` 会把 `body_type` 落成 `none`
+///    （正是 B1 的另一半），发送时不能装作没看见；
+/// 3. 桌面端把一条请求的 `bodyType` 改成 `none` 但 body 文本还在的历史行。
+///
+/// ⚠️ **反向用例是硬约束**：`none` + **空** body 完全合法，那是「确实不发请求体」
+/// 的正常表达，必须原样放行 —— 判据是 [`has_body`]，不是 `is_some()`。
+fn ensure_body_type_consistent(body_type: BodyType, body: &str) -> AppResult<()> {
+    if body_type == BodyType::None && has_body(body) {
+        return Err(AppError::InvalidInput {
+            field: "bodyType",
+            reason: "bodyType is `none` but body is not empty;                      set bodyType to json/raw/urlencoded, or clear the body"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 /// 请求内的字段覆盖。`None` 一律表示「不动这个字段」。
 fn apply_fields(target: &mut ApiRequest, fields: &RequestFields) -> AppResult<()> {
     if let Some(name) = fields.name.as_deref() {
@@ -1288,6 +1414,24 @@ fn apply_fields(target: &mut ApiRequest, fields: &RequestFields) -> AppResult<()
     }
     if let Some(body) = &fields.body {
         target.body = body.clone();
+    }
+
+    // 先推断、后校验 —— 顺序是契约，理由见 `build_spec` 里那段说明。
+    //
+    // 推断只在调用方**这次给了 body** 时生效：`update 5 --name x` 这种没碰请求体的
+    // 调用不该顺手改写一条存量记录的 `body_type`。
+    if fields.body.is_some() {
+        infer_body_type(
+            &mut target.body_type,
+            &target.body,
+            fields.body_type.is_some(),
+        );
+    }
+    // 校验同样只在用户碰了 body 相关字段时才做。否则「库里那条本来就是
+    // none + 有内容」的历史记录会让一次改名也跟着报错 —— 那种记录该在
+    // **发送**时被拦（那才是它会静默丢数据的地方），而不是在无关的写操作上。
+    if fields.body.is_some() || fields.body_type.is_some() {
+        ensure_body_type_consistent(target.body_type, &target.body)?;
     }
     Ok(())
 }
@@ -1329,6 +1473,43 @@ fn summarise(request: ApiRequest) -> RequestSummary {
         name: request.name,
         method: request.method,
         url: request.url,
+    }
+}
+
+fn summarise_folder(folder: Folder) -> FolderSummary {
+    FolderSummary {
+        id: folder.id,
+        parent_id: folder.parent_id,
+        name: folder.name,
+        sort_order: folder.sort_order,
+        is_token_source: folder.is_token_source,
+    }
+}
+
+/// `Environment` + 变量 → 对外形状。密文变量的值一律 `••••`。
+///
+/// 抽出来是因为它有三个调用点（`list_environments` / `set_env_var` /
+/// `create_environment`）。打码那行抄三遍的话，迟早有一处会漏 ——
+/// 而漏掉的那一处就是「secret 直接进了 AI 的上下文」，§8.3 明令禁止的事。
+fn environment_dto(env: Environment, vars: Vec<EnvVar>) -> EnvironmentDto {
+    EnvironmentDto {
+        id: env.id,
+        name: env.name,
+        is_active: env.is_active,
+        vars: vars
+            .into_iter()
+            .map(|var| EnvVarDto {
+                key: var.key,
+                // ★ 不打码就是把 secret 直接交给 AI —— §8.3 明令禁止
+                value: if var.is_secret {
+                    MASK.to_string()
+                } else {
+                    var.value
+                },
+                is_secret: var.is_secret,
+                enabled: var.enabled,
+            })
+            .collect(),
     }
 }
 
@@ -1487,5 +1668,359 @@ mod tests {
         let second = next_run_id();
         assert_ne!(first, second);
         assert!(first.starts_with("run-"));
+    }
+
+    // ============================================================
+    // body 与 bodyType 的一致性（纯函数层）
+    // ============================================================
+
+    /// 核心用例：给了 body 没给 type —— 推断成 json，**不能**静默丢弃。
+    #[test]
+    fn a_body_without_a_type_is_inferred_as_json() {
+        let mut body_type = BodyType::None;
+        infer_body_type(&mut body_type, r#"{"a":1}"#, false);
+        assert_eq!(body_type, BodyType::Json);
+    }
+
+    /// **反向用例**（缺陷单特意点名的那个）：`none` + 空 body 完全合法，
+    /// 修的时候不能把「确实不发请求体」也判成错误。
+    #[test]
+    fn none_with_an_empty_body_stays_legal() {
+        assert!(ensure_body_type_consistent(BodyType::None, "").is_ok());
+        // 只有空白也算「什么都没写」—— 否则 `--body "  "` 会被推断成 json
+        assert!(ensure_body_type_consistent(BodyType::None, " \n\t ").is_ok());
+
+        let mut body_type = BodyType::None;
+        infer_body_type(&mut body_type, " \n\t ", false);
+        assert_eq!(body_type, BodyType::None);
+    }
+
+    /// 显式给的类型一概不被推断改写（`raw` 就是 `raw`）。
+    #[test]
+    fn an_explicit_type_is_never_overwritten_by_the_inference() {
+        for given in [BodyType::Json, BodyType::Raw, BodyType::Urlencoded] {
+            let mut body_type = given;
+            infer_body_type(&mut body_type, "x=1", true);
+            assert_eq!(body_type, given);
+        }
+    }
+
+    /// 显式的 `none` + body 不会被偷偷升级成 json —— 它该走报错那条路。
+    #[test]
+    fn an_explicit_none_is_not_upgraded_by_the_inference() {
+        let mut body_type = BodyType::None;
+        infer_body_type(&mut body_type, r#"{"a":1}"#, true);
+        assert_eq!(body_type, BodyType::None);
+    }
+
+    /// `none` + 非空 body 是自相矛盾的状态：报错，而不是替用户选一个。
+    #[test]
+    fn none_with_a_body_is_rejected_instead_of_silently_dropped() {
+        match ensure_body_type_consistent(BodyType::None, r#"{"a":1}"#).unwrap_err() {
+            AppError::InvalidInput { field, .. } => assert_eq!(field, "bodyType"),
+            other => panic!("期望 InvalidInput，实际 {other}"),
+        }
+    }
+
+    // ============================================================
+    // 带库的端到端：create / send / 两条 CLI 专有操作
+    // ============================================================
+
+    /// 「析构即删」的临时目录。
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                println!("[reqly-test] 临时目录没能删掉 {}: {e}", self.0.display());
+            }
+        }
+    }
+
+    struct TempOps {
+        // ⚠️ 顺序有意义：`ops` 持有连接池，声明必须在 `_dir` 之前 ——
+        // 否则删目录时文件还被打开着，Windows 删不掉，每个测试都在 TEMP 里
+        // 留一个目录（与 `storage::testkit` 的 `TestDb` 是同一个坑）。
+        ops: Ops,
+        _dir: TempDir,
+    }
+
+    fn temp_ops(tag: &str, read_only: bool) -> TempOps {
+        let dir = std::env::temp_dir().join(format!(
+            "reqly-ops-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // 上一次跑崩了会留下同名目录
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = Arc::new(AppState::new(dir.join("reqly.db")).expect("建库"));
+        TempOps {
+            ops: Ops::new(state, read_only),
+            _dir: TempDir(dir),
+        }
+    }
+
+    /// 建一条带 body 的请求，返回它的 id。直接走 `create_request`，
+    /// 因为要测的正是这条路径。
+    async fn seed_request(ops: &Ops, name: &str) -> i64 {
+        ops.create_request(CreateRequestRequest {
+            folder_id: None,
+            workspace_id: None,
+            name: name.into(),
+            method: "post".into(),
+            url: "http://127.0.0.1:1/x".into(),
+            params: None,
+            headers: None,
+            body_type: None,
+            body: Some(r#"{"a":1}"#.into()),
+        })
+        .await
+        .expect("建请求")
+        .id
+    }
+
+    /// `requests create --body`（不给 type）过去会落成 `bodyType: "none"` ——
+    /// 请求存着 body 却发不出去。这是缺陷单里第 3 个实测点。
+    #[tokio::test]
+    async fn a_created_request_keeps_its_type_in_sync_with_its_body() {
+        let t = temp_ops("create-body-type", false);
+
+        let created = t
+            .ops
+            .create_request(CreateRequestRequest {
+                folder_id: None,
+                workspace_id: None,
+                name: "BUGTEST".into(),
+                method: "post".into(),
+                url: "http://127.0.0.1:1/x".into(),
+                params: None,
+                headers: None,
+                body_type: None,
+                body: Some(r#"{"a":1}"#.into()),
+            })
+            .await
+            .expect("建请求");
+
+        assert_eq!(
+            created.body_type, "json",
+            "落库的 bodyType 必须与 body 一致"
+        );
+        assert_eq!(created.body, r#"{"a":1}"#);
+        // method 仍然走 `apply_fields` 统一大写
+        assert_eq!(created.method, "POST");
+    }
+
+    /// 内联 `send --body`（不给 type）：`build_spec` 出来的 spec 必须是 json，
+    /// 否则执行层的 `BodyType::None => (None, None)` 会把 body 吞掉。
+    #[tokio::test]
+    async fn an_inline_send_with_a_body_gets_a_type_that_can_be_sent() {
+        let t = temp_ops("inline-body-type", false);
+
+        let spec = t
+            .ops
+            .build_spec(&SendRequestRequest {
+                method: Some("POST".into()),
+                url: Some("http://127.0.0.1:1/x".into()),
+                body: Some(r#"{"a":1}"#.into()),
+                ..Default::default()
+            })
+            .await
+            .expect("建 spec");
+        assert_eq!(spec.body_type, BodyType::Json);
+
+        // 反向：两者都不给 —— 照旧不发请求体，**不能**变成报错
+        let spec = t
+            .ops
+            .build_spec(&SendRequestRequest {
+                method: Some("GET".into()),
+                url: Some("http://127.0.0.1:1/x".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("不带 body 的内联发送必须仍然合法");
+        assert_eq!(spec.body_type, BodyType::None);
+    }
+
+    /// 存量数据：库里已经有一条 `body_type = 'none'` 却存着 body 的请求
+    /// （老版本 `create --body` 的产物）。发送时必须显式报错，不能静默发空 body。
+    #[tokio::test]
+    async fn a_stale_none_request_is_rejected_at_send_time() {
+        let t = temp_ops("stale-none", false);
+        let request_id = seed_request(&t.ops, "legacy").await;
+
+        // 复刻老版本落库的形状
+        t.ops
+            .state
+            .pool
+            .get()
+            .expect("连接")
+            .execute(
+                "UPDATE request SET body_type = 'none' WHERE id = ?1",
+                rusqlite::params![request_id],
+            )
+            .expect("改回 none");
+
+        match t
+            .ops
+            .build_spec(&SendRequestRequest {
+                request_id: Some(request_id),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+        {
+            AppError::InvalidInput { field, .. } => assert_eq!(field, "bodyType"),
+            other => panic!("期望 InvalidInput，实际 {other}"),
+        }
+    }
+
+    /// 反过来：同样 `body_type = 'none'`，把 body 清空之后就该能发 ——
+    /// 「不发请求体」是合法表达，不能一并拦掉。
+    #[tokio::test]
+    async fn a_none_request_with_an_empty_body_still_builds_a_spec() {
+        let t = temp_ops("none-empty-body", false);
+        let request_id = seed_request(&t.ops, "no-body").await;
+
+        t.ops
+            .state
+            .pool
+            .get()
+            .expect("连接")
+            .execute(
+                "UPDATE request SET body_type = 'none', body = '' WHERE id = ?1",
+                rusqlite::params![request_id],
+            )
+            .expect("清 body");
+
+        let spec = t
+            .ops
+            .build_spec(&SendRequestRequest {
+                request_id: Some(request_id),
+                ..Default::default()
+            })
+            .await
+            .expect("空 body + none 必须放行");
+        assert_eq!(spec.body_type, BodyType::None);
+    }
+
+    /// 建文件夹（B3），含父节点校验 —— 与建请求共用 `ensure_usable_folder`。
+    #[tokio::test]
+    async fn folders_can_be_created_from_ops() {
+        let t = temp_ops("create-folder", false);
+
+        let root = t
+            .ops
+            .create_folder(CreateFolderRequest {
+                workspace_id: None,
+                parent_id: None,
+                name: "RMS-报价权限".into(),
+            })
+            .await
+            .expect("建根文件夹");
+        assert_eq!(root.parent_id, None);
+
+        let child = t
+            .ops
+            .create_folder(CreateFolderRequest {
+                workspace_id: None,
+                parent_id: Some(root.id),
+                name: "FP-01".into(),
+            })
+            .await
+            .expect("建子文件夹");
+        assert_eq!(child.parent_id, Some(root.id));
+
+        // 父节点不存在 → 走仓储的 NotFound，而不是建出一个树里看不见的孤儿
+        let err = t
+            .ops
+            .create_folder(CreateFolderRequest {
+                workspace_id: None,
+                parent_id: Some(9999),
+                name: "x".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), codes::NOT_FOUND);
+
+        // 名字规则与桌面端是同一份实现
+        let err = t
+            .ops
+            .create_folder(CreateFolderRequest {
+                workspace_id: None,
+                parent_id: None,
+                name: "   ".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), codes::INVALID_INPUT);
+
+        let listed = t
+            .ops
+            .list_folders(ListFoldersRequest::default())
+            .await
+            .expect("列文件夹");
+        assert_eq!(listed.folders.len(), 2);
+    }
+
+    /// 建环境（B4）。建出来是空的，且**不是**激活状态。
+    #[tokio::test]
+    async fn environments_can_be_created_from_ops() {
+        let t = temp_ops("create-env", false);
+
+        let created = t
+            .ops
+            .create_environment(CreateEnvironmentRequest {
+                workspace_id: None,
+                name: "预发".into(),
+            })
+            .await
+            .expect("建环境");
+
+        assert_eq!(created.name, "预发");
+        assert!(created.vars.is_empty());
+        // 激活位是用户的状态，创建不该顺手改它
+        assert!(!created.is_active);
+
+        // 建完能直接往里写变量（两条命令刚好接得上）
+        let with_var = t
+            .ops
+            .set_env_var(SetEnvVarRequest {
+                environment_id: created.id,
+                key: "BASE_URL".into(),
+                value: "https://pre.example.com".into(),
+            })
+            .await
+            .expect("写变量");
+        assert_eq!(with_var.vars.len(), 1);
+        assert_eq!(with_var.vars[0].key, "BASE_URL");
+    }
+
+    /// 两条 CLI 专有操作同样受只读闸门管 —— 闸门就是 `writable()` 那一行，
+    /// 新加操作时最容易漏的正是它。
+    #[tokio::test]
+    async fn the_cli_only_operations_obey_the_read_only_gate() {
+        let t = temp_ops("cli-only-read-only", true);
+
+        let folder_err = t
+            .ops
+            .create_folder(CreateFolderRequest {
+                workspace_id: None,
+                parent_id: None,
+                name: "x".into(),
+            })
+            .await
+            .unwrap_err();
+        let env_err = t
+            .ops
+            .create_environment(CreateEnvironmentRequest {
+                workspace_id: None,
+                name: "x".into(),
+            })
+            .await
+            .unwrap_err();
+
+        for err in [folder_err, env_err] {
+            assert_eq!(err.code(), codes::READ_ONLY);
+        }
     }
 }

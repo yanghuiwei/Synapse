@@ -752,7 +752,7 @@ run_load_test(42, C=50, N=500)     → 成功率 100%，P95=87ms
 
 原计划给应用内置一个 OpenAI 兼容的 provider 配置层（`ai_provider` 表 + `src-tauri/src/ai/`
 + 连通性测试按钮），为 P10 内置助手铺路。**现已裁剪**：本工具的 AI 能力**只从外部 Agent 进来**
-（MCP 13 个 tool + CLI 13 条命令），应用内不做 provider 配置与对话面板 —— 见 §0.2 与 `plan.md` §22。
+（MCP 13 个 tool + CLI 15 条命令），应用内不做 provider 配置与对话面板 —— 见 §0.2 与 `plan.md` §22。
 
 裁剪时留下的两点判断（都是从原设计里抠出来的）：
 
