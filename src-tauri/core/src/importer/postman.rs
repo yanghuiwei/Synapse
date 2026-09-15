@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 
 use super::Format;
 use super::{
-    EnvDraft, EnvVarDraft, FolderNode, ImportBundle, ImportWarning, RequestDraft, WarningKind,
+    urlencode, value_to_string, EnvDraft, EnvVarDraft, FolderNode, ImportBundle, ImportWarning,
+    RequestDraft, WarningKind,
 };
 use crate::error::{codes, AppError, AppResult};
 use crate::storage::models::{ApiKeyLocation, AuthConfig, KeyValueItem};
@@ -921,19 +922,6 @@ fn guess_body_type(raw: &str) -> String {
     }
 }
 
-fn urlencode(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.as_bytes() {
-        let c = *byte as char;
-        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
-            out.push(c);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
 // ---- 小而多的取值助手 ----
 
 fn str_at(value: &Value, key: &str) -> Option<String> {
@@ -951,15 +939,6 @@ fn first_array<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
     keys.iter()
         .filter_map(|key| value.get(*key).and_then(Value::as_array))
         .find(|found| !found.is_empty())
-}
-
-/// JSON 里的值 → 字符串。数字/布尔照字面量转，`null` 当空串
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
 }
 
 #[cfg(test)]

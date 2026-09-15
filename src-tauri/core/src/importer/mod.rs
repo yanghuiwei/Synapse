@@ -20,6 +20,7 @@
 //!    不是要展开的宏。pipeline 在发送前会处理它们。
 
 pub mod curl;
+pub mod har;
 pub mod postman;
 pub mod reqly;
 pub mod tokenizer;
@@ -37,6 +38,7 @@ pub enum Format {
     Postman,
     Apipost,
     Reqly,
+    Har,
 }
 
 impl Format {
@@ -47,6 +49,7 @@ impl Format {
             Format::Postman => "postman",
             Format::Apipost => "apipost",
             Format::Reqly => "reqly",
+            Format::Har => "har",
         }
     }
 }
@@ -327,6 +330,7 @@ pub fn parse(input: &ImportInput) -> AppResult<(Format, ImportBundle)> {
         Format::Curl => curl::parse(input.trimmed())?,
         Format::Postman | Format::Apipost => postman::parse(input.trimmed(), format)?,
         Format::Reqly => reqly::parse(input.trimmed())?,
+        Format::Har => har::parse(input.trimmed())?,
     };
     Ok((format, bundle))
 }
@@ -339,6 +343,16 @@ fn json_format(value: &serde_json::Value) -> Format {
     // 先按 `apipost` 认出来，免得被 Postman 的分支抢走
     if value.get("apipost").is_some() || value.get("target_type").is_some() {
         return Format::Apipost;
+    }
+    // HAR 1.2 靠 `log.entries` 认。它和下面几家的顶层键都不撞，
+    // 但顺序还是放在 Postman 之前 —— 以后加 OpenAPI 时那个 `info` 是要抢的，
+    // 这里先把「更具体的形状优先」立住
+    if value
+        .pointer("/log/entries")
+        .and_then(serde_json::Value::as_array)
+        .is_some()
+    {
+        return Format::Har;
     }
     if let Some(info) = value.get("info") {
         if info.get("schema").is_some() || value.get("_postman_id").is_some() {
@@ -425,6 +439,32 @@ fn dedupe_one(draft: &mut RequestDraft, seen: &mut Vec<String>, warnings: &mut V
     ));
 }
 
+/// 百分号编码。postman 与 har 都要把键值对拼成 urlencoded 串，
+/// 所以规则只留这一份 —— 这种函数一旦有两份，迟早有一份把空格编成 `+`，
+/// 而那种错在导入时看不出来。
+pub(crate) fn urlencode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.as_bytes() {
+        let c = *byte as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// JSON 里的值 → 字符串。数字 / 布尔照字面量转，`null` 当空串。
+/// 导入的文件是外面来的，`"value": 1` 这种地方不该让整条解不出来。
+pub(crate) fn value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 /// 「看起来像 curl 命令」：第一个非空行以 curl 开头，或者第一个词就是 curl
 fn looks_like_curl(text: &str) -> bool {
     let head = text.lines().find(|line| !line.trim().is_empty());
@@ -470,6 +510,29 @@ mod tests {
         // apipost 的结构里同时有 info 与 apipost 标志 → 必须优先认出 apipost
         let input = ImportInput::text(r#"{"apipost":"1.0","info":{"name":"c"},"item":[]}"#);
         assert_eq!(detect(&input).unwrap(), Format::Apipost);
+    }
+
+    #[test]
+    fn detects_har_by_log_entries() {
+        let input = ImportInput::text(r#"{"log":{"version":"1.2","entries":[]}}"#);
+        assert_eq!(detect(&input).unwrap(), Format::Har);
+    }
+
+    #[test]
+    fn har_format_string_matches_the_frontend_contract() {
+        // 前端按这个字符串切文案（src/lib/schemas.ts 的 importFormatSchema）
+        assert_eq!(Format::Har.as_str(), "har");
+        assert_eq!(
+            serde_json::to_value(Format::Har).unwrap(),
+            serde_json::json!("har")
+        );
+    }
+
+    #[test]
+    fn urlencode_keeps_the_unreserved_set_only() {
+        assert_eq!(urlencode("a b"), "a%20b");
+        assert_eq!(urlencode("-_.~"), "-_.~");
+        assert_eq!(urlencode("张"), "%E5%BC%A0");
     }
 
     #[test]

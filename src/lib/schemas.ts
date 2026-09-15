@@ -409,7 +409,7 @@ export const historyPageSchema = z.looseObject({
 // 导入器（P5）
 // ---------------------------------------------------------------
 
-export const importFormatSchema = z.enum(["curl", "postman", "apipost", "reqly"]);
+export const importFormatSchema = z.enum(["curl", "postman", "apipost", "reqly", "har"]);
 
 export const conflictModeSchema = z.enum(["merge", "duplicate", "overwrite"]);
 

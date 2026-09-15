@@ -48,9 +48,9 @@ reqly-mcp —— 把 Reqly 工作台暴露成 MCP 工具集
   -h, --help    显示这段说明。
 
 示例：
-  reqly-mcp --db \"%APPDATA%/reqly/reqly.db\"
-  reqly-mcp --db \"%APPDATA%/reqly/reqly.db\" --http --port 7777
-  reqly-mcp --db \"%APPDATA%/reqly/reqly.db\" --read-only
+  reqly-mcp --db \"%APPDATA%/com.reqly.desktop/reqly.db\"
+  reqly-mcp --db \"%APPDATA%/com.reqly.desktop/reqly.db\" --http --port 7777
+  reqly-mcp --db \"%APPDATA%/com.reqly.desktop/reqly.db\" --read-only
 ";
 
 #[derive(Debug)]

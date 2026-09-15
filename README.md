@@ -32,7 +32,7 @@
 | **响应面板** | 状态码 / 耗时 / 大小；格式化 JSON；响应头；原始报文 |
 | **历史与回收站** | 每次发送落 `history`；全局软删除（`deleted_at`），回收站可还原 / 彻底删除 |
 | **变量与 Token** | 环境（Environment）→ 变量；`{{var}}` 占位符；标记 secret 的变量不回显；Token 源绑定到 Folder，命名空间占位符 `{{token.access}}`，同源并发刷新走单飞锁 |
-| **导入器** | `curl` 命令；Postman v2.1 集合（apipost 导出走这条兼容路径）；本工具自有 JSON 的导入导出。**OpenAPI 3.x 与 HAR 1.2 尚未实现**（`core/src/importer/` 里确实没有这两个解析器，见路线图 P5 的说明） |
+| **导入器** | `curl` 命令；Postman v2.1 集合（apipost 导出走这条兼容路径）；**HAR 1.2**（浏览器 DevTools / Charles 抓包导出，按域名分文件夹、自动滤掉图片/JS/CSS 这类静态资源）；本工具自有 JSON 的导入导出。**OpenAPI 3.x 尚未实现**（`core/src/importer/` 里没有这个解析器，见路线图 P5 的说明） |
 | **压测** | 常驻 worker + 原子领号控并发；成功率 / P50 / P90 / P95 / P99 / TPS / 有效 RPS；延迟 + RPS 双轴折线、延迟直方图、最近 50 条失败样本；**一键导出 HTML 报表**并在系统程序中打开 |
 | **MCP Server**（P7） | 13 个 tool（snake_case 命名 + `readOnlyHint` 注解），stdio 与回环 HTTP 两种传输，只读模式，一键生成 WorkBuddy / Claude Code / Cursor 的 JSON 片段与 Hermes 的 YAML 片段 |
 | **命令行 CLI**（P8-A） | 15 条命令，覆盖集合 / 请求 / 环境 / 发请求 / 压测 / Token / 导入；`--json` 输出与 MCP 返回形状一致，可直接 `\| jq` |
@@ -86,7 +86,12 @@ reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" import curl --file request
 - **退出码两档**：`1` = 业务失败（带 `E_*` 错误码）、`2` = 用法错误。不给「网络错」单独一档，因为网络错本来就带 `E_DNS` / `E_CONN_REFUSED` / `E_TLS` 这类细分码，判 `code` 比判数字精确。
 - **分隔符按位置定**：`--header "K: V"` 按 `:` 切、`--param "K=V"` 按 `=` 切（header 值里常有 `=`，param 值里常有 `:`）。
 
-⚠️ 安装包会把 `reqly-cli.exe` 放进安装目录，但**不会加进 PATH**（`reqly-mcp.exe` 不受影响，MCP 客户端按配置里的绝对路径拉起它）。想在任意目录敲 `reqly-cli`，需要自己把安装目录加进 PATH。
+安装包会把 `reqly-cli.exe` 放进 `%LOCALAPPDATA%\reqly\`（安装模式是 `currentUser`，不写 Program Files），**并把它加进当前用户的 PATH** —— 装完重开一个终端就能直接敲 `reqly-cli`。两条刻意的边界（都在 `src-tauri/nsis/path-hook.nsh`）：
+
+- **卸载时摘掉**，不在注册表里留垃圾。
+- **PATH 太长就不动它**：NSIS 的字符串上限是 1024，实测一条 ≥1024 字符的 PATH 读回来是**空串**而不是截断。照那个空串写回去，等于把用户整条 PATH 换成我们一个目录 —— 别人的命令会集体失踪，而且一声不吭。所以这种情况直接放弃并提示手工添加。少一条 PATH 记录和毁掉别人的 PATH，代价不对称。
+
+`reqly-mcp.exe` 与这条完全无关：MCP 客户端按配置文件里的绝对路径拉起它，全程不碰 PATH。
 
 ---
 
@@ -220,16 +225,17 @@ pnpm tauri build --bundles nsis       # 临时只要 NSIS 时用
 | 前端类型 | `pnpm exec tsc --noEmit` |
 | 前端构建 | `pnpm build` |
 | sidecar staging | `pnpm sidecar:stage`（只有要打包时才需要） |
+| 安装钩子回归 | `powershell -ExecutionPolicy Bypass -File scripts\nsis-path-hook-test.ps1`（23 个用例，只动一个测试用注册表键） |
 
 **当前基线**
 
 | 指标 | 值 |
 |---|---|
-| `cargo test --workspace` | **468 passed / 0 failed**（6 ignored = `http_live` 5 + `loadtest_ab` 1，按设计需公网 / 需 `ab`） |
+| `cargo test --workspace` | **488 passed / 0 failed**（6 ignored = `http_live` 5 + `loadtest_ab` 1，按设计需公网 / 需 `ab`） |
 | `clippy -D warnings` | 0 告警 |
 | `tsc --noEmit` | 0 错误 |
-| `pnpm build` | 2025 modules；CSS 37.40 kB / JS 625.78 kB（gzip 192.01 kB） |
-| release 体积 | `reqly.exe` 9.5 MB · `reqly-mcp.exe` 7.4 MB · `reqly-cli.exe` 5.5 MB |
+| `pnpm build` | 2025 modules；CSS 37.40 kB / JS 625.87 kB（gzip 192.07 kB） |
+| release 体积 | `reqly.exe` 9.5 MB · `reqly-mcp.exe` 7.4 MB · `reqly-cli.exe` 5.5 MB · NSIS 安装包 5.25 MB |
 
 **压测的硬指标验收**（对 `ApacheBench` 校准 P95，偏差 < 10%）：需要本机有 `ab`，用例默认 `#[ignore]`：
 
@@ -278,7 +284,7 @@ reqly/
 | 文件 | 内容 |
 |---|---|
 | [`docs/design.md`](docs/design.md) | 设计文档：定位、7 项已确认决策、数据模型、各模块设计、Rust 侧技术根因 |
-| [`docs/plan.md`](docs/plan.md) | 实施计划 + **§7–§17 各阶段实测记录**（完成范围、验收命令与结果、坑、路线图欠账） |
+| [`docs/plan.md`](docs/plan.md) | 实施计划 + **§7–§21 各阶段实测记录**（完成范围、验收命令与结果、坑、路线图欠账） |
 | [`docs/ab-calibration-p6.txt`](docs/ab-calibration-p6.txt) | P6 分位数对 ab 校准的原始输出留档 |
 
 ---
@@ -292,11 +298,12 @@ reqly/
 | P2 | 请求闭环与六类错误分离 | ✅ |
 | P3 | 历史、软删除与回收站 | ✅ |
 | P4 | 环境变量与 Token 源 | ✅ |
-| P5 | 导入器：curl ✅ · Postman v2.1 ✅ · **OpenAPI 3.x / HAR 1.2 ❌ 未实现** | ⚠️ |
+| P5 | 导入器：curl ✅ · Postman v2.1 ✅ · **HAR 1.2 ✅** · **OpenAPI 3.x ❌ 未实现** | ⚠️ |
 | P6 | 并发压测与报表导出 | ✅ |
 | P7 | MCP Server：13 个 tool、stdio + 回环 HTTP、配置片段生成、只读模式 | ✅ |
 | P8-A | 拆 crate（core / mcp / cli）+ CLI 通道 + 外部改动自动刷新 + 两个 sidecar 进安装包 | ✅ |
 | P8-② | 应用标识改 `com.reqly.desktop` + 老数据目录一次性迁移（含 WAL）+ Windows 打包只出 NSIS | ✅ |
+| P8-④ | 修 9 处旧数据目录口径（`--help` 教人连旧库）+ NSIS 钩子把 CLI 加进用户 PATH | ✅ |
 | P8 | 打磨：命令面板 `Ctrl+K`、整包导入导出、自动更新、图标、关于页、体积优化 | ⏳ |
 | P9 | AI Provider：任意 OpenAI 兼容端点（含自建网关）、`baseUrl` 原样使用、连通性测试回原始报文 | — |
 | P10 | 内置 AI 助手：自然语言生成请求 / 解释响应 / 生成断言（可选，依赖 P9） | — |

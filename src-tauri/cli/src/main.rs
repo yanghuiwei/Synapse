@@ -53,12 +53,12 @@ const EXIT_USAGE: u8 = 2;
 /// 为什么这行提示要写在 `after_help` 里而不是文档：用户看到错误时正好需要它。
 const EXAMPLES: &str = "\
 示例：
-  reqly-cli --db %APPDATA%/reqly/reqly.db folders
-  reqly-cli --db %APPDATA%/reqly/reqly.db requests list --query 用户
-  reqly-cli --db %APPDATA%/reqly/reqly.db requests get 12
-  reqly-cli --db %APPDATA%/reqly/reqly.db send 12 --header \"X-Debug: 1\"
-  reqly-cli --db %APPDATA%/reqly/reqly.db send --method POST --url https://httpbin.org/post --body \"{\\\"a\\\":1}\"
-  reqly-cli --db %APPDATA%/reqly/reqly.db import curl --file request.txt
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db folders
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db requests list --query 用户
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db requests get 12
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db send 12 --header \"X-Debug: 1\"
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db send --method POST --url https://httpbin.org/post --body \"{\\\"a\\\":1}\"
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db import curl --file request.txt
 
 与 MCP 的分工：MCP 走一条共享的 JSON-RPC 通道（响应体硬截 64KB），适合「边聊边查」；
 CLI 的 stdout 是干净文本或 JSON，适合管道、脚本、以及把大响应落成文件 ——
@@ -75,6 +75,7 @@ CLI 的 stdout 是干净文本或 JSON，适合管道、脚本、以及把大响
 struct Cli {
     /// Reqly 的 SQLite 文件路径（也可以设环境变量 REQLY_DB）。
     /// 桌面端「设置」页能直接看到它的绝对路径。
+    /// 文件不存在会新建一个空库（迁移会自动跑）—— 抄示例里的路径前先确认它真在那儿。
     #[arg(long, global = true, env = "REQLY_DB", value_name = "PATH")]
     db: Option<PathBuf>,
 

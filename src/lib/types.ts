@@ -476,7 +476,7 @@ export interface NewHistoryEntry {
 // ============================================================
 
 /** 识别出来的来源格式。加一种要同步 `importer::Format`。 */
-export type ImportFormat = "curl" | "postman" | "apipost" | "reqly";
+export type ImportFormat = "curl" | "postman" | "apipost" | "reqly" | "har";
 
 /**
  * 同名冲突的处理方式。语义差异见 Rust 侧 `commands::import_::Conflict`：

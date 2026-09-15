@@ -332,6 +332,7 @@ export const zhCN = {
   "import.sourceOpenapi": "OpenAPI / Swagger",
   "import.sourcePostman": "Postman 集合",
   "import.sourceReqly": "Reqly 导出文件",
+  "import.sourceHar": "HAR（浏览器 / Charles 抓包导出）",
   "import.curlPlaceholder": "把 curl 命令粘贴到这里，可粘多条",
   "import.pickFile": "选择文件…",
   "import.reading": "正在读取文件…",
@@ -344,7 +345,7 @@ export const zhCN = {
   "import.done": "已导入 {count} 个接口",
   "import.committing": "正在导入…",
   "import.empty": "还没有内容",
-  "import.emptyHint": "粘贴 cURL 命令，或选一个 Postman / ApiPost / Reqly 导出的文件",
+  "import.emptyHint": "粘贴 cURL 命令，或选一个 Postman / ApiPost / HAR / Reqly 导出的文件",
   "import.nothingToImport": "这份内容里没有可导入的接口",
 
   // 冲突模式

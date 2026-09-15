@@ -82,7 +82,7 @@
 └──────────────────────────────────────────────────────────────┘
                         │
                         ▼
-            %APPDATA%/reqly/reqly.db   ← 全部数据本地单文件
+            %APPDATA%/com.reqly.desktop/reqly.db   ← 全部数据本地单文件
 ```
 
 ### 2.1 为什么请求执行必须放在 Rust 侧
@@ -103,7 +103,7 @@
 
 ## 3. 数据模型
 
-单文件 SQLite，路径 `%APPDATA%/reqly/reqly.db`（macOS `~/Library/Application Support/reqly/`）。  
+单文件 SQLite，路径 `%APPDATA%/com.reqly.desktop/reqly.db`（macOS `~/Library/Application Support/com.reqly.desktop/`）。  
 启用 `PRAGMA journal_mode=WAL` `foreign_keys=ON` `synchronous=NORMAL`。
 
 ### 3.1 核心概念层级
@@ -655,8 +655,8 @@ Claude Code / WorkBuddy / Cursor（JSON，`mcpServers`）：
 {
   "mcpServers": {
     "reqly": {
-      "command": "%APPDATA%/reqly/reqly-mcp.exe",
-      "args": ["--db", "%APPDATA%/reqly/reqly.db"],
+      "command": "%APPDATA%/com.reqly.desktop/reqly-mcp.exe",
+      "args": ["--db", "%APPDATA%/com.reqly.desktop/reqly.db"],
       "env": {}
     }
   }
@@ -668,8 +668,8 @@ Hermes Agent（YAML，写在 `~/.hermes/config.yaml` 的 `mcp_servers:` 下）�
 ```yaml
 mcp_servers:
   reqly:
-    command: "%APPDATA%/reqly/reqly-mcp.exe"
-    args: ["--db", "%APPDATA%/reqly/reqly.db"]
+    command: "%APPDATA%/com.reqly.desktop/reqly-mcp.exe"
+    args: ["--db", "%APPDATA%/com.reqly.desktop/reqly.db"]
     enabled: true
     timeout: 120
     connect_timeout: 60

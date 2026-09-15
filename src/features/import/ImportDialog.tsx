@@ -34,6 +34,7 @@ const FORMAT_LABEL: Record<ImportFormat, MessageKey> = {
   postman: "import.sourcePostman",
   apipost: "import.sourceApipost",
   reqly: "import.sourceReqly",
+  har: "import.sourceHar",
 };
 
 const CONFLICT_LABEL: Record<ConflictMode, MessageKey> = {

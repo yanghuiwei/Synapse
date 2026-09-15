@@ -25,6 +25,9 @@ src-tauri/binaries/*.so
 src-tauri/binaries/*.dylib
 src-tauri/binaries/*.sig
 
+# NSIS 安装钩子的自测脚本编译产物（源文件在 src-tauri/nsis/，每次跑测试重新生成）
+src-tauri/nsis/*.exe
+
 # 凭据类文件一律不进仓库 —— 远端是公开仓库，而 Reqly 的定位就是
 # 「凭据只留在本机」（secret 存本地库、token 从接口取），
 # 真出现这类文件基本都是调试时随手丢下的，不该被提交。
