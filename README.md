@@ -190,9 +190,14 @@ pnpm tauri dev
 打包（`beforeBuildCommand` 会自动跑前端构建与 sidecar staging，无需手动准备）：
 
 ```powershell
-pnpm tauri build                      # 按 tauri.conf.json 的 targets 全量打包
-pnpm tauri build --bundles nsis       # 只要 Windows NSIS 安装器（不额外拉 WiX）
+pnpm tauri build                      # 按 targets 打包
+pnpm tauri build --bundles nsis       # 临时只要 NSIS 时用
 ```
+
+**Windows 上 `targets` 收敛成只剩 NSIS**（见 `src-tauri/tauri.windows.conf.json`）：
+脚手架默认的 `"all"` 在 Windows 上等于 NSIS + MSI，而 MSI 还要额外拉一套 WiX 工具链
+（同样是现场从 GitHub 下载，企业网络下经常直接失败）—— 我们只发 NSIS，所以不去碰它。
+写成平台专属配置文件而不是改主文件，是为了让 macOS / Linux 继续沿用 `"all"`。
 
 产物：`src-tauri/target/release/bundle/nsis/reqly_0.1.0_x64-setup.exe`（安装目录里是 `reqly.exe` + `reqly-mcp.exe` + `reqly-cli.exe` 三个可执行文件）。
 
@@ -220,7 +225,7 @@ pnpm tauri build --bundles nsis       # 只要 Windows NSIS 安装器（不额�
 
 | 指标 | 值 |
 |---|---|
-| `cargo test --workspace` | **462 passed / 0 failed**（6 ignored = `http_live` 5 + `loadtest_ab` 1，按设计需公网 / 需 `ab`） |
+| `cargo test --workspace` | **468 passed / 0 failed**（6 ignored = `http_live` 5 + `loadtest_ab` 1，按设计需公网 / 需 `ab`） |
 | `clippy -D warnings` | 0 告警 |
 | `tsc --noEmit` | 0 错误 |
 | `pnpm build` | 2025 modules；CSS 37.40 kB / JS 625.78 kB（gzip 192.01 kB） |
@@ -251,7 +256,10 @@ reqly/
 ├── src-tauri/                  后端（Cargo workspace，四个 crate）
 │   ├── src/                    reqly：桌面端 tauri 外壳 + 命令层
 │   │   ├── commands/           #[tauri::command] 薄壳，实现体在 core
-│   │   └── external_changes.rs 外部进程改库 → 通知前端刷新
+│   │   ├── external_changes.rs 外部进程改库 → 通知前端刷新
+│   │   └── lib.rs              数据目录解析（含旧 identifier 迁移）· 命令注册
+│   ├── tauri.conf.json         应用配置
+│   ├── tauri.windows.conf.json Windows 专属覆盖（targets 只留 NSIS）
 │   ├── core/                   reqly-core：不含 tauri，三入口共用
 │   │   ├── migrations/         001_init · 002_folder_auth · 003_body_by_type
 │   │   └── src/                storage http importer loadtest template service mcp
@@ -288,6 +296,7 @@ reqly/
 | P6 | 并发压测与报表导出 | ✅ |
 | P7 | MCP Server：13 个 tool、stdio + 回环 HTTP、配置片段生成、只读模式 | ✅ |
 | P8-A | 拆 crate（core / mcp / cli）+ CLI 通道 + 外部改动自动刷新 + 两个 sidecar 进安装包 | ✅ |
+| P8-② | 应用标识改 `com.reqly.desktop` + 老数据目录一次性迁移（含 WAL）+ Windows 打包只出 NSIS | ✅ |
 | P8 | 打磨：命令面板 `Ctrl+K`、整包导入导出、自动更新、图标、关于页、体积优化 | ⏳ |
 | P9 | AI Provider：任意 OpenAI 兼容端点（含自建网关）、`baseUrl` 原样使用、连通性测试回原始报文 | — |
 | P10 | 内置 AI 助手：自然语言生成请求 / 解释响应 / 生成断言（可选，依赖 P9） | — |
