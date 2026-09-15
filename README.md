@@ -91,6 +91,20 @@ reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" import curl --file request
 - **卸载时摘掉**，不在注册表里留垃圾。
 - **PATH 太长就不动它**：NSIS 的字符串上限是 1024，实测一条 ≥1024 字符的 PATH 读回来是**空串**而不是截断。照那个空串写回去，等于把用户整条 PATH 换成我们一个目录 —— 别人的命令会集体失踪，而且一声不吭。所以这种情况直接放弃并提示手工添加。少一条 PATH 记录和毁掉别人的 PATH，代价不对称。
 
+想手工补上的话，**这两条都别用**：`setx` 有同样的 1024 字符截断；`[Environment]::SetEnvironmentVariable(...,'User')` 会把值降级成 `REG_SZ`，PATH 里原本的 `%USERPROFILE%\...` 会变成字面量。用注册表 API 并显式保持 `ExpandString`：
+
+```powershell
+$d   = "$env:LOCALAPPDATA\reqly"
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+$raw = $key.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+if ($raw -notlike "*$d*") { $key.SetValue('Path', "$raw;$d", [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+$key.Close()   # 重开终端生效
+```
+
+手工加进去的这条**卸载时不会被自动摘掉** —— 卸载器读同一条长 PATH 也读不回来，按同一套取舍它选择不动。卸完自己删掉即可（PATH 里留一个指向已删目录的条目只是噪声，不影响命令解析）。
+
+还有一个容易漏的点：**改注册表不会通知系统，已经开着的终端拿不到新 PATH，必须重开**。程序化改动的话记得广播 `WM_SETTINGCHANGE`（`SendMessageTimeoutW` + `SMTO_ABORTIFHUNG`）—— 安装钩子内部就是这么做的，所以装完重开终端就生效。
+
 `reqly-mcp.exe` 与这条完全无关：MCP 客户端按配置文件里的绝对路径拉起它，全程不碰 PATH。
 
 ---
