@@ -58,7 +58,13 @@ pub fn json_snippet(paths: &McpPaths) -> String {
     serde_json::to_string_pretty(&doc).expect("serializing a literal JSON object cannot fail")
 }
 
-/// Hermes Agent 的 `mcp_servers` 片段（写进 `~/.hermes/config.yaml`）。
+/// Hermes Agent 的 `mcp_servers` 片段。
+///
+/// 落点是 Hermes 数据目录下的 `config.yaml` —— Windows 上实测
+/// `%LOCALAPPDATA%\hermes\config.yaml`（**不是** `~/.hermes/config.yaml`）。
+/// 那个文件里 `mcp_servers:` 这一级**通常已经存在**，所以下面这段的前两行
+/// （`mcp_servers:` + `reqly:`）在实际粘贴时要去掉头一行，只留 `reqly:` 那一段，
+/// 否则 YAML 出现重复键。
 ///
 /// `trust: untrusted` 是**刻意的**：Hermes 在这档下会按每个 tool 的
 /// `readOnlyHint` 注解决定是否弹审批 —— 只读的免确认、写操作（尤其

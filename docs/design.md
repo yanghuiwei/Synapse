@@ -658,7 +658,7 @@ Claude Code / WorkBuddy / Cursor（JSON，`mcpServers`）：
 {
   "mcpServers": {
     "reqly": {
-      "command": "%APPDATA%/com.reqly.desktop/reqly-mcp.exe",
+      "command": "%LOCALAPPDATA%/reqly/reqly-mcp.exe",
       "args": ["--db", "%APPDATA%/com.reqly.desktop/reqly.db"],
       "env": {}
     }
@@ -666,12 +666,16 @@ Claude Code / WorkBuddy / Cursor（JSON，`mcpServers`）：
 }
 ```
 
-Hermes Agent（YAML，写在 `~/.hermes/config.yaml` 的 `mcp_servers:` 下）：
+Hermes Agent（YAML，写在 Hermes 数据目录下的 `config.yaml` 的 `mcp_servers:` 下。
+Windows 上实测是 `%LOCALAPPDATA%\hermes\config.yaml` —— **不是** `~/.hermes/config.yaml`，
+那句早期写法在这台机器上根本不存在）。注意该文件里 `mcp_servers:` **通常已经存在**
+（Hermes 自己会写别的 server），所以要粘的是 `reqly:` 那一段、**不能连 `mcp_servers:` 头一起粘**，
+否则 YAML 出现重复键：
 
 ```yaml
 mcp_servers:
   reqly:
-    command: "%APPDATA%/com.reqly.desktop/reqly-mcp.exe"
+    command: "%LOCALAPPDATA%/reqly/reqly-mcp.exe"
     args: ["--db", "%APPDATA%/com.reqly.desktop/reqly.db"]
     enabled: true
     timeout: 120
