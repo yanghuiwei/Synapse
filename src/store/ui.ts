@@ -67,6 +67,15 @@ export interface UiState {
    */
   importOpen: boolean;
 
+  /**
+   * 「保存到分类」对话框是否打开。
+   *
+   * 与 `importOpen` 同一个理由：触发它的地方有两处 —— 请求标签栏那个入口
+   * （住在 `RequestPane`）和授权页那条死路提示旁边的按钮（住在 `AuthTab`），
+   * 而对话框本体只能挂一处（挂在 `RequestPane`，这样它跟着当前请求走）。
+   */
+  saveDraftOpen: boolean;
+
   setSection: (section: SidebarSection) => void;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -78,6 +87,8 @@ export interface UiState {
   closeEnvDialog: () => void;
   openImport: () => void;
   closeImport: () => void;
+  openSaveDraft: () => void;
+  closeSaveDraft: () => void;
 }
 
 /**
@@ -92,6 +103,7 @@ export const useUiStore = create<UiState>((set) => ({
   filter: "",
   envDialog: null,
   importOpen: false,
+  saveDraftOpen: false,
 
   setSection: (section) => set({ section }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -104,4 +116,6 @@ export const useUiStore = create<UiState>((set) => ({
   closeEnvDialog: () => set({ envDialog: null }),
   openImport: () => set({ importOpen: true }),
   closeImport: () => set({ importOpen: false }),
+  openSaveDraft: () => set({ saveDraftOpen: true }),
+  closeSaveDraft: () => set({ saveDraftOpen: false }),
 }));

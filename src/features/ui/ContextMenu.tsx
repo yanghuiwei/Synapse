@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/cn";
@@ -21,6 +22,15 @@ export interface ContextMenuProps {
   /** 打开位置：视口坐标（`clientX` / `clientY`） */
   x: number;
   y: number;
+  /**
+   * 触发这个菜单的那个元素（下拉菜单的按钮）。
+   *
+   * 它上面的 `pointerdown` **不算「外部点击」**。否则「再点一次按钮把菜单收起」
+   * 会走成：pointerdown 先把菜单关掉 → 紧接着那次 click 又把它打开 →
+   * 菜单看着永远关不上。而这两次事件是**分开派发**的，点击处理里靠 state 判不出来
+   * （pointerdown 那次的 setState 在 click 之前就已经 flush 完了）。
+   */
+  anchorRef?: RefObject<HTMLElement | null>;
   onClose: () => void;
 }
 
@@ -42,7 +52,7 @@ const MARGIN = 6;
  * 4. **键盘可达**。打开即聚焦容器，上下键移动、回车触发、Esc 关闭 ——
  *    P3 要求「拖拽必须有键盘替代方案」，菜单就是那个入口。
  */
-export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
+export function ContextMenu({ items, x, y, anchorRef, onClose }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [active, setActive] = useState(0);
@@ -73,7 +83,11 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
   // 等到 click 才关会先触发底层元素的 click，等于误操作了一次。
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      // 触发按钮自己也不算「外部」—— 它的点击要留给「再点一次收起」，见 props 注释
+      if (anchorRef?.current?.contains(target)) return;
+      onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -92,7 +106,7 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
       window.removeEventListener("scroll", onClose, true);
       window.removeEventListener("resize", onClose);
     };
-  }, [onClose]);
+  }, [onClose, anchorRef]);
 
   const firstEnabled = enabledIndexes[0] ?? 0;
   useEffect(() => {

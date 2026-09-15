@@ -239,6 +239,9 @@ export function PromptDialog({
   const trimmed = value.trim();
   const error = validate ? validate(trimmed) : null;
   const canSubmit = trimmed !== "" && error === null;
+  // 空的输入框不该一打开就飘红字。「还没填」由按钮置灰表达就够了 ——
+  // 一上来就报错，用户会以为自己已经做错了什么
+  const shownError = trimmed === "" ? null : error;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -277,16 +280,16 @@ export function PromptDialog({
           placeholder={placeholder}
           spellCheck={false}
           aria-label={title}
-          aria-invalid={error !== null}
+          aria-invalid={shownError !== null}
           className={cn(
             "h-8 w-full rounded-sm border bg-surface px-2.5",
             "text-xs text-ink placeholder:text-ink-faint",
             "transition-colors duration-100",
-            error ? "border-err" : "border-line hover:border-line-strong focus:border-brand",
+            shownError ? "border-err" : "border-line hover:border-line-strong focus:border-brand",
           )}
         />
         {/* 校验错误就地显示：这里说明白比让按钮「莫名其妙点不动」友好 */}
-        {error ? <p className="text-[11px] text-err">{error}</p> : null}
+        {shownError ? <p className="text-[11px] text-err">{shownError}</p> : null}
       </div>
     </Dialog>
   );

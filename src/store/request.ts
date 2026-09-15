@@ -390,6 +390,15 @@ export interface RequestState {
   openRequest: (req: ApiRequest | null) => void;
   /** 打开一份**没有对应已保存请求**的内容（历史快照回填） */
   openSpec: (spec: RequestSpec, name: string) => void;
+  /**
+   * 把当前草稿「另存为」一条正式请求，落到指定分类下。
+   *
+   * 为什么必须有这个动作：草稿（`sourceId === null`）没有归属分类，
+   * 而 Token 来源**必须**挂在分类上（沿分类链向上找，见 Rust `http::pipeline`）——
+   * 于是「粘个地址就发」这条路走到授权页就断了：那里只说「先在左侧选中一个分类」，
+   * 而左侧根本没有「把这份内容收进某个分类」这个动作。
+   */
+  saveAs: (folderId: number | null, name: string) => Promise<ApiRequest>;
   patch: (patch: Partial<RequestDraft>) => void;
   /** 整块替换键值表（params / headers 共用一套编辑器） */
   setRows: (which: "params" | "headers", rows: KeyValueItem[]) => void;
@@ -508,6 +517,25 @@ export const useRequestStore = create<RequestState>((set, get) => ({
       cancelled: false,
       finishedAt: null,
     });
+  },
+
+  /**
+   * 两步落库不是啰嗦：`create` 只建一行**空**请求（名字与位置由它定），
+   * 内容得靠 `save` 全量写一次 —— 合成一条 IPC 会让后端的 `create` 语义变复杂。
+   */
+  saveAs: async (folderId, name) => {
+    // 先掐掉待写的自动保存：它要写的是「旧草稿 → 旧请求」那条路径，
+    // 而这份内容马上要换个身份了
+    cancelAutosave();
+
+    const draft = get().draft;
+    const created = await useWorkspaceStore.getState().createRequest(folderId, name);
+    const saved = await ipc.requests.save({ ...created, ...draftFields(draft) });
+
+    // 只补那一行，比整块 refresh 便宜（同 `flushAutosave` 的做法）
+    useWorkspaceStore.getState().patchRequest(saved);
+    get().openRequest(saved);
+    return saved;
   },
 
   // 下面几个是唯一会改草稿的入口，所以「标脏 + 排自动保存」写在这里就够，

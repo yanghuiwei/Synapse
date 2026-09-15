@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
+import { validateName } from "@/lib/name";
 import type { Environment } from "@/lib/types";
 import { useEnvStore } from "@/store/env";
 import { useUiStore } from "@/store/ui";
@@ -11,9 +12,6 @@ import { Button, IconButton } from "@/features/ui/Button";
 import { ConfirmDialog, PromptDialog } from "@/features/ui/Dialog";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { EnvVarDialog } from "./EnvVarDialog";
-
-/** 与 `commands::validate::MAX_NAME_LEN` 一致 */
-const MAX_NAME_LEN = 256;
 
 /**
  * 环境板块（侧栏）。
@@ -161,11 +159,7 @@ export function EnvManager() {
           title={t("env.renameTitle")}
           defaultValue={renameTarget.name}
           placeholder={t("env.name")}
-          validate={(value) =>
-            value.length > MAX_NAME_LEN
-              ? t("collections.nameTooLong", { max: MAX_NAME_LEN })
-              : null
-          }
+          validate={(value) => validateName(value, t)}
           onSubmit={(name) => void useEnvStore.getState().rename(renameTarget.id, name)}
           onClose={() => setRenameTarget(null)}
         />
@@ -250,11 +244,7 @@ function NewEnvDialog({ onClose }: { onClose: () => void }) {
     <PromptDialog
       title={t("env.new")}
       placeholder={t("env.name")}
-      validate={(value) =>
-        value.length > MAX_NAME_LEN
-          ? t("collections.nameTooLong", { max: MAX_NAME_LEN })
-          : null
-      }
+      validate={(value) => validateName(value, t)}
       onSubmit={(name) => {
         // 建完**立刻**打开变量表：一个没有变量的环境没有任何用处，
         // 让用户再找一次「编辑」是白白多一步

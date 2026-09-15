@@ -18,6 +18,7 @@ import { cn } from "@/lib/cn";
 import { methodTextClass } from "@/lib/http";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
+import { validateName } from "@/lib/name";
 import type { ApiRequest, Folder } from "@/lib/types";
 import { ContextMenu, type MenuItem } from "@/features/ui/ContextMenu";
 import { ConfirmDialog, PromptDialog } from "@/features/ui/Dialog";
@@ -38,9 +39,6 @@ import {
 
 /** 缩进基准（px）。深度乘它 —— 比写 6 层 `pl-*` 类干净 */
 const INDENT = 11;
-
-/** 与后端 `clean_name` 对齐的名字长度上限 */
-const MAX_NAME_LEN = 256;
 
 /** 自定义 MIME。用私有类型名，避免被别的拖放源（文件、文本）误接 */
 const DRAG_MIME = "application/x-reqly-node";
@@ -350,6 +348,26 @@ export function CollectionTree() {
         // 空白处右键 → 在根级新建。行上的右键会 stopPropagation，不会走到这里
         onContextMenu={(e) => openMenu(e, { kind: "blank" })}
       >
+        {/* 有请求、但一个分类都没有时，下面那堆请求全是平铺的 ——
+            而且「未归档」分组标题按设计不会出现（见 flatten），
+            用户看到的就是一坨没有归属的条目，也永远配不上 Token。
+            这里补一条引导，说明为什么该建分类、并给个直达入口。 */}
+        {folders.length === 0 && requests.length > 0 && filter.trim() === "" ? (
+          <li className="mb-1 rounded-md border border-dashed border-line bg-canvas-subtle/60 px-3 py-2.5">
+            <p className="text-[12px] font-medium text-ink-muted">{t("collections.noFolders")}</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+              {t("collections.noFoldersHint")}
+            </p>
+            <button
+              type="button"
+              onClick={() => useUiStore.getState().openCreateDialog("folder", null)}
+              className="mt-2 flex items-center gap-1 text-[11px] text-brand transition-colors duration-100 hover:underline"
+            >
+              <FolderPlus size={11} strokeWidth={2.2} aria-hidden />
+              {t("sidebar.newFolder")}
+            </button>
+          </li>
+        ) : null}
         {rows.length === 0 ? (
           <li>
             {/* 「库里是空的」和「筛出来是空的」要分开说 ——
@@ -697,26 +715,6 @@ function CreateDialog() {
       }}
     />
   );
-}
-
-/**
- * 与后端 `clean_name` 对齐的前置校验。
- *
- * 两处都做不是重复劳动：后端那份是**权威**（防住绕过 UI 直接调 IPC 的路径），
- * 前端这份是为了**在输入时就把确认按钮禁掉** —— 让用户敲完一长串名字
- * 再被后端拒掉，体验上等于白干一次。
- */
-function validateName(
-  value: string,
-  t: (key: MessageKey, params?: Record<string, string | number>) => string,
-): string | null {
-  const trimmed = value.trim();
-  if (trimmed === "") return t("collections.nameEmpty");
-  // 用展开而不是 `.length`：一个汉字算 1 个字符，与后端 `chars().count()` 对齐
-  if ([...trimmed].length > MAX_NAME_LEN) {
-    return t("collections.nameTooLong", { max: MAX_NAME_LEN });
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------

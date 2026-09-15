@@ -1,4 +1,4 @@
-import { ChevronDown, Globe, KeyRound, ShieldQuestion } from "lucide-react";
+import { ChevronDown, Globe, KeyRound, Save, ShieldQuestion } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
@@ -8,6 +8,7 @@ import * as ipc from "@/lib/ipc";
 import type { AuthConfig, Folder, TokenSource, TokenStatus } from "@/lib/types";
 import { useRequestStore } from "@/store/request";
 import { useTokenStore } from "@/store/token";
+import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
 import { TokenSourceDialog } from "@/features/token/TokenSourceDialog";
@@ -494,6 +495,9 @@ function TokenSourceBlock({
   onConfigure: () => void;
 }) {
   const { t } = useI18n();
+  // 「保存到分类」对话框挂在 `RequestPane` 上（它得跟着当前请求走），
+  // 所以这里只能通过 store 触发
+  const openSaveDraft = useUiStore((s) => s.openSaveDraft);
   const owner = source ? folders.find((f) => f.id === source.folderId) : undefined;
 
   return (
@@ -517,7 +521,21 @@ function TokenSourceBlock({
       </div>
 
       {folderId === null ? (
-        <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.unsavedFolder")}</p>
+        <div className="space-y-2">
+          <p className="text-[11px] leading-relaxed text-ink-faint">
+            {t("token.unsavedFolder")}
+          </p>
+          {/* 光说「没有归属分类」没用 —— 用户会照着去左栏找「选一个分类」这个动作，
+              而那里只有展开/折叠。必须给一个真能走通的按钮 */}
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Save size={12} strokeWidth={2} />}
+            onClick={openSaveDraft}
+          >
+            {t("request.saveAs")}
+          </Button>
+        </div>
       ) : source === null ? (
         <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.noneHint")}</p>
       ) : (

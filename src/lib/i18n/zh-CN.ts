@@ -47,17 +47,22 @@ export const zhCN = {
   "nav.loadtest": "压测",
   "nav.settings": "设置",
   "nav.trash": "回收站",
+  "sidebar.new": "新建",
   "sidebar.newRequest": "新建请求",
   "sidebar.newFolder": "新建分类",
   "sidebar.import": "导入",
   "sidebar.collapse": "折叠侧栏",
   "sidebar.expand": "展开侧栏",
-  "sidebar.emptyCollections": "还没有集合，点上方「导入」或「新建请求」开始",
+  "sidebar.emptyCollections": "还没有集合，点右上方「新建」开始",
   "sidebar.emptyHistory": "还没有请求记录",
   "sidebar.filterPlaceholder": "筛选…",
 
   // ---- 集合树 ----
   "collections.unfiled": "未归档",
+  // 「有请求但一个分类都没有」时才用得上：那时候左栏只会平铺一串请求，
+  // 而 Token 来源 / 授权继承都要求有分类，用户却看不出这一层依赖
+  "collections.noFolders": "还没有分类",
+  "collections.noFoldersHint": "Token 来源与授权继承都挂在分类上，请求得先有个归属才能配鉴权",
   "collections.itemCount": "{count} 项",
   "collections.loadFailed": "集合加载失败",
   "collections.expand": "展开",
@@ -93,7 +98,12 @@ export const zhCN = {
   "request.send": "发送",
   "request.sending": "发送中…",
   "request.cancel": "取消",
-  "request.save": "保存请求",
+  "request.saveAs": "保存到分类…",
+  "request.saveAsTitle": "保存到分类",
+  "request.saveAsHint": "Token 来源与授权都按分类链继承，所以要先把这条请求存进一个分类",
+  "request.saveAsName": "名称",
+  "request.saveAsNoFolder": "还没有分类。先建一个，再回来保存",
+  "request.saveAsFailed": "保存失败",
   "request.tab.params": "参数",
   "request.tab.headers": "请求头",
   "request.tab.body": "请求体",
@@ -302,7 +312,7 @@ export const zhCN = {
   "token.pathMustStartWithDollar": "路径要以 $ 开头，例如 $.data.access_token",
   "token.loadFailed": "Token 来源加载失败",
   "token.saveFailed": "保存失败",
-  "token.unsavedFolder": "先在左侧选中一个分类",
+  "token.unsavedFolder": "这条请求还没有归入分类 —— Token 来源挂在分类上，存进去才配得了",
 
   // ---- 占位符（P4） ----
   "placeholder.title": "占位符",

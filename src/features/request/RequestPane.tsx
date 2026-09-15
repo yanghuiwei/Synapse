@@ -1,4 +1,4 @@
-import { Ban, Braces, ChevronDown, Gauge, ListTree, Lock, Send, Settings2, Terminal } from "lucide-react";
+import { Ban, Braces, ChevronDown, Gauge, ListTree, Lock, Save, Send, Settings2, Terminal } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -7,6 +7,7 @@ import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { KeyValueItem, RequestSettings } from "@/lib/types";
 import { useRequestStore } from "@/store/request";
+import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
@@ -15,6 +16,7 @@ import { LoadTestPanel } from "@/features/loadtest/LoadTestPanel";
 import { AuthTab } from "./AuthTab";
 import { BodyEditor } from "./BodyEditor";
 import { KeyValueTable } from "./KeyValueTable";
+import { SaveDraftDialog } from "./SaveDraftDialog";
 import { UrlBar } from "./UrlBar";
 
 type RequestTab = "params" | "headers" | "body" | "auth" | "scripts" | "settings" | "loadtest";
@@ -279,7 +281,7 @@ export function RequestPane() {
 
       {/* 标签栏 */}
       <div className="flex shrink-0 items-center gap-1 border-b border-line pr-2">
-        <span className="flex items-center gap-1.5 pl-2.5 pr-1">
+        <span className="flex shrink-0 items-center gap-1.5 pl-2.5 pr-1">
           <span
             aria-hidden
             className={cn("h-1.5 w-1.5 rounded-full", saved ? "bg-ok" : "bg-warn")}
@@ -287,6 +289,23 @@ export function RequestPane() {
           <span className="max-w-[140px] truncate text-[11px] text-ink-muted">
             {headerLabel}
           </span>
+          {/* 未保存的草稿没有归属分类，而 Token 来源按分类链继承 ——
+              这里必须给出「存到哪儿去」的入口，否则授权页那句提示是条死路 */}
+          {saved ? null : (
+            <button
+              type="button"
+              onClick={() => useUiStore.getState().openSaveDraft()}
+              title={t("request.saveAsHint")}
+              className={cn(
+                "flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5",
+                "text-[11px] text-brand transition-colors duration-100",
+                "hover:bg-brand/12",
+              )}
+            >
+              <Save size={11} strokeWidth={2.2} aria-hidden className="shrink-0" />
+              {t("request.saveAs")}
+            </button>
+          )}
         </span>
 
         <TabStrip items={tabs} value={tab} onChange={setTab} className="min-w-0 flex-1" />
@@ -334,6 +353,10 @@ export function RequestPane() {
           className="min-h-0 flex-1"
         />
       )}
+
+      {/* 它是个 portal；挂在这里是为了跟着当前请求走，
+          而且切页签（比如切去授权页看那句话）不会把它卸掉 */}
+      <SaveDraftDialog />
     </section>
   );
 }

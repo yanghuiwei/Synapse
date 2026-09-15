@@ -58,6 +58,11 @@ export function Button({
     >
       {icon}
       {!iconOnly && children}
+      {/* 排在 children 之后 = 按钮最右侧。
+          ⚠️ 这一行原先漏了：prop 声明了、参数也解构了，就是没画出来 ——
+          传 `trailingIcon` 的地方会静默什么都看不到，且不报任何错。
+          「新建 ▾」那个下拉箭头是它的第一个真实使用者，才把这个洞暴露出来。 */}
+      {trailingIcon}
     </button>
   );
 }

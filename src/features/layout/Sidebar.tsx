@@ -1,4 +1,5 @@
 import {
+  ChevronDown,
   Clock,
   FolderPlus,
   Gauge,
@@ -14,7 +15,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
@@ -22,6 +23,7 @@ import { useHistoryStore } from "@/store/history";
 import { useUiStore, type SidebarSection } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button, IconButton } from "@/features/ui/Button";
+import { ContextMenu, type MenuItem } from "@/features/ui/ContextMenu";
 import { ConfirmDialog } from "@/features/ui/Dialog";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { CollectionTree } from "@/features/collections/CollectionTree";
@@ -59,9 +61,27 @@ interface SectionMeta {
   emptyTitleKey: MessageKey;
   emptyDescKey?: MessageKey;
   actions: readonly SidebarAction[];
+  /**
+   * 把 `actions` 收成一个「主按钮 + 下拉菜单」的组合按钮。
+   *
+   * 什么时候该用：入口有三个以上、又都属于「往这里加东西」这同一个意图。
+   * 并排画的话，除了主按钮只能给纯图标（标题行放不下三个带字的），
+   * 而 14px 的 ghost 图标在浅色与深色下都轻到看不清 —— 实测反馈就是这个。
+   * 收进菜单后每一项都能带上文字与图标。
+   */
+  primaryMenu?: readonly SidebarAction[];
   searchable: boolean;
   searchPlaceholderKey?: MessageKey;
 }
+
+/**
+ * 下拉菜单的宽度。
+ *
+ * 与 `ContextMenu` 的 `min-w-[176px]` 是同一个数值，只能在这里再写一遍 ——
+ * Tailwind 的类名必须是字面量（动态拼出来的会在构建期被摇掉）。
+ * 它只用于「菜单右对齐到按钮右边缘」时的回退量，越界由 ContextMenu 自己夹回视口。
+ */
+const MENU_WIDTH = 176;
 
 const SECTION_META: Record<SidebarSection, SectionMeta> = {
   collections: {
@@ -69,10 +89,13 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Layers,
     emptyTitleKey: "common.empty",
     emptyDescKey: "sidebar.emptyCollections",
-    actions: [
-      { id: "newRequest", labelKey: "sidebar.newRequest", icon: Plus, primary: true },
+    // 三个入口收成一个组合按钮。顺序按「先有分类，请求才放得下」排；
+    // 导入压最后 —— 它是自己的对话框，属一次性的批量动作
+    actions: [],
+    primaryMenu: [
       { id: "newFolder", labelKey: "sidebar.newFolder", icon: FolderPlus },
-      // cURL / Postman / ApiPost / Reqly 四种来源（P5）
+      { id: "newRequest", labelKey: "sidebar.newRequest", icon: Plus },
+      // cURL / Postman / ApiPost / HAR / Reqly（P5）
       { id: "import", labelKey: "sidebar.import", icon: Import },
     ],
     searchable: true,
@@ -217,6 +240,73 @@ function CollectionsBody() {
 }
 
 /**
+ * 侧栏标题区的「新建」组合按钮：一个按钮，点开是「新建分类 / 新建请求 / 导入」。
+ *
+ * 之前这里是三个并排的按钮 —— 一个 `primary` 的「新建请求」加两个 `ghost` 的
+ * 纯图标按钮。后两个只有 14px 的细线条和 `text-ink-muted` 一种颜色，又没有文字，
+ * 在浅色与深色下都轻到看不清，用户认不出那是干什么的。
+ * 合并之后三个入口都拿到了文字标签与图标，也不必再挤着摆放。
+ */
+function NewMenuButton({
+  items,
+  onSelect,
+}: {
+  items: readonly SidebarAction[];
+  onSelect: (id: ActionId) => void;
+}) {
+  const { t } = useI18n();
+  /** 包住按钮，给 ContextMenu 用来区分「点按钮」与「点别处」 */
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+
+  const menuItems: MenuItem[] = items.map((item) => ({
+    key: item.id,
+    label: t(item.labelKey),
+    icon: item.icon,
+    onSelect: () => onSelect(item.id),
+  }));
+
+  return (
+    <>
+      <span ref={anchorRef} className="flex shrink-0 items-center">
+        <Button
+          size="sm"
+          variant="primary"
+          icon={<Plus size={13} strokeWidth={2.2} />}
+          trailingIcon={<ChevronDown size={12} strokeWidth={2.4} />}
+          aria-haspopup="menu"
+          aria-expanded={anchor !== null}
+          onClick={(e) => {
+            // 已经开着 → 这次点击是「收起」。这里靠 `anchor` 一定判得准：
+            // 按钮上的 pointerdown 已被 ContextMenu 排除在「外部点击」之外
+            // （见它 `anchorRef` 的注释），所以走到这儿时状态还是开着的
+            if (anchor) {
+              setAnchor(null);
+              return;
+            }
+            const rect = e.currentTarget.getBoundingClientRect();
+            // 右对齐到按钮右边缘：侧栏最窄只有 180px，左对齐的话菜单会横跨到内容区上
+            setAnchor({ x: rect.right - MENU_WIDTH, y: rect.bottom + 4 });
+          }}
+        >
+          {t("sidebar.new")}
+        </Button>
+      </span>
+
+      {anchor ? (
+        <ContextMenu
+          items={menuItems}
+          x={anchor.x}
+          y={anchor.y}
+          anchorRef={anchorRef}
+          onClose={() => setAnchor(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/**
  * 左栏内容区。宽度由外层 SplitPane 的 Panel 决定，这里不做宽度管理。
  */
 export function Sidebar() {
@@ -280,35 +370,39 @@ export function Sidebar() {
         <h2 className="flex-1 truncate text-[13px] font-semibold tracking-tight text-ink">
           {t(meta.titleKey)}
         </h2>
-        {meta.actions.map((a) => {
-          const Icon = a.icon;
-          const label = t(a.labelKey);
-          const title = a.disabled ? `${label}（${t("common.comingSoon")}）` : label;
-          return a.primary ? (
-            <Button
-              key={a.id}
-              size="sm"
-              variant="primary"
-              icon={<Icon size={13} strokeWidth={2.2} />}
-              disabled={a.disabled}
-              title={title}
-              onClick={() => runAction(a.id)}
-            >
-              {label}
-            </Button>
-          ) : (
-            <IconButton
-              key={a.id}
-              size="sm"
-              label={title}
-              variant={a.danger ? "danger" : "ghost"}
-              disabled={a.disabled}
-              onClick={() => runAction(a.id)}
-            >
-              <Icon size={14} strokeWidth={2} />
-            </IconButton>
-          );
-        })}
+        {meta.primaryMenu ? (
+          <NewMenuButton items={meta.primaryMenu} onSelect={runAction} />
+        ) : (
+          meta.actions.map((a) => {
+            const Icon = a.icon;
+            const label = t(a.labelKey);
+            const title = a.disabled ? `${label}（${t("common.comingSoon")}）` : label;
+            return a.primary ? (
+              <Button
+                key={a.id}
+                size="sm"
+                variant="primary"
+                icon={<Icon size={13} strokeWidth={2.2} />}
+                disabled={a.disabled}
+                title={title}
+                onClick={() => runAction(a.id)}
+              >
+                {label}
+              </Button>
+            ) : (
+              <IconButton
+                key={a.id}
+                size="sm"
+                label={title}
+                variant={a.danger ? "danger" : "ghost"}
+                disabled={a.disabled}
+                onClick={() => runAction(a.id)}
+              >
+                <Icon size={14} strokeWidth={2} />
+              </IconButton>
+            );
+          })
+        )}
       </header>
 
       {/* 搜索 */}
