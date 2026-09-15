@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 use reqly_core::error::{AppError, AppResult};
+use reqly_core::state::migrate_legacy_db;
 
 /// 数据库文件名。放在 tauri 的 app_data_dir 下
 /// （Windows 上是 `%APPDATA%\<bundle identifier>\`）。
@@ -39,12 +40,50 @@ use reqly_core::error::{AppError, AppResult};
 /// 它只属于桌面端 —— MCP 与 CLI 的库路径由 `--db` 直接给，不去猜数据目录。
 const DB_FILE_NAME: &str = "reqly.db";
 
+/// 上一个 `identifier`。
+///
+/// Tauri 拿 identifier 当 app data 目录名，所以它一变，老用户的库就留在了旧目录里、
+/// 界面上「什么都没有」。启动时要把它搬过来 —— 见
+/// [`reqly_core::state::migrate_legacy_db`]。
+///
+/// 这个常量只在「从 `com.reqly.app` 迁移到 `com.reqly.desktop`」这一件事上有意义，
+/// 搬完之后它就永远匹配不到东西（`migrate_legacy_db` 是幂等的）。留着是因为
+/// 总会有用户从老版本升上来。
+const LEGACY_APP_DIR: &str = "com.reqly.app";
+
+/// 旧 identifier 目录下的库路径。
+///
+/// 单独拆出来是为了**能测**：`resolve_db_path` 要 `AppHandle` 才能跑，而这里面全是
+/// 纯路径算术 —— 真正容易写错的就是「往上一级、再拼旧 identifier」这一步。
+fn legacy_db_path(app_data_dir: &std::path::Path) -> Option<PathBuf> {
+    app_data_dir
+        .parent()
+        .map(|parent| parent.join(LEGACY_APP_DIR).join(DB_FILE_NAME))
+}
+
 fn resolve_db_path(app: &tauri::AppHandle) -> AppResult<PathBuf> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| AppError::Internal(format!("cannot resolve app data dir: {e}")))?;
-    Ok(dir.join(DB_FILE_NAME))
+    let db_path = dir.join(DB_FILE_NAME);
+
+    // `app_data_dir()` 的形状就是 `<父目录>/<identifier>`，所以旧目录 = 同一个父目录
+    // 加上旧 identifier。三个平台都是这个形状（Windows `%APPDATA%`、
+    // macOS `~/Library/Application Support`、Linux `~/.local/share`），不用按平台分支。
+    if let Some(legacy) = legacy_db_path(&dir) {
+        // 失败就往上抛：带着一个「看起来是空的」库继续跑，比直接起不来更糟 ——
+        // 用户一旦在新库里建了东西，旧数据到底要不要并过来就没有干净答案了。
+        if migrate_legacy_db(&legacy, &db_path)? {
+            eprintln!(
+                "[reqly] migrated database from legacy identifier: {} -> {} (旧目录保留未删)",
+                legacy.display(),
+                db_path.display()
+            );
+        }
+    }
+
+    Ok(db_path)
 }
 
 fn init_storage(app: &tauri::AppHandle) -> AppResult<AppState> {
@@ -148,4 +187,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_db_lives_next_to_the_current_identifier_directory() {
+        // `app_data_dir()` 给的是 `<roaming>/<identifier>`，旧库在**隔壁**那个目录里 ——
+        // 不是里面，也不是上两级。写错的话迁移会静默找不到源文件、直接返回 Ok(false)。
+        let dir = std::path::Path::new(r"C:\Users\example\AppData\Roaming\com.reqly.desktop");
+
+        let legacy = legacy_db_path(dir).expect("app data dir always has a parent");
+
+        assert_eq!(
+            legacy,
+            std::path::PathBuf::from(r"C:\Users\example\AppData\Roaming\com.reqly.app\reqly.db")
+        );
+    }
+
+    #[test]
+    fn a_rootless_app_data_dir_yields_nothing_instead_of_panicking() {
+        // `parent()` 对裸相对路径也可能是 `None`，这里不能 unwrap
+        assert!(legacy_db_path(std::path::Path::new("")).is_none());
+    }
 }

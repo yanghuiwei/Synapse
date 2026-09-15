@@ -70,12 +70,12 @@
 
 ```powershell
 # 桌面端「设置」页能看到库文件的绝对路径，也可以设 REQLY_DB 环境变量
-reqly-cli --db "%APPDATA%\com.reqly.app\reqly.db" folders
-reqly-cli --db "%APPDATA%\com.reqly.app\reqly.db" requests list --query 用户
-reqly-cli --db "%APPDATA%\com.reqly.app\reqly.db" requests get 12
-reqly-cli --db "%APPDATA%\com.reqly.app\reqly.db" send 12 --header "X-Debug: 1"
-reqly-cli --db "%APPDATA%\com.reqly.app\reqly.db" send --method POST --url https://httpbin.org/post --body '{"a":1}'
-reqly-cli --db "%APPDATA%\com.reqly.app\reqly.db" import curl --file request.txt --json | jq '.created'
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" folders
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" requests list --query 用户
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" requests get 12
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" send 12 --header "X-Debug: 1"
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" send --method POST --url https://httpbin.org/post --body '{"a":1}'
+reqly-cli --db "%APPDATA%\com.reqly.desktop\reqly.db" import curl --file request.txt --json | jq '.created'
 ```
 
 命令树：`folders` · `requests {list,get,create,update,move,delete}` · `env {list,set}` · `send` · `loadtest run` · `token refresh` · `import curl`。
@@ -160,7 +160,9 @@ Workspace ─┬─ Folder ─┬─ Folder …（自引用，无限层级）
 
 单文件 SQLite，开 `journal_mode=WAL` + `foreign_keys=ON` + `synchronous=NORMAL`。
 
-数据文件位置：`%APPDATA%\com.reqly.app\reqly.db`（macOS：`~/Library/Application Support/com.reqly.app/reqly.db`），桌面端「设置」页会显示绝对路径。
+数据文件位置：`%APPDATA%\com.reqly.desktop\reqly.db`（macOS：`~/Library/Application Support/com.reqly.desktop/reqly.db`），桌面端「设置」页会显示绝对路径。
+
+> **从 0.1.0 之前的版本升级**：早期版本用的应用标识是 `com.reqly.app`，而 Tauri 拿它当数据目录名。首次启动时如果新目录里还没有库、旧目录里有，会**自动复制一份过去**（含 `-wal` / `-shm`）。旧目录**保留不删**，确认无误后可以自己清理。
 
 ---
 

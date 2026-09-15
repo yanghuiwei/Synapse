@@ -83,7 +83,7 @@ mod tests {
     fn sample() -> McpPaths {
         McpPaths::new(
             Path::new(r"C:\Program Files\reqly\reqly-mcp.exe"),
-            Path::new(r"C:\Users\example\AppData\Roaming\com.reqly.app\reqly.db"),
+            Path::new(r"C:\Users\example\AppData\Roaming\com.reqly.desktop\reqly.db"),
         )
     }
 
@@ -91,7 +91,7 @@ mod tests {
     fn paths_are_normalised_to_forward_slashes() {
         let paths = sample();
         assert_eq!(paths.command(), "C:/Program Files/reqly/reqly-mcp.exe");
-        assert!(paths.db().ends_with("com.reqly.app/reqly.db"));
+        assert!(paths.db().ends_with("com.reqly.desktop/reqly.db"));
         assert!(!paths.command().contains('\\'));
         assert!(!paths.db().contains('\\'));
     }
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(entry["args"][0], "--db");
         assert_eq!(
             entry["args"][1],
-            "C:/Users/example/AppData/Roaming/com.reqly.app/reqly.db"
+            "C:/Users/example/AppData/Roaming/com.reqly.desktop/reqly.db"
         );
         assert!(entry["env"].is_object());
         assert!(entry["env"]
