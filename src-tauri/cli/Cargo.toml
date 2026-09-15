@@ -1,0 +1,42 @@
+[package]
+name = "reqly-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Reqly 的命令行入口：同一个本地 API 工作台，给脚本与 AI 用"
+
+[[bin]]
+name = "reqly-cli"
+path = "src/main.rs"
+
+[dependencies]
+# 核心层（存储 / HTTP 执行 / 模板 / 压测 / 导入器 / 13 个操作）。
+# 与 reqly-mcp 一样**不依赖 tauri** —— 这条依赖就是保证。
+reqly-core = { path = "../core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 为什么这个 package 能引 clap，而 bin/reqly-mcp 当初手写解析：
+# 那边一共四个参数、没有子命令、没有环境变量回退，引 clap 只换来 `--help` 的排版；
+# 这边是 7 组子命令 + 二十多个参数 + 环境变量回退，手写会立刻长成一份解析器。
+# 拆成独立 package 之后，这个依赖**只进 CLI 自己的二进制**，不会稀释 MCP 那边。
+#
+# 关掉默认 features：默认会拉 anstream/anstyle（给 `--help` 上色）。
+# 保留的这几个才是「不好用就退回手写」的理由：
+#   std             → 基本类型与 String
+#   derive          → #[derive(Parser)] / #[derive(Args)]
+#   help / usage    → `--help` 与用法行
+#   error-context   → 报错时把上下文补齐（「以下参数冲突」那种）
+#   suggestions     → 打错参数名时给「你是不是想写 …」
+#   env             → REQLY_DB 这条环境变量回退
+clap = { version = "4.5", default-features = false, features = [
+  "std",
+  "derive",
+  "help",
+  "usage",
+  "error-context",
+  "suggestions",
+  "env",
+] }
+
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }

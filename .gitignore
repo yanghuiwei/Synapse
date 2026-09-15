@@ -16,6 +16,15 @@ dist-ssr
 src-tauri/target
 src-tauri/gen/schemas
 
+# sidecar 的中转目录：`pnpm sidecar:stage`（已挂在 beforeBuildCommand 上）会把
+# reqly-mcp / reqly-cli 复制成 `binaries/<name>-$TARGET_TRIPLE.exe` 供 externalBin 收走。
+# 它和 target/ 一样是产物，不进仓库 —— 每台机器自己 stage 一遍。
+src-tauri/binaries/*.exe
+src-tauri/binaries/*.dll
+src-tauri/binaries/*.so
+src-tauri/binaries/*.dylib
+src-tauri/binaries/*.sig
+
 # 凭据类文件一律不进仓库 —— 远端是公开仓库，而 Reqly 的定位就是
 # 「凭据只留在本机」（secret 存本地库、token 从接口取），
 # 真出现这类文件基本都是调试时随手丢下的，不该被提交。

@@ -83,7 +83,7 @@ mod tests {
     fn sample() -> McpPaths {
         McpPaths::new(
             Path::new(r"C:\Program Files\reqly\reqly-mcp.exe"),
-            Path::new(r"C:\Users\yhweix\AppData\Roaming\com.reqly.app\reqly.db"),
+            Path::new(r"C:\Users\example\AppData\Roaming\com.reqly.app\reqly.db"),
         )
     }
 
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(entry["args"][0], "--db");
         assert_eq!(
             entry["args"][1],
-            "C:/Users/yhweix/AppData/Roaming/com.reqly.app/reqly.db"
+            "C:/Users/example/AppData/Roaming/com.reqly.app/reqly.db"
         );
         assert!(entry["env"].is_object());
         assert!(entry["env"]

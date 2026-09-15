@@ -104,7 +104,7 @@
 - 每次 bash 调用是**独立网络命名空间**：「起本地服务 + 访问它」必须写在**同一条**命令里
 - 往 Windows 程序传路径必须用 `E:/...` / `C:/...` 形式；`mktemp -d` 的 `/tmp/x` 会静默失败
 - **同一轮消息里并行编辑同一个文件会互相覆盖**（都报 success，后写的基于旧内容）→ 同一文件的多次 Edit 必须**串行**发
-- 临时物（截图、脚本、浏览器 profile）一律放 `C:/Users/yhweix/AppData/Local/Temp/reqly-*`，**不要**留在项目根；大目录自己删不掉（safe-delete 护栏）就列清单交给用户 + 给 PowerShell 版清理命令
+- 临时物（截图、脚本、浏览器 profile）一律放 `%LOCALAPPDATA%\Temp\reqly-*`，**不要**留在项目根；大目录自己删不掉（safe-delete 护栏）就列清单交给用户 + 给 PowerShell 版清理命令
 
 ## 收尾动作（每个阶段都要做，别省）
 
@@ -116,7 +116,7 @@
    - 没有后端时要在 `src/lib/ipc.ts` 的 `call()` 里**临时**挂一层假后端（`?__dev` 开关），**别按 store 注入**
    - 切主题用同源探针页写 `localStorage.reqly.theme`；截非默认板块用 `?__section=`；截弹窗用 `?__dialog=` + `useState` 惰性初值
    - **回滚要逐文件 `md5sum` 核对**，并 `grep` 确认无残留
-   - **别靠肉眼比色，也别靠肉眼判断「哪一行被选中」**——缩放图里 `#e4ecfd` 与 `#ffffff` 几乎一样。用区域采样脚本 `C:\Users\yhweix\AppData\Local\Temp\reqly_region_px.py`
+   - **别靠肉眼比色，也别靠肉眼判断「哪一行被选中」**——缩放图里 `#e4ecfd` 与 `#ffffff` 几乎一样。用区域采样脚本 `%LOCALAPPDATA%\Temp\reqly_region_px.py`
 5. 在 `docs/plan.md` 追加 **§12 P4 实测记录**（格式照抄 §11：完成范围 / 验收命令与结果 / 坑 / 逐条验收对照 / 截图与像素核对 / 下一步）
 6. 把本轮成果与坑追加到 `E:\H_Req\.workbuddy\memory\2026-MM-DD.md`；如果是**长期约定**级别的（新依赖的坑、新铁律）则更新 `MEMORY.md`
 

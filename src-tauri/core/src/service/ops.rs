@@ -1,54 +1,49 @@
-//! MCP 工具集（design.md §8.2）：13 个 tool 的参数、注解与实现。
+//! 13 个操作的实现体 —— MCP tool 与 CLI 子命令共用同一份。
 //!
-//! ## 为什么实现放在这里，`server.rs` 只留一层壳
+//! ## 为什么在这里而不是在 `mcp/`
 //!
-//! `#[tool_router]` 要求所有 `#[tool]` 方法长在**同一个 `impl` 块**里，而那个
-//! 块的形状（`&self` + `Parameters<T>` + `Json<T>`）是给协议看的样板。把 13 个
-//! 业务实现也塞进去，接口形状与数据编排会缠在一起 —— 改一个查询要动协议层代码。
-//! 所以这里是一个普通的 `Tools` 结构（持有 `Arc<AppState>` + `read_only`），
-//! `server.rs` 的每个 `#[tool]` 方法只做一次转发。
+//! 这里原本是 `mcp/tools.rs`。P7 时它只为 MCP 服务，签名上绑着 rmcp 的
+//! `ToolResult<T>`（= `Result<Json<T>, ErrorData>`）—— 于是 CLI 想用这 13 个操作
+//! 就得把编排重写一遍，而那正是「两边悄悄分叉」的来源。
 //!
-//! ## 数据访问：直接组合 `repo` 层与 `http` 层，不调 `commands`
+//! 剥掉协议类型、改成返回 `AppResult<T>` 之后两边都调得动：MCP 侧包一层 `Json`
+//! 加错误映射，CLI 侧直接序列化这些 DTO 就是 `--json` 的输出。
 //!
-//! `commands::*` 里那些函数都要 `tauri::State<'_, AppState>`，而 `tauri::State`
-//! **没有公开构造函数** —— 非 Tauri 进程根本造不出来（这一点 `send_request_with`
-//! 的注释里也写过）。所以这里直连 `repo` + `Pipeline` + `send_request_with`。
-//! 唯一复用的是那些**本来就只吃 `&Connection`** 的编排：导入的 `import_into_folder`、
-//! 压测收尾的 `persist_outcome`。
+//! ## 入参出参为什么自成一套 DTO
+//!
+//! 刻意**不**直接把 `storage::models` 的类型当返回：那些类型要加 `JsonSchema`
+//! 派生就得动共享数据模型，而这里对外暴露的形状本来就该比库表更克制
+//! （比如 auth 的值一律不外泄，见 `AuthSummary`；代理只报「有没有配」）。
 //!
 //! ## 三条安全边界（design.md §8.3）在本文件的落点
 //!
-//! 1. [`Tools::list_environments`] 对 `is_secret = 1` 的值一律返回 `••••`，
-//!    其余任何 tool 也没有「读原始 secret」的入口。
-//! 2. [`Tools::send_request`] 的响应体截断到 64KB（按 UTF-8 边界切），
+//! 1. `list_environments` 对 `is_secret = 1` 的值一律返回 `••••`，
+//!    其余任何方法也没有「读原始 secret」的入口。
+//! 2. `send_request` 的响应体截断到 64KB（按 UTF-8 边界切），
 //!    凭据类响应头（`set-cookie` / `authorization` / `*-key` / `*-token` …）默认打码。
-//! 3. [`Tools::writable`] 是只读模式的唯一闸门：9 个写类 tool 的第一行都是它，
-//!    只读的 4 个 tool 不经过它。
+//! 3. `writable` 是只读模式的唯一闸门：9 个写操作的第一行都是它，
+//!    4 个只读操作不经过它。
 //!
-//! ## 错误一律是结构化错误码
+//! ## 错误一律是 `AppError`（稳定错误码）
 //!
-//! 后端不产出面向用户的中文文案（见 `crate::error` 的契约），所以 [`to_error_data`]
-//! 把 `AppError` 的**错误码**放进 `message`，把 `params` / `debug` 放进 `data`。
-//! tool 的 `description` 用中文没问题 —— 那是给 AI 看的契约，不是 UI 文案。
+//! 后端不产出面向用户的中文文案（见 `crate::error` 的契约），所以这里只说
+//! 「哪个字段不合法」「哪条记录不存在」。MCP 与 CLI 各自决定怎么呈现出去。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmcp::handler::server::wrapper::Json;
-use rmcp::model::ErrorCode;
-use rmcp::schemars::{self, JsonSchema};
-use rmcp::ErrorData;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::commands::collection::ensure_usable_folder;
-use crate::commands::import_::{import_into_folder, Conflict, ImportLabels, ImportSource};
-use crate::commands::loadtest::{discard_run, persist_outcome, stored_run_config};
-use crate::commands::request::send_request_with;
 use crate::error::{codes, AppError, AppResult};
 use crate::http::{HttpResponsePayload, Pipeline, RequestSpec};
 use crate::loadtest::{engine, LoadtestConfig, LoadtestDeps};
+use crate::service::collection::ensure_usable_folder;
+use crate::service::import::{import_into_folder, Conflict, ImportLabels, ImportSource};
+use crate::service::loadtest::{discard_run, persist_outcome, stored_run_config};
+use crate::service::request::send_request_with;
 use crate::storage::models::{ApiRequest, BodyType, HttpVersion, KeyValueItem};
 use crate::storage::{repo, with_conn};
 use crate::AppState;
@@ -57,7 +52,11 @@ use crate::AppState;
 ///
 /// 64KB 是「够看清一个 JSON 结构，又不至于把 MCP 的 stdio 通道塞爆」的量级。
 /// 超出的部分**丢掉但如实标记**（`bodyTruncated` + `bodySize`），不静默截断。
-const MAX_BODY_BYTES: usize = 64 * 1024;
+///
+/// CLI 可以把这个数字调大甚至关掉（[`Ops::with_body_limit`]）——
+/// 它的输出是文件或管道，而 MCP 的 stdout 是一条共享的 JSON-RPC 通道，
+/// 两者的约束本来就不一样。
+pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// 敏感值的打码结果，与 design.md §8.3 写的字符一致。
 const MASK: &str = "••••";
@@ -88,59 +87,7 @@ const MASKED_HEADER_SUFFIXES: [&str; 4] = ["-key", "-token", "-secret", "-passwo
 /// 一轮 50 万请求能跑十几分钟，期间客户端以为服务死了。宁可报错让它拆细了再跑。
 const LOADTEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 只读模式下拒绝写操作时用的 JSON-RPC 错误码。
-///
-/// MCP 规范没有定义 `permission_denied` 这个**协议级**错误码（标准码只到
-/// `-32603`），而 JSON-RPC 2.0 把 `-32000 ~ -32099` 留给实现自定义。
-/// 所以这里在这个区间里取一个，并在 `data.code` 里给出稳定的 `permission_denied`——
-/// 客户端要判断「是不是被只读模式拦了」认的是那个字符串，不是这个数字。
-const PERMISSION_DENIED_CODE: i32 = -32003;
-
-/// 只读模式下拒绝一次写操作。
-pub fn permission_denied(tool: &'static str) -> ErrorData {
-    ErrorData::new(
-        ErrorCode(PERMISSION_DENIED_CODE),
-        "permission_denied",
-        Some(json!({
-            "code": "permission_denied",
-            "reason": "readOnlyMode",
-            "tool": tool,
-        })),
-    )
-}
-
-/// `AppError` → MCP 错误。
-///
-/// **不丢错误码**：`message` 就是 `crate::error::codes` 里那个稳定标识（如 `E_DB_LOCKED`），
-/// `params` 原样带上（前端插值用的那套结构化信息），`debug` 留给排查。
-/// 把 `err.to_string()` 当 `message` 是不行的 —— 那是给人读的调试句子，
-/// AI 拿它做分支判断会碎。
-pub fn to_error_data(err: AppError) -> ErrorData {
-    // 先按错误类别挑一个协议级码，客户端据此决定「能不能重试/是不是参数问题」
-    let code = match &err {
-        AppError::NotFound { .. } => ErrorCode::RESOURCE_NOT_FOUND,
-        AppError::InvalidInput { .. } | AppError::InvalidUrl { .. } => ErrorCode::INVALID_PARAMS,
-        _ => ErrorCode::INTERNAL_ERROR,
-    };
-
-    let mut data = serde_json::Map::new();
-    data.insert("code".into(), json!(err.code()));
-    if let Some(params) = err.params() {
-        data.insert("params".into(), params);
-    }
-    data.insert("debug".into(), json!(err.to_string()));
-    if err.retryable() {
-        data.insert("retryable".into(), json!(true));
-    }
-
-    ErrorData::new(code, err.code(), Some(Value::Object(data)))
-}
-
 /// 一次 tool 调用的返回。`Json<T>` 会把结构化结果同时写进 `content` 与
-/// `structuredContent`（见 rmcp 的 `CallToolResult::structured`），
-/// 所以只认文本的老客户端也读得到。
-pub type ToolResult<T> = Result<Json<T>, ErrorData>;
-
 // ============================================================
 // 请求/响应的 DTO
 // ============================================================
@@ -610,23 +557,46 @@ pub struct DeleteRequestResponse {
 // 实现
 // ============================================================
 
-/// 13 个 tool 的实现体。可克隆（`Arc<AppState>` 与 bool 都是廉价克隆），
+/// 13 个操作的实现体。可克隆（`Arc<AppState>` 与几个 usize/bool 都是廉价克隆），
 /// HTTP 通道的每个会话各拿一份。
 #[derive(Clone)]
-pub struct Tools {
+pub struct Ops {
     state: Arc<AppState>,
     read_only: bool,
+    /// 回出去之前响应体截到多少字节。
+    max_body_bytes: usize,
 }
 
-impl Tools {
+impl Ops {
+    /// 桌面端与 MCP 用的默认档（64KB，见 [`DEFAULT_MAX_BODY_BYTES`]）。
     pub fn new(state: Arc<AppState>, read_only: bool) -> Self {
-        Self { state, read_only }
+        Self::with_body_limit(state, read_only, DEFAULT_MAX_BODY_BYTES)
     }
 
-    /// 只读模式的唯一闸门：9 个写类 tool 的第一行都是它。
-    fn writable(&self, tool: &'static str) -> Result<(), ErrorData> {
+    /// 换一个响应体上限。`usize::MAX` 表示不在这里截（执行层自己还有一道 8MB 上限，
+    /// 那一道不归这一层管）。
+    ///
+    /// 之所以把它做成入参而不是常量：MCP 的 stdout 是**一条**共享的 JSON-RPC 通道，
+    /// 往里塞一个 10MB 响应会把整条连接堵住；而 CLI 的输出是文件或管道，没有这个
+    /// 约束 —— 这正是「大响应该走 CLI 而不是 MCP」的那条理由。
+    ///
+    /// 能调的只是**数字**：「超了就切、并且如实标记」这条判断写在 [`truncate_body`] 里，
+    /// 换任何一个入口都不会被跳过。
+    pub fn with_body_limit(state: Arc<AppState>, read_only: bool, max_body_bytes: usize) -> Self {
+        Self {
+            state,
+            read_only,
+            max_body_bytes,
+        }
+    }
+
+    /// 只读模式的唯一闸门：9 个写操作的第一行都是它。
+    ///
+    /// `tool` 是**调用方**的操作名（MCP 传 tool 名，CLI 传子命令名）——
+    /// 错误里带上它，调用者才能说清「是哪个操作被拦了」，而不是给一句笼统的拒绝。
+    fn writable(&self, tool: &'static str) -> AppResult<()> {
         if self.read_only {
-            return Err(permission_denied(tool));
+            return Err(AppError::ReadOnly { tool });
         }
         Ok(())
     }
@@ -634,19 +604,15 @@ impl Tools {
     // ---- 只读的 4 个 ----
 
     /// 列出文件夹树（平铺返回，前端/AI 按 `parentId` 自己组树）。
-    pub async fn list_folders(&self, req: ListFoldersRequest) -> ToolResult<ListFoldersResponse> {
-        let workspace_id = self
-            .resolve_workspace(req.workspace_id)
-            .await
-            .map_err(to_error_data)?;
+    pub async fn list_folders(&self, req: ListFoldersRequest) -> AppResult<ListFoldersResponse> {
+        let workspace_id = self.resolve_workspace(req.workspace_id).await?;
 
         let folders = with_conn(&self.state.pool, move |conn| {
             repo::folder::list_by_workspace(conn, workspace_id)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(ListFoldersResponse {
+        Ok(ListFoldersResponse {
             workspace_id,
             folders: folders
                 .into_iter()
@@ -658,15 +624,12 @@ impl Tools {
                     is_token_source: folder.is_token_source,
                 })
                 .collect(),
-        }))
+        })
     }
 
     /// 列出请求。给了 `folder_id` 就只看那个文件夹，否则整个工作区。
-    pub async fn list_requests(
-        &self,
-        req: ListRequestsRequest,
-    ) -> ToolResult<ListRequestsResponse> {
-        let workspace_id = self.resolve_workspace(None).await.map_err(to_error_data)?;
+    pub async fn list_requests(&self, req: ListRequestsRequest) -> AppResult<ListRequestsResponse> {
+        let workspace_id = self.resolve_workspace(None).await?;
         let folder_id = req.folder_id;
         let needle = req
             .query
@@ -677,8 +640,7 @@ impl Tools {
             Some(id) => repo::request::list_by_folder(conn, Some(id)),
             None => repo::request::list_by_workspace(conn, workspace_id),
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
         let requests = requests
             .into_iter()
@@ -689,30 +651,24 @@ impl Tools {
             .map(summarise)
             .collect();
 
-        Ok(Json(ListRequestsResponse {
+        Ok(ListRequestsResponse {
             workspace_id,
             requests,
-        }))
+        })
     }
 
     /// 取完整请求定义。auth 只报类型（见 [`AuthSummary`]）。
-    pub async fn get_request(&self, req: GetRequestRequest) -> ToolResult<RequestDetail> {
-        let request = self
-            .load_request(req.request_id)
-            .await
-            .map_err(to_error_data)?;
-        Ok(Json(detail(&request)))
+    pub async fn get_request(&self, req: GetRequestRequest) -> AppResult<RequestDetail> {
+        let request = self.load_request(req.request_id).await?;
+        Ok(detail(&request))
     }
 
     /// 列出环境与变量。`is_secret` 的值一律 `••••`（design.md §8.3）。
     pub async fn list_environments(
         &self,
         req: ListEnvironmentsRequest,
-    ) -> ToolResult<ListEnvironmentsResponse> {
-        let workspace_id = self
-            .resolve_workspace(req.workspace_id)
-            .await
-            .map_err(to_error_data)?;
+    ) -> AppResult<ListEnvironmentsResponse> {
+        let workspace_id = self.resolve_workspace(req.workspace_id).await?;
 
         let rows = with_conn(&self.state.pool, move |conn| {
             let mut out = Vec::new();
@@ -722,8 +678,7 @@ impl Tools {
             }
             Ok(out)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
         let environments = rows
             .into_iter()
@@ -748,25 +703,22 @@ impl Tools {
             })
             .collect();
 
-        Ok(Json(ListEnvironmentsResponse {
+        Ok(ListEnvironmentsResponse {
             workspace_id,
             environments,
-        }))
+        })
     }
 
     // ---- 写类的 9 个 ----
 
     /// 新建请求（一开始就是可发送的完整定义，不是「空壳再补字段」）。
-    pub async fn create_request(&self, req: CreateRequestRequest) -> ToolResult<RequestDetail> {
+    pub async fn create_request(&self, req: CreateRequestRequest) -> AppResult<RequestDetail> {
         self.writable("create_request")?;
 
-        let workspace_id = self
-            .resolve_workspace(req.workspace_id)
-            .await
-            .map_err(to_error_data)?;
+        let workspace_id = self.resolve_workspace(req.workspace_id).await?;
 
         let folder_id = req.folder_id;
-        let name = require_text(req.name.clone(), "name").map_err(to_error_data)?;
+        let name = require_text(req.name.clone(), "name")?;
         // method / url 的校验（非空、方法转大写）统一交给 `apply_fields` ——
         // 与 update 走同一条路，避免「创建时接受 method = ""，更新时拒绝」这种裂缝
         let fields = req.into_fields();
@@ -779,14 +731,13 @@ impl Tools {
             apply_fields(&mut full, &fields)?;
             repo::request::save(conn, &full)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(detail(&created)))
+        Ok(detail(&created))
     }
 
     /// 局部更新：只改传进来的字段，其余原样保留。
-    pub async fn update_request(&self, req: UpdateRequestRequest) -> ToolResult<RequestDetail> {
+    pub async fn update_request(&self, req: UpdateRequestRequest) -> AppResult<RequestDetail> {
         self.writable("update_request")?;
 
         let request_id = req.request_id;
@@ -796,17 +747,16 @@ impl Tools {
             apply_fields(&mut full, &fields)?;
             repo::request::save(conn, &full)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(detail(&saved)))
+        Ok(detail(&saved))
     }
 
     /// 写一个环境变量：同名改写，没有就追加（整表提交语义，见 `repo::env::replace_vars`）。
-    pub async fn set_env_var(&self, req: SetEnvVarRequest) -> ToolResult<EnvironmentDto> {
+    pub async fn set_env_var(&self, req: SetEnvVarRequest) -> AppResult<EnvironmentDto> {
         self.writable("set_env_var")?;
 
-        let key = require_text(req.key, "key").map_err(to_error_data)?;
+        let key = require_text(req.key, "key")?;
         let environment_id = req.environment_id;
         let value = req.value;
 
@@ -830,10 +780,9 @@ impl Tools {
             let saved = repo::env::replace_vars(conn, environment_id, &vars)?;
             Ok((existing, saved))
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(EnvironmentDto {
+        Ok(EnvironmentDto {
             id: env.id,
             name: env.name,
             is_active: env.is_active,
@@ -850,31 +799,27 @@ impl Tools {
                     enabled: var.enabled,
                 })
                 .collect(),
-        }))
+        })
     }
 
     /// 发一次真实请求。响应体 64KB 截断、敏感响应头打码。
-    pub async fn send_request(&self, req: SendRequestRequest) -> ToolResult<SendRequestResponse> {
+    pub async fn send_request(&self, req: SendRequestRequest) -> AppResult<SendRequestResponse> {
         self.writable("send_request")?;
 
-        self.check_environment(req.environment.as_deref())
-            .await
-            .map_err(to_error_data)?;
+        self.check_environment(req.environment.as_deref()).await?;
 
-        let spec = self.build_spec(&req).await.map_err(to_error_data)?;
+        let spec = self.build_spec(&req).await?;
         // runId 只服务于「取消」：MCP 这边没有取消入口，但登记表要求它非空且唯一，
         // 否则 `InflightRegistry` 里两条并发请求会互相覆盖。
         let run_id = next_run_id();
 
-        let payload = send_request_with(&self.state, &run_id, &spec)
-            .await
-            .map_err(to_error_data)?;
+        let payload = send_request_with(&self.state, &run_id, &spec).await?;
 
-        Ok(Json(response_dto(payload)))
+        Ok(response_dto(payload, self.max_body_bytes))
     }
 
     /// 跑一轮压测，阻塞到结束（最多 [`LOADTEST_TIMEOUT`]）。
-    pub async fn run_load_test(&self, req: RunLoadTestRequest) -> ToolResult<RunLoadTestResponse> {
+    pub async fn run_load_test(&self, req: RunLoadTestRequest) -> AppResult<RunLoadTestResponse> {
         self.writable("run_load_test")?;
 
         let config = LoadtestConfig {
@@ -890,20 +835,16 @@ impl Tools {
             warmup_requests: req.warmup_requests.unwrap_or(0),
         };
         // 先校验再建 run 行：一个 concurrency = 0 的输入不该在历史里留下一行残骸
-        config.validate().map_err(to_error_data)?;
+        config.validate()?;
 
-        let request = self
-            .load_request(req.request_id)
-            .await
-            .map_err(to_error_data)?;
+        let request = self.load_request(req.request_id).await?;
         let spec = RequestSpec::from(&request);
-        let stored = stored_run_config(&spec, &config).map_err(to_error_data)?;
+        let stored = stored_run_config(&spec, &config)?;
 
         let run = with_conn(&self.state.pool, move |conn| {
             repo::loadtest::create_run(conn, Some(req.request_id), &request.name, &stored)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
         let run_id = run.id;
 
         // 占坑。跨进程拦不住（桌面端同时在跑一轮我们就无从得知），
@@ -911,15 +852,10 @@ impl Tools {
         // 双方测到的都是对方造成的劣化。
         let Some(active) = self.state.loadtests.begin(run_id) else {
             discard_run(&self.state.pool, run_id).await;
-            return Err(ErrorData::new(
-                ErrorCode::INVALID_PARAMS,
-                codes::INVALID_INPUT,
-                Some(json!({
-                    "code": codes::INVALID_INPUT,
-                    "params": { "field": "loadtest" },
-                    "debug": "another load test is already running in this process",
-                })),
-            ));
+            return Err(AppError::InvalidInput {
+                field: "loadtest",
+                reason: "another load test is already running in this process".into(),
+            });
         };
 
         let previous = self
@@ -937,7 +873,7 @@ impl Tools {
                 Ok(prepared) => prepared,
                 Err(err) => {
                     discard_run(&self.state.pool, run_id).await;
-                    return Err(to_error_data(err));
+                    return Err(err);
                 }
             };
 
@@ -949,7 +885,7 @@ impl Tools {
             Ok(client) => client,
             Err(err) => {
                 discard_run(&self.state.pool, run_id).await;
-                return Err(to_error_data(err));
+                return Err(err);
             }
         };
 
@@ -968,16 +904,13 @@ impl Tools {
 
         match outcome {
             Ok(Ok(outcome)) => {
-                let detail = persist_outcome(self.state.pool.clone(), run_id, outcome)
-                    .await
-                    .map_err(to_error_data)?;
+                let detail = persist_outcome(self.state.pool.clone(), run_id, outcome).await?;
                 let summary = detail.summary.ok_or_else(|| {
-                    ErrorData::internal_error("loadtest finished without a summary", None)
+                    AppError::Internal("loadtest finished without a summary".into())
                 })?;
-                let value = serde_json::to_value(&summary).map_err(|e| {
-                    ErrorData::internal_error(format!("serialize loadtest summary: {e}"), None)
-                })?;
-                Ok(Json(RunLoadTestResponse {
+                let value = serde_json::to_value(&summary)
+                    .map_err(|e| AppError::Internal(format!("serialize loadtest summary: {e}")))?;
+                Ok(RunLoadTestResponse {
                     run_id,
                     counts: LoadtestCountsDto {
                         total: summary.total,
@@ -985,11 +918,11 @@ impl Tools {
                         failed: summary.failed,
                     },
                     summary: value,
-                }))
+                })
             }
             Ok(Err(err)) => {
                 discard_run(&self.state.pool, run_id).await;
-                Err(to_error_data(err))
+                Err(err)
             }
             Err(_elapsed) => {
                 // 超时：先广播取消（在飞的请求自然结束，不打断），
@@ -997,38 +930,29 @@ impl Tools {
                 // 没有概要的记录，用户看到的是「跑着跑着没了」。
                 active.token().cancel();
                 discard_run(&self.state.pool, run_id).await;
-                Err(ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
+                Err(AppError::http_with(
                     codes::TIMEOUT,
-                    Some(json!({
-                        "code": codes::TIMEOUT,
-                        "params": { "ms": LOADTEST_TIMEOUT.as_millis() as u64 },
-                        "debug": "load test exceeded the MCP tool timeout budget",
-                    })),
+                    "load test exceeded the tool timeout budget",
+                    json!({ "ms": LOADTEST_TIMEOUT.as_millis() as u64 }),
                 ))
             }
         }
     }
 
     /// 强制刷新一个 Token 源，返回剩余有效期。**不返回 token 本身**（§8.3）。
-    pub async fn refresh_token(
-        &self,
-        req: RefreshTokenRequest,
-    ) -> ToolResult<RefreshTokenResponse> {
+    pub async fn refresh_token(&self, req: RefreshTokenRequest) -> AppResult<RefreshTokenResponse> {
         self.writable("refresh_token")?;
 
         let source = with_conn(&self.state.pool, move |conn| {
             repo::token::get(conn, req.token_source_id)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
         let workspace_id = source.workspace_id;
         let env = with_conn(&self.state.pool, move |conn| {
             repo::env::active_vars(conn, workspace_id)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
         let deps = crate::http::TokenDeps {
             pool: &self.state.pool,
@@ -1037,12 +961,7 @@ impl Tools {
             env: &env,
             cancel: None,
         };
-        let values = self
-            .state
-            .tokens
-            .refresh_now(&deps)
-            .await
-            .map_err(to_error_data)?;
+        let values = self.state.tokens.refresh_now(&deps).await?;
 
         let expires_in_seconds = values.expires_at.as_deref().and_then(|raw| {
             chrono::DateTime::parse_from_rfc3339(raw)
@@ -1050,23 +969,20 @@ impl Tools {
                 .map(|at| (at.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds())
         });
 
-        Ok(Json(RefreshTokenResponse {
+        Ok(RefreshTokenResponse {
             source_id: source.id,
             source_name: source.name,
             expires_at: values.expires_at,
             expires_in_seconds,
             has_refresh_token: values.refresh_token.is_some(),
-        }))
+        })
     }
 
     /// 粘贴 curl 即导入。复用与 UI 完全相同的解析 + 落库路径。
-    pub async fn import_curl(&self, req: ImportCurlRequest) -> ToolResult<ImportCurlResponse> {
+    pub async fn import_curl(&self, req: ImportCurlRequest) -> AppResult<ImportCurlResponse> {
         self.writable("import_curl")?;
 
-        let workspace_id = self
-            .resolve_workspace(req.workspace_id)
-            .await
-            .map_err(to_error_data)?;
+        let workspace_id = self.resolve_workspace(req.workspace_id).await?;
 
         let source = ImportSource {
             text: req.curl_text,
@@ -1097,10 +1013,9 @@ impl Tools {
                 .collect::<Vec<_>>();
             Ok((outcome, created))
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(ImportCurlResponse {
+        Ok(ImportCurlResponse {
             format: outcome.format.as_str().to_string(),
             counts: ImportCountsDto {
                 created: outcome.counts.created as i64,
@@ -1113,11 +1028,11 @@ impl Tools {
             // 这里只把**机器可读的部分**（原因码 + 出问题的对象 + 开发者细节）拼出来，
             // 具体怎么措辞由 AI 自己决定 —— 与桌面端拿 `kind` 去查 i18n 是同一个契约。
             warnings: outcome.warnings.iter().map(describe_warning).collect(),
-        }))
+        })
     }
 
     /// 移动到其他分类。
-    pub async fn move_request(&self, req: MoveRequestRequest) -> ToolResult<RequestSummary> {
+    pub async fn move_request(&self, req: MoveRequestRequest) -> AppResult<RequestSummary> {
         self.writable("move_request")?;
 
         let request_id = req.request_id;
@@ -1127,30 +1042,28 @@ impl Tools {
             ensure_usable_folder(conn, target, request.workspace_id, "targetFolderId")?;
             repo::request::move_to_folder(conn, request_id, Some(target))
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(summarise(moved)))
+        Ok(summarise(moved))
     }
 
     /// 软删除（进回收站，可还原）。
     pub async fn delete_request(
         &self,
         req: DeleteRequestRequest,
-    ) -> ToolResult<DeleteRequestResponse> {
+    ) -> AppResult<DeleteRequestResponse> {
         self.writable("delete_request")?;
 
         let request_id = req.request_id;
         with_conn(&self.state.pool, move |conn| {
             repo::request::soft_delete(conn, request_id)
         })
-        .await
-        .map_err(to_error_data)?;
+        .await?;
 
-        Ok(Json(DeleteRequestResponse {
+        Ok(DeleteRequestResponse {
             request_id,
             restorable: true,
-        }))
+        })
     }
 
     // ---- 内部工具 ----
@@ -1270,7 +1183,7 @@ impl Tools {
 }
 
 /// 把一次响应收成回给 AI 的形状（截断 + 打码）。
-fn response_dto(payload: HttpResponsePayload) -> SendRequestResponse {
+fn response_dto(payload: HttpResponsePayload, max_body_bytes: usize) -> SendRequestResponse {
     let headers = payload
         .headers
         .iter()
@@ -1280,7 +1193,7 @@ fn response_dto(payload: HttpResponsePayload) -> SendRequestResponse {
         })
         .collect();
 
-    let (body, cut) = truncate_body(payload.body);
+    let (body, cut) = truncate_body(payload.body, max_body_bytes);
 
     SendRequestResponse {
         status: payload.status,
@@ -1333,15 +1246,18 @@ fn mask_header_value(name: &str, value: &str) -> String {
 
 /// 按 **UTF-8 字符边界**截断响应体。
 ///
-/// 为什么不能直接 `body.truncate(MAX_BODY_BYTES)`：`String::truncate` 在非边界处
+/// 为什么不能直接 `body.truncate(limit)`：`String::truncate` 在非边界处
 /// 会 panic。一个 64KB 处正好落着半个汉字的响应就能把整个 MCP 进程打挂 ——
 /// 而 `http::execute` 里那段 `valid_up_to()` 的写法正是同一个问题的另一半
 /// （那里是在字节切片上切，这里是在 `String` 上切）。
-fn truncate_body(body: String) -> (String, bool) {
-    if body.len() <= MAX_BODY_BYTES {
+///
+/// `limit` 由调用入口给（见 [`Ops::with_body_limit`]），截与不截的**判断**在这里
+/// —— 上限可以变，截断这件事不能漏。
+fn truncate_body(body: String, limit: usize) -> (String, bool) {
+    if body.len() <= limit {
         return (body, false);
     }
-    let mut end = MAX_BODY_BYTES;
+    let mut end = limit;
     while end > 0 && !body.is_char_boundary(end) {
         end -= 1;
     }
@@ -1473,7 +1389,7 @@ fn auth_type(auth: &crate::storage::models::AuthConfig) -> &'static str {
 fn next_run_id() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     format!(
-        "mcp-{}-{}",
+        "run-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     )
@@ -1498,22 +1414,39 @@ mod tests {
 
     #[test]
     fn body_truncation_keeps_utf8_boundaries() {
-        // 每个汉字 3 字节，MAX_BODY_BYTES 必然落在某个字中间
-        let body = "中".repeat(MAX_BODY_BYTES);
-        assert!(body.len() > MAX_BODY_BYTES);
+        // 每个汉字 3 字节，默认上限必然落在某个字中间
+        let body = "中".repeat(DEFAULT_MAX_BODY_BYTES);
+        assert!(body.len() > DEFAULT_MAX_BODY_BYTES);
 
-        let (cut, truncated) = truncate_body(body);
+        let (cut, truncated) = truncate_body(body, DEFAULT_MAX_BODY_BYTES);
         assert!(truncated);
-        assert!(cut.len() <= MAX_BODY_BYTES);
+        assert!(cut.len() <= DEFAULT_MAX_BODY_BYTES);
         assert_eq!(cut.len() % 3, 0, "截断必须落在字符边界上");
         assert!(cut.chars().all(|c| c == '中'));
     }
 
     #[test]
     fn a_body_within_the_limit_is_untouched() {
-        let (body, truncated) = truncate_body("hello".to_string());
+        let (body, truncated) = truncate_body("hello".to_string(), DEFAULT_MAX_BODY_BYTES);
         assert_eq!(body, "hello");
         assert!(!truncated);
+    }
+
+    /// 上限是**入口给**的（CLI 会把它调大甚至设成 `usize::MAX`），
+    /// 但截断这条判断必须在 core 里 —— 换个数字不该换掉行为。
+    #[test]
+    fn the_body_limit_follows_the_caller_but_truncation_still_happens() {
+        let body = "x".repeat(100);
+
+        // 调大：100 字节的响应在 4KB 上限下原样通过
+        let (kept, cut) = truncate_body(body.clone(), 4096);
+        assert_eq!(kept, body);
+        assert!(!cut);
+
+        // 调小：同样的响应被切到 10 字节
+        let (sliced, cut) = truncate_body(body, 10);
+        assert_eq!(sliced.len(), 10);
+        assert!(cut);
     }
 
     #[test]
@@ -1548,97 +1481,11 @@ mod tests {
         ));
     }
 
-    /// 入参契约的回归网：`create_request` 的三个必填字段在 schema 里必须是
-    /// 「必填的、非空 string」。
-    ///
-    /// 这条测试是补上一个真实缺陷的：最初 `CreateRequestRequest` 用
-    /// `#[serde(flatten)]` 复用了 `RequestFields`，而 `name` 在两边同名 ——
-    /// 外层是 `String`、flatten 进来的是 `Option<String>`，schemars 把两者合并成
-    /// `type: ["string","null"]` 且 `default: null`，同时 `required` 又列着 `name`。
-    /// 一份自相矛盾的 schema 会把 AI 引向「传 null 是合法的」这个错误结论，
-    /// 而反序列化会当场拒掉它。
-    #[test]
-    fn create_request_schema_keeps_its_required_fields_required() {
-        let schema = rmcp::handler::server::common::schema_for_input::<CreateRequestRequest>()
-            .expect("create_request 的入参 schema 必须能生成");
-
-        let required = schema
-            .get("required")
-            .and_then(Value::as_array)
-            .expect("schema 必须声明 required");
-        let properties = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .expect("schema 必须声明 properties");
-
-        for field in ["name", "method", "url"] {
-            assert!(
-                required.iter().any(|entry| entry == field),
-                "`{field}` 必须是必填：{required:?}"
-            );
-            assert_eq!(
-                properties[field].get("type"),
-                Some(&Value::from("string")),
-                "`{field}` 不该是可空类型：一份说「可以传 null」而实现会拒的 schema，\
-                 会把调用方引到一个它自己看不出来的错误上"
-            );
-        }
-    }
-
-    /// `send_request` 允许「内联定义」，所以 method / url 在那里是**可选**的
-    /// —— 与 `create_request` 相反。这条测试把两者的差别钉住，
-    /// 免得有人「顺手统一一下」。
-    #[test]
-    fn send_request_schema_leaves_method_and_url_optional() {
-        let schema = rmcp::handler::server::common::schema_for_input::<SendRequestRequest>()
-            .expect("send_request 的入参 schema 必须能生成");
-
-        let required = schema
-            .get("required")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        assert!(
-            !required
-                .iter()
-                .any(|entry| entry == "method" || entry == "url"),
-            "send_request 可以只给 requestId，method/url 不能是必填：{required:?}"
-        );
-    }
-
-    #[test]
-    fn app_errors_keep_their_code_in_the_mcp_error() {
-        let err = AppError::NotFound {
-            entity: "request",
-            id: 7,
-        };
-        let data = to_error_data(err);
-        assert_eq!(data.code, ErrorCode::RESOURCE_NOT_FOUND);
-        assert_eq!(data.message, "E_NOT_FOUND", "错误码不能被丢掉");
-
-        let invalid = to_error_data(AppError::InvalidInput {
-            field: "name",
-            reason: "must not be empty".into(),
-        });
-        assert_eq!(invalid.code, ErrorCode::INVALID_PARAMS);
-        assert_eq!(invalid.message, "E_INVALID_INPUT");
-    }
-
-    #[test]
-    fn permission_denied_is_recognisable_without_the_numeric_code() {
-        let data = permission_denied("create_request");
-        assert_eq!(data.message, "permission_denied");
-        let payload = data.data.expect("data 里必须带结构化信息");
-        assert_eq!(payload["code"], "permission_denied");
-        assert_eq!(payload["tool"], "create_request");
-    }
-
     #[test]
     fn run_ids_are_unique_within_the_process() {
         let first = next_run_id();
         let second = next_run_id();
         assert_ne!(first, second);
-        assert!(first.starts_with("mcp-"));
+        assert!(first.starts_with("run-"));
     }
 }

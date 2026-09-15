@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:app": "pnpm build && pnpm sidecar:stage",
+    "sidecar:stage": "node scripts/stage-sidecars.mjs",
     "preview": "vite preview",
-    "mcp:build": "cargo build --manifest-path src-tauri/Cargo.toml --bin reqly-mcp",
+    "mcp:build": "cargo build --manifest-path src-tauri/Cargo.toml -p reqly-mcp",
+    "cli:build": "cargo build --manifest-path src-tauri/Cargo.toml -p reqly-cli",
     "tauri": "tauri"
   },
   "dependencies": {

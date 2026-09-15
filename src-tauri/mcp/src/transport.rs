@@ -26,9 +26,9 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServiceExt;
 
-use crate::error::{AppError, AppResult};
-use crate::mcp::server::ReqlyMcp;
-use crate::AppState;
+use crate::server::ReqlyMcp;
+use reqly_core::error::{AppError, AppResult};
+use reqly_core::AppState;
 
 /// 回环 HTTP 的默认端口与路径，与 design.md §8.1 写的一致。
 pub const DEFAULT_HTTP_PORT: u16 = 7777;

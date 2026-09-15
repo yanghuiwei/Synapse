@@ -14,7 +14,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::commands::validate::clean_name;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::storage::models::{ApiRequest, AuthConfig, Folder, HistoryEntry};
 use crate::storage::{repo, with_conn};
 use crate::AppState;
@@ -23,33 +23,8 @@ use crate::AppState;
 // 校验助手
 // ============================================================
 
-/// 目标文件夹必须是「存活 + 同工作区」的。
-///
-/// 不做这个检查的话有两个坑：指向回收站里的文件夹会建出一个
-/// **看不见的孤儿**（树里查不到，但请求明明还在），指向别的工作区的
-/// 文件夹则会让两个工作区的数据串在一起。
-pub(crate) fn ensure_usable_folder(
-    conn: &rusqlite::Connection,
-    folder_id: i64,
-    workspace_id: i64,
-    field: &'static str,
-) -> AppResult<Folder> {
-    let folder = repo::folder::get(conn, folder_id)?;
-
-    if folder.workspace_id != workspace_id {
-        return Err(AppError::InvalidInput {
-            field,
-            reason: "target folder belongs to a different workspace".into(),
-        });
-    }
-    if folder.deleted_at.is_some() {
-        return Err(AppError::InvalidInput {
-            field,
-            reason: "target folder is in the trash".into(),
-        });
-    }
-    Ok(folder)
-}
+// 实现已搬去 `reqly-core` —— 建请求那条路径 MCP / CLI 也要走同一次校验。
+pub(crate) use reqly_core::service::collection::ensure_usable_folder;
 
 // ============================================================
 // 文件夹
@@ -392,7 +367,10 @@ pub async fn purge_trash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // AppError 原先是由顶层的 use 带进来的，那行随 ensure_usable_folder 搬去
+    // core 之后收窄成了 AppResult，所以这里补一条显式的。
     use crate::commands::validate::MAX_NAME_LEN;
+    use crate::error::AppError;
     use crate::storage::migrate;
     use rusqlite::Connection;
 

@@ -1,5 +1,8 @@
 //! `reqly-mcp` —— 独立的 MCP Server 可执行文件（design.md §8.1）。
 //!
+//! 这个 package **不依赖 tauri**（只依赖 `reqly-core` + rmcp + axum），
+//! 所以它编出来的 exe 只带核心层，不带整个 GUI 框架 —— 拆之前是 21.5 MB。
+//!
 //! ## 为什么是独立进程，而不是让桌面 App 兼做 MCP server
 //!
 //! AI 客户端（Claude Code / Cursor / WorkBuddy / Hermes）启动 MCP server 的方式是
@@ -22,8 +25,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use reqly_lib::mcp::transport::{serve_http, serve_stdio, DEFAULT_HTTP_PORT};
-use reqly_lib::AppState;
+use reqly_core::AppState;
+use reqly_mcp::transport::{serve_http, serve_stdio, DEFAULT_HTTP_PORT};
 
 /// 参数错误的退出码。与「启动失败」区分开：2 = 你命令行写错了，
 /// 1 = 参数没问题但起不来（库打不开、端口被占）。

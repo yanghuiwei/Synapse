@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Panel, usePanelRef } from "react-resizable-panels";
 import type { PanelSize } from "react-resizable-panels";
 import { matchShortcut, SECTION_SHORTCUTS } from "@/lib/constants";
+import { watchExternalChanges } from "@/lib/externalChanges";
 import * as ipc from "@/lib/ipc";
 import { bootstrapSettings } from "@/lib/sync";
 import { useTheme } from "@/lib/useTheme";
@@ -60,10 +61,11 @@ export function App() {
   const sidebarRef = usePanelRef();
 
   /**
-   * 启动序列。三件事互相独立，所以并发发起：
+   * 启动序列。四件事互相独立，所以并发发起：
    * 1. 设置：读 SQLite → 纠偏主题 → 之后每次切主题写回库
    * 2. 应用信息：状态栏的版本号
    * 3. 集合树：工作区 / 文件夹 / 请求
+   * 4. 外部改动监听：MCP / CLI 改了同一个库时把界面叫醒
    *
    * 全都**不阻塞首帧** —— 渲染完骨架再填充，比白屏等 IPC 体验好得多。
    */
@@ -87,9 +89,14 @@ export function App() {
 
     void useWorkspaceStore.getState().load();
 
+    // 同步注册（不等 IPC），所以在 StrictMode 下第二遍挂载会立刻拿到一个
+    // 同步的 stop 函数，不会像上面那个 promise 那样漏掉退订
+    const stopExternalWatch = watchExternalChanges();
+
     return () => {
       cancelled = true;
       stopThemeSync?.();
+      stopExternalWatch();
     };
   }, []);
 

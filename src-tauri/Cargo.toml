@@ -10,6 +10,23 @@ edition = "2021"
 # 所以必须在这里钉一个默认值，而不是把 `mcp` 那个从自动发现里摘出去。
 default-run = "reqly"
 
+# --- workspace ---
+# 这个 package 同时是 workspace 的根。四个 package 的分工：
+#   reqly      （本文件）桌面端：tauri + 命令层
+#   core/     reqly-core  三个入口共用的核心层（**不含 tauri**）
+#   mcp/      reqly-mcp   MCP Server 的 lib + bin（**不含 tauri**）
+#   cli/      reqly-cli   命令行入口（**不含 tauri**，但带 clap）
+#
+# 拆的原因：`reqly-mcp.exe` 只读写一个 SQLite 文件，却因为 bin target 挂在桌面
+# package 下而一路链上 tauri —— 21.5 MB。CLI 会是同一个下场，只会更重。
+# 顺带的好处：每个入口各挑各的依赖，clap 只进 CLI 那个二进制。
+#
+# ⚠️ `[profile.release]` 必须留在 workspace 根（也就是本文件）：放进成员 crate
+# 会被 Cargo 忽略并给出警告，而这里的 lto/strip 正是体积优化的主力。
+[workspace]
+members = ["core", "mcp", "cli"]
+resolver = "2"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -23,6 +40,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 核心层（错误码 / 存储 / HTTP 执行 / 模板 / 压测 / 导入器）。
+# 三个入口（桌面 / MCP / CLI）唯一共享的东西，**不含 tauri**。
+reqly-core = { path = "core" }
+
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -37,8 +58,6 @@ tokio = { version = "1.53.1", features = [
   "sync",
   "macros",
   "time",
-  # TcpListener：MCP 的回环 HTTP 通道要自己监听端口（stdio 通道不需要）
-  "net",
 ] }
 tokio-util = { version = "0.7.19", default-features = false }
 # reqwest 必须关掉 default features：默认会拉 native-tls(OpenSSL)，那是"要求系统装 OpenSSL"的老路。
@@ -63,24 +82,9 @@ reqwest = { version = "0.12.28", default-features = false, features = [
 
 
 # --- MCP Server（P7）---
-# rmcp 是 MCP 官方 Rust SDK，对齐 MCP 规范 2026-07-28（含 stateless 的 server/discover）。
-# 保留默认 features（base64 / macros / server），另外显式开：
-#   transport-io                        → stdio 通道（被 AI 客户端 spawn）
-#   transport-streamable-http-server    → 回环 HTTP 通道（自带 SSE 会话管理）
-# schemars 已由 server 特性带入，这里再写一遍是为了表明「tool 参数靠它生成 JSON Schema」。
-rmcp = { version = "3.3", features = [
-  "server",
-  "macros",
-  "schemars",
-  "transport-io",
-  "transport-streamable-http-server",
-] }
-
-# StreamableHttpService 是个 tower::Service，本身不带 listener，
-# 需要外面套一层真正监听端口的 HTTP server。用 axum 的 router + serve。
-# 关掉默认 features 只留 http1 + tokio：MCP 是回环上的 JSON/SSE，
-# 不需要 TLS、压缩、ws、multipart 这些。
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# 已经不在这里了：P8 把它拆成了独立的 `reqly-mcp` package（见 workspace members）。
+# 原因就是本文件顶部写的那条 —— bin target 挂在哪个 package 下，就会链上那个
+# package 的全部依赖，包括 tauri。桌面端现在与 MCP 协议库（rmcp / axum）无关。
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

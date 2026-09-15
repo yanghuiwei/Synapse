@@ -4,7 +4,7 @@
 //!
 //! 1. 把 13 个 tool **登记**进 `ToolRouter`，并声明各自的注解（readOnly / destructive / idempotent）；
 //! 2. 声明 server 身份与 `instructions`（AI 客户端握手时拿到的「这个 server 是干什么的」）；
-//! 3. 把调用转发给 [`crate::mcp::tools::Tools`]。
+//! 3. 把调用转发给 [`crate::tools::Tools`]。
 //!
 //! 业务逻辑一律不在这里 —— 理由见 `tools.rs` 的模块头。
 //!
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
-use crate::mcp::tools::{
+use crate::tools::{
     CreateRequestRequest, DeleteRequestRequest, DeleteRequestResponse, GetRequestRequest,
     ImportCurlRequest, ImportCurlResponse, ListEnvironmentsRequest, ListEnvironmentsResponse,
     ListFoldersRequest, ListFoldersResponse, ListRequestsRequest, ListRequestsResponse,
@@ -29,8 +29,8 @@ use crate::mcp::tools::{
     RunLoadTestRequest, RunLoadTestResponse, SendRequestRequest, SendRequestResponse,
     SetEnvVarRequest, ToolResult, UpdateRequestRequest,
 };
-use crate::mcp::tools::{EnvironmentDto, Tools};
-use crate::AppState;
+use crate::tools::{EnvironmentDto, Tools};
+use reqly_core::AppState;
 
 /// MCP server 本体。
 ///

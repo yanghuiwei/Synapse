@@ -58,6 +58,12 @@ pub mod codes {
     /// 该功能还没实现（params.feature 说明是哪个）
     pub const NOT_IMPLEMENTED: &str = "E_NOT_IMPLEMENTED";
 
+    // ---- 进程模式（P8） ----
+    /// 进程被起成了只读模式（MCP `--read-only` / CLI `--read-only`），写操作被拒。
+    ///
+    /// 与「权限不足」分开：这条**重试永远不会变好**，所以不进 `retryable()`。
+    pub const READ_ONLY: &str = "E_READ_ONLY";
+
     // ---- 变量与 Token（P4） ----
     //
     // 为什么这三个要分开：它们指向的**修改动作完全不同** ——
@@ -133,6 +139,11 @@ pub enum AppError {
 
     #[error("request cancelled by user")]
     Cancelled,
+
+    /// 只读模式下拒绝了写操作。`tool` 是发起方的操作名（MCP 的 tool 名 / CLI 的子命令名），
+    /// 用于让调用者说清「是哪个操作被拦了」而不是给一句笼统的「操作被拒」。
+    #[error("write refused in read-only mode: {tool}")]
+    ReadOnly { tool: &'static str },
 }
 
 impl AppError {
@@ -161,6 +172,7 @@ impl AppError {
             AppError::InvalidUrl { .. } => codes::URL,
             AppError::NotImplemented { .. } => codes::NOT_IMPLEMENTED,
             AppError::Cancelled => codes::CANCELLED,
+            AppError::ReadOnly { .. } => codes::READ_ONLY,
         }
     }
 
@@ -195,6 +207,7 @@ impl AppError {
             AppError::Http { params, .. } => params.clone(),
             AppError::InvalidUrl { raw, .. } => Some(json!({ "raw": raw })),
             AppError::NotImplemented { feature } => Some(json!({ "feature": feature })),
+            AppError::ReadOnly { tool } => Some(json!({ "tool": tool })),
             _ => None,
         }
     }

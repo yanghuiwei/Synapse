@@ -2,7 +2,7 @@
 //!
 //! 面板上要展示两段能直接粘进配置文件的片段，以及它们指向的两个路径。
 //! 为什么不把片段在前端拼：路径的转义规则（反斜杠、空格）是**格式相关**的知识，
-//! 已经沉淀在 `mcp::config_gen` 里并有测试钉着（见那里的模块注释）——
+//! 已经沉淀在 `reqly_core::mcp::config_gen` 里并有测试钉着（见那里的模块注释）——
 //! 前端再拼一遍就是第二份实现，两份迟早会分叉。
 //!
 //! 两个路径都如实回给界面，是为了让用户能自己核对。这一块最常见的故障
@@ -14,8 +14,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::mcp::config_gen::{json_snippet, yaml_snippet, McpPaths};
 use crate::AppState;
+use reqly_core::mcp::config_gen::{json_snippet, yaml_snippet, McpPaths};
 
 /// MCP 可执行文件名。
 ///

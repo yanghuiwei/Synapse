@@ -1,0 +1,45 @@
+[package]
+name = "reqly-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Reqly 的 MCP Server：把本地 API 工作台暴露成 AI 客户端的工具集"
+
+[lib]
+name = "reqly_mcp"
+
+[[bin]]
+name = "reqly-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# 核心层（存储 / HTTP 执行 / 模板 / 压测 / 导入器 / 13 个操作）。
+# **这条依赖就是「不链 tauri」的保证** —— reqly-core 的 Cargo.toml 里没有 tauri。
+reqly-core = { path = "../core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# rmcp 是 MCP 官方 Rust SDK，对齐 MCP 规范 2026-07-28（含 stateless 的 server/discover）。
+# 保留默认 features（base64 / macros / server），另外显式开两条通道：
+#   transport-io                     → stdio（被 AI 客户端 spawn）
+#   transport-streamable-http-server → 回环 HTTP（自带 SSE 会话管理）
+rmcp = { version = "3.3", features = [
+  "server",
+  "macros",
+  "schemars",
+  "transport-io",
+  "transport-streamable-http-server",
+] }
+
+# StreamableHttpService 是个 tower::Service，自己不带 listener，
+# 外面要套一层真正监听端口的 HTTP server。
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+
+tokio = { version = "1.53.1", features = [
+  "rt-multi-thread",
+  "macros",
+  # TcpListener：回环 HTTP 通道要自己监听端口（stdio 通道不需要）
+  "net",
+  "time",
+  "sync",
+] }

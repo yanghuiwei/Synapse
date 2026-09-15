@@ -350,9 +350,31 @@ export const settings = {
   remove: (key: string): Promise<boolean> => call("delete_setting", { key }),
 };
 
+/**
+ * 「库被别的进程改过」的事件名。
+ *
+ * ⚠️ 必须与 Rust 侧 `src-tauri/src/external_changes.rs` 的 `DB_CHANGED_EVENT`
+ * 逐字一致 —— 它是两边的唯一约定，写错了不会有任何报错，只是界面永远不刷新。
+ */
+const DB_CHANGED_EVENT = "reqly://db-changed";
+
 export const app = {
   info: (): Promise<AppInfo> =>
     call("get_app_info", undefined, { parse: (v) => appInfoSchema.parse(v) }),
+
+  /**
+   * 订阅「库被别的进程改过」。
+   *
+   * 载荷是空的：这一层只回答「变了」，**不回答「什么变了」**。
+   * 想知道那种粒度就得让后端算出一份结构化 diff，而重拉一次文件夹 + 请求列表
+   * 在本地库上是亚毫秒级的 —— 不值得为省这点开销去维护一份变更日志。
+   *
+   * 返回退订函数（与 `loadtests.onProgress` 同一套约定），不在 Tauri 里时为 no-op。
+   */
+  onDbChanged: (handler: () => void): Promise<UnlistenFn> => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {});
+    return listen<null>(DB_CHANGED_EVENT, () => handler());
+  },
 };
 
 /**

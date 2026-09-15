@@ -1,62 +1,43 @@
-//! Reqly 后端入口。
+//! Reqly 桌面端入口（Tauri 层）。
+//!
+//! 这一层只剩三件事：把核心层接上 Tauri、注册命令、起窗口。
+//! 业务实现全部在 `reqly-core` 里 —— 桌面端、MCP Server、CLI 三个入口共用它。
+//!
+//! MCP Server 已经不在这个 crate 里了（P8 拆成 `reqly-mcp` package）：
+//! 它只读写同一个 SQLite，却因为链到这里而把整个 tauri 拖进了二进制。
+//! 桌面端留下的 MCP 相关代码只有 `commands/mcp.rs` —— 那个面板要展示的
+//! 配置片段由 `reqly_core::mcp::config_gen` 生成。
 //!
 //! 启动顺序：解析数据目录 → 建连接池 → 跑迁移 → 保证有默认工作区 → 注册状态。
 //! 任一步失败都直接终止启动 —— 存储层起不来时应用没有任何可用功能，
 //! 与其带着半死不活的状态运行，不如把错误明确抛出来。
 
 pub mod commands;
-pub mod error;
-pub mod http;
-pub mod importer;
-pub mod loadtest;
-pub mod mcp;
-pub mod storage;
-pub mod template;
+mod external_changes;
+
+/// 命令层的 `use crate::AppState;` 靠这条成立。
+pub use reqly_core::AppState;
+/// 核心层在桌面 crate 里的转发面。
+///
+/// `commands/*` 原本写的是 `crate::storage::repo` / `crate::error::AppError` 这类路径。
+/// 这些模块搬进 `reqly-core` 之后，用一组 re-export 把它们重新挂回 `crate::` 下，
+/// 于是几千行命令层代码一行都不用动 —— 拆 crate 的风险主要就在这种「大面积改引用」上，
+/// 能用转发消掉就不去逐个改。
+///
+/// **这是为迁移服务的**：新写的模块请直接 `use reqly_core::...`，不要再加深这层别名。
+pub use reqly_core::{error, http, importer, loadtest, storage, template};
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-use error::{AppError, AppResult};
-use http::{ClientCache, InflightRegistry, TokenRefresher};
-use loadtest::LoadtestRegistry;
-use storage::pool::{self, SqlitePool};
-use storage::{migrate, repo};
+use reqly_core::error::{AppError, AppResult};
 
 /// 数据库文件名。放在 tauri 的 app_data_dir 下
 /// （Windows 上是 `%APPDATA%\<bundle identifier>\`）。
+///
+/// 它只属于桌面端 —— MCP 与 CLI 的库路径由 `--db` 直接给，不去猜数据目录。
 const DB_FILE_NAME: &str = "reqly.db";
-
-/// 全局状态。命令通过 `State<'_, AppState>` 取用。
-pub struct AppState {
-    pub pool: SqlitePool,
-    /// 保留绝对路径：设置页要显示、出问题时用户要能自己去打开
-    pub db_path: PathBuf,
-    /// 按 `RequestSettings` 复用的 HTTP 客户端。**必须全局只有一份** ——
-    /// 它的价值在于内部的连接池（keep-alive），每次命令都新建就白搭了。
-    pub clients: ClientCache,
-    /// 进行中的请求登记表，`cancel_request` 靠它找回要打断的那次执行。
-    pub inflight: InflightRegistry,
-    /// Token 源的「航班锁」（design.md §4.3）。也**必须全局只有一份** ——
-    /// 每个命令各建一个的话，「并发 5 个请求只刷一次」立刻退化成刷 5 次。
-    pub tokens: TokenRefresher,
-    /// 最近一次成功响应的 JSON，`{{resp.$.path}}` 的来源。
-    ///
-    /// 进程级、最近一次 —— design.md §4.2 写的是「最近一次响应（会话内）」，
-    /// 没有按请求/按文件夹细分。细分要回答「同一个请求自己的上一次算不算」，
-    /// 那是 P5 的事；先把语义钉成最简单的一种。
-    ///
-    /// 存 `Arc<Value>` 而不是 `Value`：读取时克隆一个 `Arc` 就能把锁放下，
-    /// 不必抱着 `MutexGuard` 穿过 await（`std` 的 guard 不是 `Send`）。
-    pub last_response: Mutex<Option<Arc<serde_json::Value>>>,
-    /// 「当前正在跑的那一轮压测」的占坑与取消（P6）。
-    ///
-    /// 与 `inflight` 分开而不是合表：那一张是按 `runId` 索引、面向「一次请求」的，
-    /// 而压测同时只允许一轮、且守卫要能搬进 `tokio::spawn` 出来的引擎任务
-    /// （见 `loadtest::registry` 的模块说明）。
-    pub loadtests: LoadtestRegistry,
-}
 
 fn resolve_db_path(app: &tauri::AppHandle) -> AppResult<PathBuf> {
     let dir = app
@@ -64,51 +45,6 @@ fn resolve_db_path(app: &tauri::AppHandle) -> AppResult<PathBuf> {
         .app_data_dir()
         .map_err(|e| AppError::Internal(format!("cannot resolve app data dir: {e}")))?;
     Ok(dir.join(DB_FILE_NAME))
-}
-
-impl AppState {
-    /// 从数据目录建起整套运行时：建池 → 跑迁移 → 保证默认工作区。
-    ///
-    /// 桌面端与 MCP 侧共用这一条启动路径。区别只在路径从哪来 —— 桌面端由
-    /// [`resolve_db_path`] 从 `AppHandle` 反推，MCP 那个独立可执行文件则直接
-    /// 吃 `--db` 参数，所以这里收的是**已经解析好的**路径。
-    ///
-    /// 日志一律走 **stderr**：MCP 的 stdio 通道把 stdout 当作 JSON-RPC 流，
-    /// 往 stdout 写一行日志就会污染协议、让客户端握手直接失败。
-    pub fn new(db_path: PathBuf) -> AppResult<Self> {
-        let pool = pool::create_pool(&db_path)?;
-
-        {
-            let mut conn = pool.get()?;
-
-            let applied = migrate::run(&mut conn)?;
-            if applied.is_empty() {
-                eprintln!(
-                    "[reqly] schema up to date (v{})",
-                    migrate::current_version(&conn)?
-                );
-            } else {
-                eprintln!("[reqly] applied migrations: {applied:?}");
-            }
-
-            let ws = repo::workspace::ensure_default(&conn)?;
-            eprintln!(
-                "[reqly] db ready: {} (workspace #{})",
-                db_path.display(),
-                ws.id
-            );
-        }
-
-        Ok(Self {
-            pool,
-            db_path,
-            clients: ClientCache::new(),
-            inflight: InflightRegistry::new(),
-            tokens: TokenRefresher::new(),
-            last_response: Mutex::new(None),
-            loadtests: LoadtestRegistry::new(),
-        })
-    }
 }
 
 fn init_storage(app: &tauri::AppHandle) -> AppResult<AppState> {
@@ -122,7 +58,16 @@ pub fn run() {
         .setup(|app| {
             // setup 的错误类型是 Box<dyn Error>，转成 String 以保留原始描述
             let state = init_storage(app.handle()).map_err(|e| e.to_string())?;
+
+            // 先 clone 池再交出去：后台轮询任务只需要池，而 `manage` 会把 state 移走。
+            // 池是 r2d2 的 `Pool`，clone 一份是 Arc 级别的操作，不是深拷贝。
+            let pool = state.pool.clone();
             app.manage(state);
+
+            // MCP / CLI 改了同一个库时把界面叫醒（design.md §8.1 承诺的文件监听）。
+            // 放在 `setup` 里是因为它需要 `AppHandle` 才能往后发事件。
+            external_changes::spawn(app.handle().clone(), pool);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
