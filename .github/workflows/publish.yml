@@ -1,0 +1,200 @@
+# 发版流水线：推 v* tag（或手动触发）→ 三平台并行构建 → 建 Draft Release
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠️ 关于 permissions：本仓库 Settings → Actions → General 里的
+#    "Workflow permissions" 开关**看不到**（被组织策略锁定），所以不能指望仓库默认值。
+#    因此这里在**两层**都显式声明 contents: write：
+#      1) 顶层 permissions   —— 给整个 workflow 定基线（同时把未列出的 scope 全收成 none）
+#      2) job 级 permissions —— 再钉一次，防止将来有人拆 job / 换 reusable workflow 时被降级
+#    缺了它的症状：tauri-action 在 createRelease 那一步挂掉，报
+#      HTTP 403 + "Resource not accessible by integration"
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 同一个 tag 连推两次 / 手动重跑时，取消上一轮没跑完的 job：
+# 既省 runner 分钟，也避免两个 job 同时往同一个 Release 传附件（会互相覆盖）
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # ↓↓ 第二层。别删，理由见文件头。
+    permissions:
+      contents: write
+
+    strategy:
+      # 一个平台挂了不要顺手把其他平台也掐掉 —— 三平台产物互相独立
+      fail-fast: false
+      matrix:
+        include:
+          # 用 22.04 而不是 ubuntu-latest：Tauri 的 AppImage 打包链对 glibc 敏感，
+          # 在更新的发行版上打出来的 AppImage 在老机器上可能起不来。
+          # （2026-09 核对 GitHub 官方 runner 清单，ubuntu-22.04 仍在支持列表内。
+          #  万一哪天真退役：这里换成 ubuntu-24.04，下面系统依赖的包名不用动。）
+          - platform: ubuntu-22.04
+          # macos-latest 目前是 Apple Silicon（arm64）。**故意不传 --target**，理由见
+          # 「构建并创建 Draft Release」那一步的注释。
+          - platform: macos-latest
+          - platform: windows-latest
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 前端工具链 ─────────────────────────────────────────────────────────
+      # 顺序不能换：setup-node 的 cache: pnpm 需要先能调到 pnpm 命令，
+      # 所以 pnpm/action-setup 必须排在 setup-node 前面。
+      - name: 装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # package.json 里没有 packageManager 字段，这里不写版本 action 会直接报错。
+          # 仓库 pnpm-lock.yaml 的 lockfileVersion 是 9.0 → pnpm 9 / 10 都能装，这里钉 10。
+          version: '10'
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      # ── Rust 工具链 ─────────────────────────────────────────────────────────
+      - name: 装 Rust（stable）
+        uses: dtolnay/rust-toolchain@stable
+
+      # 缓存 ~/.cargo 与 src-tauri/target。
+      # 这个仓库的 workspace 根是 src-tauri/Cargo.toml，target 目录在 src-tauri/target，
+      # 所以要显式告诉 rust-cache 去哪找 —— 否则它按仓库根找，缓存命中率会很难看。
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          # 三平台各存一份，key 里带上平台名别互相覆盖
+          key: ${{ matrix.platform }}
+
+      # ── Linux 系统依赖（Tauri **v2** → webkit2gtk-**4.1**）─────────────────
+      # v1 时代是 4.0，照抄 v1 的模板会在这里挂。本项目 src-tauri/Cargo.toml 里是 tauri = "2"。
+      - name: 装 Linux 系统依赖
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev
+
+      - name: 装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      # ── 排查用：把 GITHUB_TOKEN 的**实际**权限打出来 ─────────────────────────
+      # 只在失败时才有价值，所以 continue-on-error，绝不让它拖垮构建。
+      # 只读、不打印 token 本身（token 一旦进日志就等于泄露）。
+      - name: 打印 GITHUB_TOKEN 实际权限
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== 1. 本 workflow 声明的权限（YAML 写的，不是仓库默认值）==="
+          echo "  top-level : contents: write"
+          echo "  job-level : contents: write"
+          echo
+          echo "=== 2. 拿这个 token 打一次 REST API，看 GitHub 回的响应头 ==="
+          curl -sS -D - -o /dev/null \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}" \
+            | grep -iE '^(HTTP/|x-oauth-scopes|x-accepted-github-permissions|x-ratelimit-remaining)' || true
+          echo
+          echo "=== 3. gh CLI 眼里这个 token 是谁 ==="
+          gh auth status || true
+          echo
+          echo "=== 怎么读上面这段 ==="
+          echo "  x-oauth-scopes 对 GITHUB_TOKEN 恒为空：它是 App 安装令牌，不走 PAT 那套 scope，"
+          echo "  所以**不能拿它判断有没有写权限**，看到空是正常的。"
+          echo "  真正的判定点在下一步：tauri-action 能不能建出 Draft Release。"
+          echo "  失败特征 → HTTP 403 + 'Resource not accessible by integration'，"
+          echo "  含义是 contents 被降级成了 read（仓库/组织默认策略把 token 收窄了）。"
+          echo "  那时先确认本文件顶层的 permissions 还在 —— 组织策略有可能连它一起吞掉。"
+
+      # ── 构建 + 发布 ─────────────────────────────────────────────────────────
+      - name: 构建并创建 Draft Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # macOS 无 Apple 证书 → ad-hoc 签名（身份写 "-"）。
+          # 不设这一行的后果：arm64 上**每个**二进制都必须至少带签名才会被加载，
+          # 用户下载后双击会直接弹「文件已损坏，无法打开」—— 比「未验证的开发者」更难解释。
+          # ad-hoc 解决的是"损坏"，不解决"未验证"：首次打开仍需去
+          # 系统设置 → 隐私与安全性 里放行（没有付费证书时这是必然代价）。
+          # 非 macOS 平台会忽略这个变量，所以放这里不用加 if。
+          APPLE_SIGNING_IDENTITY: "-"
+
+          # updater 的签名密钥 —— 本项目**尚未接入** updater（Cargo.toml 里没有
+          # tauri-plugin-updater），所以先注掉。接入时按两步打开：
+          #   1) 仓库 Settings → Secrets 里加
+          #      TAURI_SIGNING_PRIVATE_KEY（`pnpm tauri signer generate` 生成的私钥内容）
+          #      与 TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          #   2) 给下面两行去注释，并同开 tauri.conf.json 的
+          #      bundle.createUpdaterArtifacts: true
+          # 留着也不会报错（tauri 只在 updater 配置存在时才读这些变量），
+          # 但把空 secret 传进构建没意义，注掉更干净。
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # tag / 标题里的 __VERSION__ 会被替换成 tauri.conf.json 的 version（现在是 0.1.0）
+          # → tag = v0.1.0。**必须先改版本号再打 tag**。
+          # ⚠️ 版本号写在 3 处，必须同步：src-tauri/Cargo.toml、src-tauri/tauri.conf.json、
+          # package.json —— 少改一处的后果是「安装包文件名是一个版本、exe 属性里是另一个」。
+          tagName: v__VERSION__
+          # Release 标题
+          releaseName: 'reqly v__VERSION__'
+          releaseBody: |
+            三平台安装包见下方 Assets：
+            - Windows: `*-setup.exe`（NSIS）
+            - macOS: `*.dmg`（arm64，ad-hoc 签名）
+            - Linux: `*.deb` / `*.rpm` / `*.AppImage`
+
+            本 Release 为**草稿**，人工确认产物无误后再 Publish。
+          # 先建草稿：对外可见的那一刻由你控制
+          releaseDraft: true
+          prerelease: false
+
+          # 本仓库 package.json 没有 packageManager 字段，显式指定更稳，
+          # 免得 action 自己探测包管理器时选到 npm。
+          tauriScript: pnpm tauri
+
+          # 没接 updater 时这项不会产出任何资产；显式写出来是当文档用（默认值本来就是 true）
+          uploadUpdaterJson: true
+          # Windows 侧 bundle.targets 被 tauri.windows.conf.json 收窄成了 ["nsis"]，
+          # 只有 setup.exe 一种。显式 prefer-nsis 保证将来 updater 的 latest.json 指向 .exe
+          updaterJsonPreferNsis: true
+
+          # ⚠️ 故意不传 args: --target xxx
+          # 本项目 bundle.externalBin 要求 src-tauri/binaries/ 下存在
+          # `<name>-$TARGET_TRIPLE` 形式的 sidecar，而这个后缀由
+          # scripts/stage-sidecars.mjs 用 **rustc -vV 的 host** 决定
+          # （它挂在 beforeBuildCommand 上，收不到我们这里的 --target）。
+          # 所以这里一旦传了与 host 不同的 --target，sidecar 名字就对不上，
+          # `tauri build` 会以「找不到 binaries/reqly-mcp-xxx」失败。
+          # 想出 Intel 版 macOS：得先把 --target 在 stage-sidecars.mjs 里打通，
+          # 不是在 workflow 里加一行就行的。
