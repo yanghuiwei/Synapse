@@ -115,20 +115,19 @@ export const useTokenStore = create<TokenState>((set, get) => ({
         draft.fetchRequestId,
       );
 
-      // `create_token_source` 只写「名字 + 获取请求」两个字段（其余落到列默认值），
-      // 所以这里接着补一次全量保存，把用户在表单里填的提取路径、刷新请求、
+      // `create_token_source` 只写「名字 + Token 接口」两个字段（其余落到列默认值），
+      // 所以这里**必须**接着补一次全量保存，把用户在表单里填的提取路径、
       // 提前量一起落库。
       //
-      // 为什么不给那条命令再加 8 个参数：那要连着改 Rust 命令、仓储和
+      // 为什么不给那条命令再加几个参数：那要连着改 Rust 命令、仓储和
       // 一整组测试，而 `save_token_source` 早就在往同一张表写同一批字段了 ——
       // 两条路径维护同一份数据，迟早会有一份忘了改。
       //
-      // 没配「刷新请求」时跳过这一趟：那是绝大多数配置的形状，
-      // 不值得为此多走一次 IPC。
-      const saved =
-        draft.refreshRequestId === null
-          ? created
-          : await ipc.tokens.save({ ...created, ...draft, workspaceId });
+      // ⚠️ 这一趟**不能按条件跳过**。曾经写成「没配刷新请求就省掉」，
+      // 而列默认值恰好与设计示例一致，于是「改了 access_token 路径却没有
+      // 刷新请求」这种配置会被静默丢回默认值 —— 界面显示的是用户填的，
+      // 库里的却是 $.access_token，直到发送时提取失败才发现。
+      const saved = await ipc.tokens.save({ ...created, ...draft, workspaceId });
 
       await get().load();
       return saved;

@@ -14,8 +14,22 @@ use crate::storage::models::{AuthConfig, Folder};
 use crate::storage::now_iso;
 use crate::storage::repo::{bool_to_int, opt_text, parse_json_column, ORDER_BY_SORT};
 
-const COLUMNS: &str = "id, workspace_id, parent_id, name, sort_order, is_token_source, auth, \
-     created_at, updated_at, deleted_at";
+const COLUMNS: &str = "id, workspace_id, parent_id, name, sort_order, is_token_source, is_system, \
+     auth, created_at, updated_at, deleted_at";
+
+/// 系统分类（「token刷新」）的名字。
+///
+/// **刻意是字面量，不走前端 i18n**：这一行由程序在启动时建好、用户既不能删
+/// 也不能改名，所以名字必须是确定的；而且它会出现在 MCP / CLI 的输出里，
+/// 那两个入口根本没有 i18n 表可查。与默认工作区那个「名字留空、前端补文案」
+/// 的处理不同 —— 那里的名字是**展示用**的，这里的名字是**约定**。
+pub const SYSTEM_FOLDER_NAME: &str = "token刷新";
+
+/// 系统分类的 `sort_order`：取负值钉在整棵树最上面。
+///
+/// 不用 0 —— 那是用户第一个根分类的位置（`create` 算的是 `MAX(sort_order) + 1`），
+/// 撞上了就得靠 id 分胜负，而系统分类的 id 未必更小（存量库补建时它反而最大）。
+const SYSTEM_SORT_ORDER: i64 = -1;
 
 fn map_row(row: &Row<'_>) -> AppResult<Folder> {
     let auth_raw: String = row.get("auth")?;
@@ -26,6 +40,7 @@ fn map_row(row: &Row<'_>) -> AppResult<Folder> {
         name: row.get("name")?,
         sort_order: row.get("sort_order")?,
         is_token_source: row.get("is_token_source")?,
+        is_system: row.get("is_system")?,
         // 走宽松解析：`folder.auth` 的形状在 P4 才定稿，存量值是 `{}`
         auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "folder.auth")?),
         created_at: row.get("created_at")?,
@@ -177,17 +192,70 @@ pub fn create(
     get(conn, conn.last_insert_rowid())
 }
 
+// ---------------------------------------------------------------
+// 系统分类（「token刷新」）
+// ---------------------------------------------------------------
+
+/// 挡在删除 / 改名 / 移动前面。`action` 只进日志与 debug 信息，不进 UI 文案。
+fn ensure_not_system(folder: &Folder, action: &'static str) -> AppResult<()> {
+    if folder.is_system {
+        return Err(AppError::SystemFolder {
+            id: folder.id,
+            action,
+        });
+    }
+    Ok(())
+}
+
+/// 某工作区的系统分类。
+///
+/// **刻意不过滤 `deleted_at`**：`ensure_system_folder` 靠它判「已经建过了吗」，
+/// 而既然有 `(workspace_id) WHERE is_system = 1` 那条唯一索引，漏掉一个软删除的
+/// 系统分类就会让补建直接撞唯一约束。系统分类本来就删不掉（见各处的
+/// `ensure_not_system`），这个分支在正常库里走不到。
+pub fn system_folder(conn: &Connection, workspace_id: i64) -> AppResult<Option<Folder>> {
+    let sql = format!("SELECT {COLUMNS} FROM folder WHERE workspace_id = ?1 AND is_system = 1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([workspace_id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(map_row(row)?)),
+        None => Ok(None),
+    }
+}
+
+/// 保证工作区有且只有一个系统分类「token刷新」。返回它。
+///
+/// 幂等：已经存在就原样返回。存量库（004 之前建的）靠这条补上，
+/// 所以它出现在启动路径里而不是迁移脚本里 —— 迁移脚本拿不到「给每个
+/// 工作区都来一条」的循环，而这里本来就有工作区 id。
+///
+/// 顺手把 `is_token_source` 也置 1：Token 来源固定配在这个分类下，
+/// 集合树上那个「Token」角标就得亮着，否则用户看不出它是干嘛的。
+pub fn ensure_system_folder(conn: &Connection, workspace_id: i64) -> AppResult<Folder> {
+    if let Some(existing) = system_folder(conn, workspace_id)? {
+        return Ok(existing);
+    }
+
+    let now = now_iso();
+    conn.execute(
+        "INSERT INTO folder
+           (workspace_id, parent_id, name, sort_order, is_token_source, is_system, created_at, updated_at)
+         VALUES (?1, NULL, ?2, ?3, 1, 1, ?4, ?4)",
+        rusqlite::params![workspace_id, SYSTEM_FOLDER_NAME, SYSTEM_SORT_ORDER, now],
+    )?;
+    get(conn, conn.last_insert_rowid())
+}
+
 pub fn rename(conn: &Connection, id: i64, name: &str) -> AppResult<Folder> {
-    let affected = conn.execute(
+    // 先取一次而不是看 `execute` 的影响行数：一箭三雕 —— 不存在还是报
+    // `NotFound`（与原来一致），多了个守卫的落点，而且不用再判 affected。
+    let folder = get(conn, id)?;
+    ensure_not_system(&folder, "renamed")?;
+
+    conn.execute(
         "UPDATE folder SET name = ?2, updated_at = ?3 WHERE id = ?1",
         rusqlite::params![id, name, now_iso()],
     )?;
-    if affected == 0 {
-        return Err(AppError::NotFound {
-            entity: "folder",
-            id,
-        });
-    }
     get(conn, id)
 }
 
@@ -211,6 +279,9 @@ pub fn set_token_source(conn: &Connection, id: i64, is_token_source: bool) -> Ap
 /// 会拒绝三类非法请求：父节点不存在、父节点是自己、父节点是自己的子孙。
 pub fn move_to(conn: &Connection, id: i64, new_parent_id: Option<i64>) -> AppResult<Folder> {
     let folder = get(conn, id)?;
+    // 系统分类必须待在根上：它承载的是「整个工作区的 Token」，挪进任何一棵子树
+    // 都会让那个子树之外的东西看不见它
+    ensure_not_system(&folder, "moved")?;
 
     if let Some(parent_id) = new_parent_id {
         if parent_id == id {
@@ -262,6 +333,8 @@ pub fn move_to(conn: &Connection, id: i64, new_parent_id: Option<i64>) -> AppRes
 ///
 /// 返回 (受影响文件夹数, 受影响请求数)。
 pub fn soft_delete_tree(conn: &Connection, id: i64) -> AppResult<(usize, usize)> {
+    ensure_not_system(&get(conn, id)?, "deleted")?;
+
     let now = now_iso();
 
     // 先删请求：递归集合要基于「文件夹还没被标删」的状态来算，
@@ -355,6 +428,11 @@ pub fn restore_tree(conn: &Connection, id: i64) -> AppResult<Folder> {
 /// 请求数是靠显式 DELETE 得来的，文件夹数只能从子树大小推。
 /// 给一个混合的总数等于把「拆不开」这件事推给每一处调用点。
 pub fn purge_tree(conn: &Connection, id: i64) -> AppResult<(usize, usize)> {
+    // 系统分类进不了回收站（`soft_delete_tree` 就挡住了），这道守卫是**兜底**：
+    // 「清空回收站」会遍历回收站里每个根节点调它，万一哪天库里真出现一个
+    // 被标删的系统分类，宁可让这次清空报错，也不要静默把它连同 Token 配置一起抹掉
+    ensure_not_system(&get(conn, id)?, "purged")?;
+
     // request.folder_id 是 ON DELETE SET NULL，所以必须先显式删掉子树的请求，
     // 否则它们会变成「没有文件夹的孤儿」而不是被一并删除。
     let ids = subtree_ids(conn, id)?;
@@ -609,6 +687,71 @@ mod tests {
                 .unwrap()
                 .is_token_source
         );
+    }
+
+    #[test]
+    fn ensure_system_folder_is_idempotent_and_lands_first() {
+        let conn = db();
+        let normal = create(&conn, 1, None, "我的接口").unwrap();
+
+        let sys = ensure_system_folder(&conn, 1).unwrap();
+        assert_eq!(sys.name, SYSTEM_FOLDER_NAME);
+        assert_eq!(sys.parent_id, None, "系统分类必须在根上");
+        assert!(sys.is_system && sys.is_token_source, "同时是 Token 分组");
+        assert_eq!(sys.sort_order, -1, "排在最上面");
+
+        let again = ensure_system_folder(&conn, 1).unwrap();
+        assert_eq!(again.id, sys.id, "第二次调用必须复用同一行");
+        assert_eq!(
+            list_by_workspace(&conn, 1).unwrap().len(),
+            2,
+            "不该建出第二个"
+        );
+
+        let listed = list_by_workspace(&conn, 1).unwrap();
+        assert_eq!(listed[0].id, sys.id, "系统分类排第一");
+        assert_eq!(listed[1].id, normal.id);
+
+        // 另一个工作区各有一份
+        conn.execute(
+            "INSERT INTO workspace (id, name, created_at, updated_at)
+             VALUES (2, 'w2', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let other = ensure_system_folder(&conn, 2).unwrap();
+        assert_ne!(other.id, sys.id);
+    }
+
+    /// 系统分类是全项目唯一一处「用户动不了」的分类 ——
+    /// 删 / 改名 / 移动三条路都必须堵死，而且报的是**专用错误码**
+    /// （前端靠它把菜单项置灰，而不是等点了才弹一个「输入不合法」）
+    #[test]
+    fn system_folder_cannot_be_deleted_renamed_or_moved() {
+        let conn = db();
+        let sys = ensure_system_folder(&conn, 1).unwrap();
+        let target = create(&conn, 1, None, "别处").unwrap();
+
+        let is_system_err = |e: AppError| matches!(e, AppError::SystemFolder { .. });
+
+        assert!(is_system_err(soft_delete_tree(&conn, sys.id).unwrap_err()));
+        assert!(is_system_err(purge_tree(&conn, sys.id).unwrap_err()));
+        assert!(is_system_err(
+            rename(&conn, sys.id, "改名试试").unwrap_err()
+        ));
+        assert!(is_system_err(
+            move_to(&conn, sys.id, Some(target.id)).unwrap_err()
+        ));
+
+        // 一根汗毛都没动
+        let after = get(&conn, sys.id).unwrap();
+        assert_eq!(after.name, SYSTEM_FOLDER_NAME);
+        assert_eq!(after.parent_id, None);
+        assert!(after.deleted_at.is_none());
+
+        // 普通分类不受影响
+        soft_delete_tree(&conn, target.id).unwrap();
+        assert_eq!(list_deleted(&conn, 1).unwrap().len(), 1);
     }
 
     #[test]

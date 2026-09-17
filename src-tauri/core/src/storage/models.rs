@@ -300,6 +300,12 @@ pub struct Folder {
     pub sort_order: i64,
     /// 是否被标记为 Token 源分组（design.md §4.3）
     pub is_token_source: bool,
+    /// 系统分类（「token刷新」）：**不可删除 / 改名 / 移动**。
+    ///
+    /// 与 `is_token_source` 是两件事：那个是用户可以随时切换的引导标记，
+    /// 这个是「这一行由程序托管」的硬约束。Token 来源固定配在系统分类下，
+    /// 所以系统分类同时也是 Token 分组（建的时候顺手置上）。
+    pub is_system: bool,
     /// 分组级授权配置。请求的 auth 为 `inherit` 时沿树向上取最近的一个
     pub auth: AuthConfig,
     pub created_at: String,
@@ -531,6 +537,7 @@ mod tests {
             name: "n".into(),
             sort_order: 3,
             is_token_source: true,
+            is_system: true,
             auth: AuthConfig::None,
             created_at: "c".into(),
             updated_at: "u".into(),
@@ -539,6 +546,7 @@ mod tests {
         let json = serde_json::to_value(&f).unwrap();
         assert!(json.get("workspaceId").is_some(), "workspaceId missing");
         assert!(json.get("isTokenSource").is_some(), "isTokenSource missing");
+        assert!(json.get("isSystem").is_some(), "isSystem missing");
         assert!(json.get("sortOrder").is_some(), "sortOrder missing");
         assert!(json.get("workspace_id").is_none(), "snake_case leaked");
     }

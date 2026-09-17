@@ -144,13 +144,19 @@ CREATE TABLE folder (
   parent_id    INTEGER REFERENCES folder(id) ON DELETE CASCADE,  -- NULL = 根
   name         TEXT NOT NULL,
   sort_order   INTEGER NOT NULL DEFAULT 0,
-  -- Token 源分组标记（见 §4.3）
+  -- Token 源分组标记（见 §4.3）。改造后已经没有界面入口，
+  -- 只有 ensure_system_folder() 会把它置 1；CLI 仍在渲染这一列（欠账，见 plan.md §26.7）
   is_token_source INTEGER NOT NULL DEFAULT 0,
+  -- 系统分类标记（见 §4.3）：每个工作区有且只有一个「token刷新」分类
+  is_system    INTEGER NOT NULL DEFAULT 0,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
   deleted_at   TEXT
 );
 CREATE INDEX idx_folder_parent ON folder(workspace_id, parent_id, sort_order);
+-- 部分唯一索引：只约束系统分类。普通分类的 is_system = 0 不参与唯一性，
+-- 否则第二个普通分类就插不进来了。迁移见 004_system_folder.sql。
+CREATE UNIQUE INDEX idx_folder_system ON folder(workspace_id) WHERE is_system = 1;
 
 -- 接口请求
 CREATE TABLE request (
@@ -320,22 +326,42 @@ CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT 
 
 ### 4.3 Token 自动刷新机制 ★核心需求
 
-**概念**：把某个**文件夹**标记为 *Token 源分组*（`folder.is_token_source = 1`），在该分组内指定一个接口作为 **Token Provider**。任何请求里用到 `{{token.*}}`，系统会在发请求前检查缓存，过期就自动打一次 Provider 接口刷新。
+**概念**：Token 来源**固定配在一个系统分类下** —— 每个工作区初始化时会自带一个名为「token刷新」的分类（`folder.is_system = 1`，见 §3.2）。项目里任意请求用到 `{{token.*}}`，系统在发请求前检查缓存，过期就自动打一次 Provider 接口刷新。
 
-**配置界面**（Auth 面板 → Token 源 选项卡）：
+**为什么不再「标记某个分类为 Token 源分组」**：旧设计把 Token 来源挂在用户手选的分类上，于是「请求没归档到那个分类」就永远配不了 Token —— 解析链为空直接返回 `None`。现在 `token_source.folder_id` 恒指向系统分类，解析走两级：
+
+| 顺序 | 来源                 | 说明                                 |
+| -- | ------------------ | ---------------------------------- |
+| 1  | `first_in_chain`   | 请求所在分类沿父链向上，最近的一个有 Token 来源就赢      |
+| 2  | `system_source`    | 全局兜底：系统分类下的第一条 Token 来源            |
+
+两级都空才算「没配 Token」。所以请求挂在哪、有没有归档，`{{token.access}}` 都能解析。
+
+**获取 Token 与刷新 Token 是同一件事**：只有一个 `fetch_request_id`，缓存失效就打它，拿回来的 access / refresh 一起写进 `token_cache`。不再单独配「刷新接口」。
+
+**配置界面**（Auth 面板 → Token 源 选项卡，**页内直配，不弹窗**）：
 
 ```
-Token 源分组   [ 系统 / 认证接口  ▾ ]      ← 下拉列出所有 is_token_source 的文件夹
-取 Token 接口  [ POST /oauth/token      ▾ ] ← 该分组下的请求
+获取 / 刷新 Token 的接口  [ POST /oauth/token  ▾ ] ← 工作区里所有请求
   access_token  路径  [ $.data.accessToken   ]
   refresh_token 路径  [ $.data.refreshToken  ]
   有效期        路径  [ $.data.expiresIn     ]  单位 [ 秒 ▾ ]
-刷新接口        [ 同取 Token 接口        ▾ ]    ← 可指定另一个
 提前刷新        [ 30 ] 秒
-[✓] 自动刷新     [ 立即刷新并预览 ]
+[✓] 自动刷新
+[ 保存 ]  [ 取消 ]
 
 当前状态：● 有效  剩余 47 分 12 秒      [ 手动刷新 ]
 ```
+
+**系统分类的约束**（三层防护，缺一层都会漏）：
+
+| 层   | 位置                    | 内容                                                         |
+| --- | --------------------- | ---------------------------------------------------------- |
+| 数据库 | `idx_folder_system`   | 部分唯一索引，同工作区只能有一个                                           |
+| 仓储  | `ensure_not_system()` | `rename` / `move_to` / `soft_delete_tree` / `purge_tree` 各一处守卫 |
+| 界面  | `CollectionTree`      | 系统分类右键只有「在此新建请求 / 新建子分类」，不可拖拽，F2 / Delete 不绑                |
+
+系统分类的名字走常量 `SYSTEM_FOLDER_NAME` 而不是 i18n —— 它会出现在 MCP / CLI 的输出里，那两个入口没有前端 i18n 表。
 
 **运行时行为**：
 
@@ -408,6 +434,16 @@ Apipost 导出两条路径，都支持：
 | **Apipost 原生 JSON**（含 `apipost` 标志 / `target_type`）   | 副解析器：按 apipost 自有字段映射（`method`/`url`/`headers`/`body`/`auth`/`pre_script`/`test_script`） |
 
 自动识别：读 JSON 根节点的 `info.schema` / `_postman_id` / `apipost` 等指纹，选择解析器，用户无需手动选。
+
+**「Apipost 原生 JSON」实际有两种形状，指纹得看两层**：
+
+| 形状 | 顶层键 | 走哪条路 |
+| --- | --- | --- |
+| 桌面端「导出项目」 | `project` / `apis` / `envs` / `models`（`target_type` 藏 `apis[]` 元素里） | 严格路径：按其真实层次读（`request.url` / `header.parameter[]` / `body.mode` / `event`） |
+| 扁平结构 | 顶层 `apipost` / `target_type` | 宽松路径：多候选字段名，认不出记警告 |
+
+只查顶层 `apipost` / `target_type` 会把第一种整个漏掉，而漏掉的后果不是报错，
+是掉进 reqly 兜底 →「导入成功、0 条接口」。成因与修法见 `plan.md` §25。
 
 **映射表（Postman v2.1 → reqly）**：
 
@@ -884,7 +920,7 @@ E:\H_Req\reqly\
    ├─ Cargo.toml
    ├─ tauri.conf.json
    ├─ capabilities/default.json
-   ├─ migrations/001_init.sql
+   ├─ core/migrations/001..004_*.sql       # 001 初始 / 002 分类 auth / 003 body 按类型 / 004 系统分类
    ├─ icons/
    └─ src/
       ├─ main.rs

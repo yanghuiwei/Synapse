@@ -59,10 +59,10 @@ export const zhCN = {
 
   // ---- 集合树 ----
   "collections.unfiled": "未归档",
-  // 「有请求但一个分类都没有」时才用得上：那时候左栏只会平铺一串请求，
-  // 而 Token 来源 / 授权继承都要求有分类，用户却看不出这一层依赖
+  // 「有请求但一个分类都没有」时才用得上：那时候左栏只会平铺一串请求。
+  // （正常情况下走不到 —— 系统分类「token刷新」始终存在，它是兜底文案）
   "collections.noFolders": "还没有分类",
-  "collections.noFoldersHint": "Token 来源与授权继承都挂在分类上，请求得先有个归属才能配鉴权",
+  "collections.noFoldersHint": "分类用来组织请求，授权继承也按分类链生效 —— 先建一个分类，再把请求存进去",
   "collections.itemCount": "{count} 项",
   "collections.loadFailed": "集合加载失败",
   "collections.expand": "展开",
@@ -80,8 +80,8 @@ export const zhCN = {
   "collections.moveDialogHint": "选择目标分类，或选「未分类」放到根级",
   "collections.moveToRoot": "未分类（根级）",
   "collections.moveIntoSelf": "不能移动到自身或自己的子分类下",
-  "collections.markTokenSource": "标记为 Token 来源",
-  "collections.unmarkTokenSource": "取消 Token 来源标记",
+  "collections.systemFolder": "系统分类（不可删除、改名或移动）",
+  "collections.systemBadge": "Token 刷新",
   "collections.deleteFolderTitle": "删除分类",
   "collections.deleteFolderDesc": "「{name}」及其 {folders} 个分类、{requests} 个接口会移入回收站，之后可以还原。",
   "collections.deleteRequestTitle": "删除请求",
@@ -263,20 +263,24 @@ export const zhCN = {
   "env.hideSecret": "隐藏密钥",
 
   // ---- Token 来源（P4） ----
-  "token.title": "Token 来源",
-  "token.new": "新建 Token 来源",
+  //
+  // 「获取 Token」与「刷新 Token」在本产品里是**同一个接口**，所以表单上只有
+  // 一个「获取 / 刷新 Token 的接口」，没有第二个请求可配。
+  // 分类也不再由用户选：固定是系统分类「token刷新」（后端启动时建好，
+  // 不可删除），见 `folder::ensure_system_folder`。
+  "token.refreshTitle": "Token 刷新",
+  "token.defaultName": "Token 刷新",
   "token.name": "名称",
   "token.namePlaceholder": "例如：内网 OAuth",
+  // 仍在 `SaveDraftDialog` 里当「保存到哪个分类」的字段名用
   "token.folder": "所属分类",
   "token.folderHint": "这个分类及其子分类下的请求都能用它",
-  "token.fetchRequest": "获取 Token 的请求",
-  "token.fetchRequestHint": "要在这个分类下先建好一个「登录 / 换 token」的请求，这里选它",
-  "token.pickRequest": "选择一个请求…",
-  "token.noRequestInFolder": "这个分类下还没有请求",
-  "token.refreshRequest": "刷新 Token 的请求",
-  "token.refreshRequestHint": "想用另一个接口换 Token 就选它；留空则复用上面那个",
-  "token.refreshRequestSame": "与「获取 Token 的请求」相同",
-  "token.refreshRequestGone": "（这个请求已经不在当前分类下了）",
+  "token.fetchRequest": "获取 / 刷新 Token 的接口",
+  "token.fetchRequestHint": "选一个登录或换 Token 的接口。获取和刷新走的是同一个，只配这一次",
+  "token.pickRequest": "选择一个接口…",
+  "token.noRequestInFolder": "「token刷新」分类下还没有接口",
+  "token.createFetchRequest": "在该分类下新建接口",
+  "token.fetchRequestGone": "（这个接口已经被删除了）",
   "token.extractTitle": "从响应里取什么",
   "token.accessPath": "access_token 路径",
   "token.refreshPath": "refresh_token 路径",
@@ -292,10 +296,11 @@ export const zhCN = {
   "token.skew": "提前量（秒）",
   "token.skewHint": "在过期前这么多秒就当成过期，避开时钟误差与网络延迟",
   "token.effective": "生效的 Token 来源",
-  "token.effectiveInherited": "「{name}」继承自「{folder}」",
-  "token.effectiveSelf": "「{name}」（就在这个分类上）",
+  "token.effectiveName": "「{name}」",
   "token.none": "这条请求没有可用的 Token 来源",
-  "token.noneHint": "在分类上新建一个 Token 来源，{{token.access}} 才有值",
+  "token.noneHint": "还没有配置 —— 配好之后 {{token.access}} 才有值",
+  "token.globalHint": "配在「token刷新」分类下，对所有请求生效",
+  "token.scopedHint": "这份配置只对它所在分类的子树生效",
   "token.manage": "管理",
   "token.configure": "配置 Token 来源",
   "token.deleteTitle": "删除 Token 来源",
@@ -312,7 +317,6 @@ export const zhCN = {
   "token.pathMustStartWithDollar": "路径要以 $ 开头，例如 $.data.access_token",
   "token.loadFailed": "Token 来源加载失败",
   "token.saveFailed": "保存失败",
-  "token.unsavedFolder": "这条请求还没有归入分类 —— Token 来源挂在分类上，存进去才配得了",
 
   // ---- 占位符（P4） ----
   "placeholder.title": "占位符",
@@ -689,6 +693,10 @@ export const zhCN = {
   "error.tokenRefreshHttp": "Token 来源「{sourceName}」刷新失败：接口返回 HTTP {status}",
   "error.tokenExtract": "没能从「{sourceName}」的响应里取出 Token，请检查提取路径",
   "error.tokenExpired": "「{sourceName}」的 Token 已过期，且没有开启自动刷新",
+  // ---- 系统分类 ----
+  // 这条不是「你填错了」，而是「这一行由程序托管」，所以文案说的是
+  // 「哪些动作做不到」，而不是「哪个参数不合法」
+  "error.systemFolder": "系统分类「token刷新」不能删除、改名或移动",
   // ---- 导入器（P5） ----
   //
   // 三个分开是因为**用户的下一个动作不同**：识别失败 = 粘错了东西；

@@ -106,6 +106,12 @@ export const folderSchema = z.looseObject({
   sortOrder: z.number(),
   isTokenSource: z.boolean(),
   /**
+   * 004 迁移新增的列。与 `auth` 同理带 `.catch()` 兜底：浏览器里开着旧
+   * dev server（或旧后端）时少这一个字段，不该让整棵集合树打不开 ——
+   * 退回「是普通分类」即可，表现与升级前一致。
+   */
+  isSystem: z.boolean().catch(false),
+  /**
    * P4 新加的列。给 `.catch()` 兜底而不是要求必填：`folder.auth` 是 002 迁移
    * 才加的列，而**前端可能先于后端更新**（比如浏览器里开着旧 dev server）——
    * 那时少一个字段不该让整棵集合树打不开。

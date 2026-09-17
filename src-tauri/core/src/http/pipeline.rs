@@ -173,16 +173,28 @@ impl<'a> Pipeline<'a> {
         Ok(Some(self.tokens.ensure(&deps, false).await?))
     }
 
+    /// 这次发送用哪个 Token 源：**先沿分类链找最近的，找不到再用全局那一个**。
+    ///
+    /// 两级而不是一级，是因为「Token 来源固定配在系统分类下」——
+    /// 而请求通常不在那个分类里。只查链的话，除了正好挂在「token刷新」
+    /// 底下的请求，其余一律拿不到 Token。反过来，链上真的配了就以链上为准，
+    /// 老用法（按分类各配一套）不受影响。
+    ///
+    /// 注意链**可以是空的**（请求没挂分类）—— 那正是全局兜底最要紧的场景，
+    /// 所以这里没有「链为空就早退」。
     async fn find_token_source(
         &self,
         chain: &[crate::storage::models::Folder],
     ) -> AppResult<Option<TokenSource>> {
-        if chain.is_empty() {
-            return Ok(None);
-        }
         let ids: Vec<i64> = chain.iter().map(|f| f.id).collect();
         let pool = self.pool;
-        with_conn(pool, move |conn| repo::token::first_in_chain(conn, &ids)).await
+        with_conn(pool, move |conn| {
+            if let Some(source) = repo::token::first_in_chain(conn, &ids)? {
+                return Ok(Some(source));
+            }
+            repo::token::system_source(conn)
+        })
+        .await
     }
 }
 
@@ -353,6 +365,69 @@ mod tests {
         assert_eq!(server.hits.load(Ordering::SeqCst), 1);
     }
 
+    /// Token 来源固定配在系统分类「token刷新」下，而请求通常不在那个分类里
+    /// —— 甚至**根本没挂分类**。这条钉住那个兜底。
+    #[tokio::test]
+    async fn falls_back_to_the_system_folder_token_source() {
+        let server = token_server();
+        let (db, tokens) = pipeline_ctx("pipe-system-fallback");
+        db.exec(&format!(
+            "UPDATE request SET url = 'http://127.0.0.1:{}/t' WHERE id = 1;
+             INSERT INTO folder (id, workspace_id, name, is_token_source, is_system, created_at, updated_at)
+               VALUES (2, 1, 'token刷新', 1, 1,
+                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             UPDATE token_source SET folder_id = 2 WHERE id = 1;",
+            server.port
+        ));
+
+        let clients = ClientCache::new();
+        let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
+        let mut s = spec();
+        s.folder_id = None; // ★ 没有归属分类：链是空的
+        s.headers = vec![KeyValueItem::new(
+            "Authorization",
+            "Bearer {{token.access}}",
+        )];
+
+        let prepared = pipeline.prepare(&s, None, None).await.expect("prepare");
+        assert_eq!(prepared.spec.headers[0].value, "Bearer tok");
+        assert!(prepared.unresolved.is_empty(), "不该留下没解析的占位符");
+        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// 兜底是**两级里的第二级**：分类链上真的配了就以链上为准，
+    /// 别让系统分类那个把老用法盖掉
+    #[tokio::test]
+    async fn the_folder_chain_wins_over_the_system_folder() {
+        let server = token_server();
+        let (db, tokens) = pipeline_ctx("pipe-chain-wins");
+        db.exec(&format!(
+            "UPDATE request SET url = 'http://127.0.0.1:{}/t' WHERE id = 1;
+             INSERT INTO folder (id, workspace_id, name, is_token_source, is_system, created_at, updated_at)
+               VALUES (2, 1, 'token刷新', 1, 1,
+                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO token_source
+               (id, workspace_id, folder_id, name, fetch_request_id, access_path, created_at, updated_at)
+               VALUES (2, 1, 2, '全局', 1, '$.nope',
+                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+            server.port
+        ));
+
+        let clients = ClientCache::new();
+        let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
+        let mut s = spec();
+        s.folder_id = Some(1); // 分类 1 上有 id=1 那个源（access_path = $.access_token）
+        s.headers = vec![KeyValueItem::new(
+            "Authorization",
+            "Bearer {{token.access}}",
+        )];
+
+        // 系统分类里那个源的 `access_path` 是 `$.nope`（必然提取失败）——
+        // 真要是它被选中，这里拿到的会是 E_TOKEN_EXTRACT 而不是 tok
+        let prepared = pipeline.prepare(&s, None, None).await.expect("prepare");
+        assert_eq!(prepared.spec.headers[0].value, "Bearer tok");
+    }
+
     /// 没有 Token 源时 `{{token.access}}` 不该让请求失败，只留一条警告
     #[tokio::test]
     async fn missing_token_source_yields_a_warning_not_an_error() {
@@ -430,6 +505,7 @@ mod tests {
             name: format!("f{id}"),
             sort_order: 0,
             is_token_source: false,
+            is_system: false,
             auth,
             created_at: "c".into(),
             updated_at: "u".into(),

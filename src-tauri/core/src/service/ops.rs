@@ -120,6 +120,11 @@ pub struct FolderSummary {
     pub sort_order: i64,
     /// 被标记成 Token 源分组（design.md §4.3）
     pub is_token_source: bool,
+    /// 系统分类（「token刷新」）：删不掉也改不了名。
+    ///
+    /// 必须透出来 —— 否则 AI 看到列表里有个空分类，会照着「清理一下」的思路
+    /// 试着删它，然后撞一个 `E_SYSTEM_FOLDER` 回来，白跑一趟。
+    pub is_system: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1483,6 +1488,7 @@ fn summarise_folder(folder: Folder) -> FolderSummary {
         name: folder.name,
         sort_order: folder.sort_order,
         is_token_source: folder.is_token_source,
+        is_system: folder.is_system,
     }
 }
 
@@ -1959,7 +1965,17 @@ mod tests {
             .list_folders(ListFoldersRequest::default())
             .await
             .expect("列文件夹");
-        assert_eq!(listed.folders.len(), 2);
+        assert_eq!(
+            listed.folders.len(),
+            3,
+            "两个自建 + 启动时补的系统分类「token刷新」"
+        );
+
+        // 系统分类必须出现在列表里，而且排在最前 —— AI 靠 `isSystem` 认出
+        // 「这个别动」，靠 sort_order 认出「这是那个固定分类」
+        let first = &listed.folders[0];
+        assert!(first.is_system, "系统分类要透出 isSystem");
+        assert_eq!(first.name, crate::storage::repo::folder::SYSTEM_FOLDER_NAME);
     }
 
     /// 建环境（B4）。建出来是空的，且**不是**激活状态。

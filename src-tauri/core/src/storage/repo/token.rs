@@ -90,6 +90,24 @@ pub fn first_in_chain(conn: &Connection, chain: &[i64]) -> AppResult<Option<Toke
     Ok(None)
 }
 
+/// 工作区的**全局** Token 源 —— 挂在系统分类（「token刷新」）下的那一个。
+///
+/// 用途是 `first_in_chain` 之后的**兜底**：Token 来源固定配在系统分类下，
+/// 而绝大多数请求并不在这个分类里（甚至没挂任何分类），
+/// 只沿分类链找的话 `{{token.access}}` 会永远解析不出来。
+///
+/// 语义上是「链上没配就用全局那一个」——链上配了仍然以链上为准，
+/// 所以老的「按分类配 Token」用法完全不受影响。
+pub fn system_source(conn: &Connection) -> AppResult<Option<TokenSource>> {
+    let Some(workspace) = crate::storage::repo::workspace::active(conn)? else {
+        return Ok(None);
+    };
+    let Some(folder) = crate::storage::repo::folder::system_folder(conn, workspace.id)? else {
+        return Ok(None);
+    };
+    Ok(list_by_folder(conn, folder.id)?.into_iter().next())
+}
+
 pub fn get(conn: &Connection, id: i64) -> AppResult<TokenSource> {
     let sql = format!("SELECT {SOURCE_COLUMNS} FROM token_source WHERE id = ?1");
     conn.query_row(&sql, [id], map_source).map_err(|e| match e {

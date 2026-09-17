@@ -71,7 +71,13 @@ pub fn create(conn: &Connection, name: &str) -> AppResult<Workspace> {
          VALUES (?1, ?2, ?3, ?3)",
         rusqlite::params![name, next_order, now],
     )?;
-    get(conn, conn.last_insert_rowid())
+    let workspace = get(conn, conn.last_insert_rowid())?;
+
+    // 新工作区当场就把系统分类备好，别等到下次启动 ——
+    // 否则「刚建的库」和「重启过的库」结构不一样，而差别只在用户看不见的那一层。
+    crate::storage::repo::folder::ensure_system_folder(conn, workspace.id)?;
+
+    Ok(workspace)
 }
 
 /// 保证至少有一个存活工作区。返回第一个。

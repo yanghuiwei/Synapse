@@ -40,6 +40,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "body_by_type",
         sql: include_str!("../../migrations/003_body_by_type.sql"),
     },
+    Migration {
+        version: 4,
+        name: "system_folder",
+        sql: include_str!("../../migrations/004_system_folder.sql"),
+    },
 ];
 
 /// 代码里定义的最高版本号
@@ -148,7 +153,7 @@ mod tests {
         let applied = run(&mut conn).expect("migrate");
         assert_eq!(
             applied,
-            vec![1, 2, 3],
+            vec![1, 2, 3, 4],
             "fresh db should apply every migration"
         );
         assert_eq!(current_version(&conn).unwrap(), latest_version());
@@ -167,7 +172,7 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 3, "version table must have one row per migration");
+        assert_eq!(rows, 4, "version table must have one row per migration");
     }
 
     /// schema 完整性：design.md §3.2 的表一张都不能少。
@@ -213,6 +218,7 @@ mod tests {
 
         for idx in [
             "idx_folder_parent",
+            "idx_folder_system",
             "idx_request_folder",
             "idx_request_name",
             "idx_history_time",
@@ -270,6 +276,62 @@ mod tests {
             .expect("request.body_by_type / body_rows must exist after migration 3");
         assert_eq!(by_type, "{}");
         assert_eq!(rows, "[]");
+    }
+
+    /// 004：存量库补上 `is_system` 且默认 0（别把老分类变成不可删的），
+    /// 同时那个**部分索引**只在 `is_system = 1` 上要求唯一 ——
+    /// 普通分类再多也不受影响，系统分类每个工作区只能有一个。
+    #[test]
+    fn system_folder_column_and_partial_index() {
+        let mut conn = open_memory_with_pragmas();
+        run(&mut conn).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO workspace (id, name, created_at, updated_at)
+               VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                      (2, 'w2', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO folder (id, workspace_id, name, created_at, updated_at)
+               VALUES (1, 1, 'legacy', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+
+        let is_system: i64 = conn
+            .query_row("SELECT is_system FROM folder WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .expect("folder.is_system must exist after migration 4");
+        assert_eq!(is_system, 0, "存量分类必须默认成普通分类");
+
+        // 同一个工作区可以有很多普通分类
+        conn.execute_batch(
+            "INSERT INTO folder (workspace_id, name, created_at, updated_at)
+               VALUES (1, 'a', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                      (1, 'b', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+        )
+        .expect("普通分类不该受部分索引影响");
+
+        // 但系统分类只能有一个
+        conn.execute(
+            "INSERT INTO folder (workspace_id, name, is_system, created_at, updated_at)
+             VALUES (1, 'sys', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .expect("第一个系统分类应当插得进去");
+
+        let dup = conn.execute(
+            "INSERT INTO folder (workspace_id, name, is_system, created_at, updated_at)
+             VALUES (1, 'sys2', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        );
+        assert!(dup.is_err(), "同一个工作区不该允许第二个系统分类");
+
+        // 换一个工作区则是另一回事
+        conn.execute(
+            "INSERT INTO folder (workspace_id, name, is_system, created_at, updated_at)
+             VALUES (2, 'sys', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .expect("系统分类的唯一性是按工作区算的");
     }
 
     /// 外键必须真的生效（PRAGMA foreign_keys 是连接级开关，容易忘）

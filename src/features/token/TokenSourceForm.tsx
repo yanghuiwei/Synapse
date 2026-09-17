@@ -1,11 +1,12 @@
-import { ChevronDown, Globe, KeyRound, TriangleAlert } from "lucide-react";
+import { ChevronDown, KeyRound, Plus, TriangleAlert } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
-import type { ExpiryUnit, Folder, TokenSource } from "@/lib/types";
-import { useWorkspaceStore } from "@/store/workspace";
+import type { ApiRequest, ExpiryUnit, TokenSource } from "@/lib/types";
+import { Button } from "@/features/ui/Button";
+import { useUiStore } from "@/store/ui";
 
 /**
  * Token 源的可编辑字段。
@@ -16,14 +17,22 @@ import { useWorkspaceStore } from "@/store/workspace";
  */
 export type TokenSourceDraft = Omit<TokenSource, "id" | "createdAt" | "updatedAt">;
 
+/**
+ * 新建时的初值。
+ *
+ * 四个路径刻意与 design.md §4.3 的示例一致：绝大多数 OAuth 接口就是这个形状，
+ * 让常见情况开箱可用，而不是让用户从空白开始填。
+ *
+ * `refreshRequestId` 恒为 `null` —— 「获取 Token」与「刷新 Token」在本产品里
+ * 是同一个接口，界面上已经没有第二个请求可配了（后端仍支持分开配，
+ * 老库里配过的那种照常走 `refresh_request_id`，只是新建时不会再有值）。
+ */
 export function emptyTokenSourceDraft(folderId: number): TokenSourceDraft {
   return {
     workspaceId: 0, // 由调用方覆盖
     folderId,
     name: "",
     fetchRequestId: 0,
-    // 默认值刻意与 design.md §4.3 的示例一致：绝大多数 OAuth 接口就是这个形状，
-    // 让常见情况开箱可用，而不是让用户从空白开始填四个路径
     accessPath: "$.access_token",
     refreshPath: "$.refresh_token",
     expiresInPath: "$.expires_in",
@@ -49,60 +58,57 @@ const UNIT_LABELS: Record<ExpiryUnit, MessageKey> = {
 export interface TokenSourceFormProps {
   value: TokenSourceDraft;
   onChange: (next: TokenSourceDraft) => void;
-  /** 新建时允许改所属分类；编辑时锁住（挪分类等于换了继承链，容易把人绕晕） */
-  folders?: readonly Folder[];
-  lockFolder?: boolean;
+  /**
+   * 可选的 Token 接口。**由调用方决定给哪些** —— 现在是系统分类「token刷新」
+   * 下的全部请求。表单自己不去全局捞：那样「这个接口到底放哪儿」这件事
+   * 又变成用户要猜的东西了。
+   */
+  requests: readonly ApiRequest[];
   className?: string;
 }
 
 /**
  * Token 来源配置表单。
  *
+ * ## 为什么只留 6 组字段
+ *
+ * 早先还有「所属分类」和「刷新 Token 的请求」两项，现在都去掉了：
+ * 分类固定成系统分类「token刷新」（见 `folder::ensure_system_folder`），
+ * 而获取与刷新本来就是同一个接口 —— 多配一次只是多一次配错的机会。
+ *
  * ## 布局为什么是一列
  *
- * 这是全项目字段最多的一个表单（9 个）。排成两列看着紧凑，
- * 但「过期时间路径」+「单位」这一对必须挨着读（单位是给路径的解释），
+ * 剩下这几项里「过期时间路径」+「单位」必须挨着读（单位是给路径的解释），
  * 强行两列会把它们拆开。一列 + 分组标题读起来更省事。
  */
 export function TokenSourceForm({
   value,
   onChange,
-  folders,
-  lockFolder = false,
+  requests,
   className,
 }: TokenSourceFormProps) {
   const { t } = useI18n();
-  const requests = useWorkspaceStore((s) => s.requests);
-
-  /** 当前分类下的请求 —— 取 Token 的那个请求必须在这个分类（或其子分类）里 */
-  const candidates = useMemo(
-    () => requests.filter((r) => r.folderId === value.folderId),
-    [requests, value.folderId],
-  );
-
-  /**
-   * 「刷新请求」下拉的选项。
-   *
-   * 当前值可能指向一个**已经不在这个分类下**的请求（被挪走或删了）。这种情况
-   * 不补一个占位项的话，`<select>` 找不到匹配的 option，会退回去显示第一项
-   * 「与获取 Token 的请求相同」—— 界面在撒谎，而刷新时走的仍是那个旧 id。
-   * 宁可写「已失效」，让用户自己动手改。
-   */
-  const refreshOptions = useMemo(() => {
-    const base = [
-      { value: "0", label: t("token.refreshRequestSame") },
-      ...candidates.map((r) => ({ value: String(r.id), label: `${r.method} ${r.name}` })),
-    ];
-
-    const current = value.refreshRequestId;
-    if (current === null || candidates.some((r) => r.id === current)) return base;
-    return [{ value: String(current), label: t("token.refreshRequestGone") }, ...base];
-  }, [candidates, value.refreshRequestId, t]);
-
-  const folderName =
-    folders?.find((f) => f.id === value.folderId)?.name ?? t("token.unsavedFolder");
 
   const patch = (next: Partial<TokenSourceDraft>) => onChange({ ...value, ...next });
+
+  /**
+   * 下拉选项。
+   *
+   * 当前值可能指向一个**已经被删掉**的请求。这种情况不补一个占位项的话，
+   * `<select>` 找不到匹配的 option 会退回去显示第一项「选择一个请求…」——
+   * 界面在撒谎，而发送时后端读的仍是那个旧 id（`load_fetch_spec` 直接
+   * `NotFound`，请求整个失败）。宁可写「已失效」，让用户自己动手改。
+   */
+  const options = useMemo(() => {
+    const base = [
+      { value: "0", label: t("token.pickRequest") },
+      ...requests.map((r) => ({ value: String(r.id), label: `${r.method} ${r.name}` })),
+    ];
+
+    const current = value.fetchRequestId;
+    if (current === 0 || requests.some((r) => r.id === current)) return base;
+    return [{ value: String(current), label: t("token.fetchRequestGone") }, ...base];
+  }, [requests, value.fetchRequestId, t]);
 
   const accessError = pathError(value.accessPath, true, t);
   const refreshError = pathError(value.refreshPath, false, t);
@@ -121,65 +127,31 @@ export function TokenSourceForm({
         />
       </Field>
 
-      <Field label={t("token.folder")} hint={t("token.folderHint")}>
-        {lockFolder ? (
-          <div className={READONLY}>
-            <Globe size={12} strokeWidth={2} aria-hidden className="text-ink-faint" />
-            <span className="truncate">{folderName}</span>
+      <Field label={t("token.fetchRequest")} hint={t("token.fetchRequestHint")}>
+        {requests.length === 0 ? (
+          <div className="space-y-2">
+            <p className="flex items-start gap-1.5 py-1 text-[11px] text-warn">
+              <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
+              {t("token.noRequestInFolder")}
+            </p>
+            {/* 光说「还没有接口」是个死路：用户会去左栏找「把刚才那个登录接口挪过来」
+                这个动作，而那里只有拖拽。直接给一个能在该分类下建接口的入口。 */}
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Plus size={11} strokeWidth={2.2} />}
+              onClick={() => useUiStore.getState().openCreateDialog("request", value.folderId)}
+            >
+              {t("token.createFetchRequest")}
+            </Button>
           </div>
         ) : (
           <Select
-            value={String(value.folderId)}
-            onChange={(raw) => patch({ folderId: Number(raw), fetchRequestId: 0 })}
-            options={(folders ?? []).map((f) => ({
-              value: String(f.id),
-              label: f.name,
-            }))}
-          />
-        )}
-      </Field>
-
-      <Field label={t("token.fetchRequest")} hint={t("token.fetchRequestHint")}>
-        {candidates.length === 0 ? (
-          <p className="flex items-start gap-1.5 py-1 text-[11px] text-warn">
-            <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
-            {t("token.noRequestInFolder")}
-          </p>
-        ) : (
-          <Select
             value={String(value.fetchRequestId)}
-            onChange={(raw) =>
-              patch({
-                fetchRequestId: Number(raw),
-                // 换获取请求时把「刷新请求」清空：它原来指的很可能就是旧的那个，
-                // 留着会让刷新走一个与该 Token 无关的接口
-                refreshRequestId: null,
-              })
-            }
-            options={[
-              { value: "0", label: t("token.pickRequest") },
-              ...candidates.map((r) => ({
-                value: String(r.id),
-                label: `${r.method} ${r.name}`,
-              })),
-            ]}
+            onChange={(raw) => patch({ fetchRequestId: Number(raw) })}
+            options={options}
           />
         )}
-      </Field>
-
-      <Field label={t("token.refreshRequest")} hint={t("token.refreshRequestHint")}>
-        {/* 候选与上面那份是同一个列表：能换 Token 的接口同样得在这个分类下，
-            否则后端读不到它的定义（`load_fetch_spec` 会直接 NotFound）。
-            所以这里不是「缺省时随便挑一个」，缺省就是复用上面那个。 */}
-        <Select
-          value={String(value.refreshRequestId ?? 0)}
-          disabled={candidates.length === 0}
-          onChange={(raw) => {
-            const id = Number(raw);
-            patch({ refreshRequestId: id === 0 ? null : id });
-          }}
-          options={refreshOptions}
-        />
       </Field>
 
       <Group title={t("token.extractTitle")} icon={KeyRound}>
@@ -288,13 +260,6 @@ const SELECT = cn(
   FIELD_BASE,
   "h-8 w-full appearance-none pl-2 pr-7 text-ink",
   "border-line hover:border-line-strong focus:border-brand",
-);
-
-/** 只读展示（不是 input，是个 div）—— 所以没有 `disabled:opacity-45` 之类的输入态 */
-const READONLY = cn(
-  FIELD_BASE,
-  "flex h-8 w-full items-center gap-1.5 px-2",
-  "border-line bg-canvas-subtle text-ink-muted",
 );
 
 function Field({

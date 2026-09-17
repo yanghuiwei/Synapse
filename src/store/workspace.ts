@@ -31,8 +31,6 @@ export interface WorkspaceState {
   renameFolder: (id: number, name: string) => Promise<void>;
   renameRequest: (id: number, name: string) => Promise<void>;
   duplicateRequest: (id: number, name: string) => Promise<ApiRequest>;
-  /** 标记 / 取消「Token 源分组」 */
-  setFolderTokenSource: (id: number, isTokenSource: boolean) => Promise<void>;
   /**
    * 设置分类的授权（P4）。
    *
@@ -161,11 +159,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const copy = await ipc.requests.duplicate(id, name);
     await get().refresh();
     return copy;
-  },
-
-  setFolderTokenSource: async (id, isTokenSource) => {
-    await ipc.folders.setTokenSource(id, isTokenSource);
-    await get().refresh();
   },
 
   setFolderAuth: async (id, auth) => {

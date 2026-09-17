@@ -5,8 +5,8 @@ import {
   Folder as FolderIcon,
   FolderOpen,
   FolderPlus,
-  KeyRound,
   Layers,
+  Lock,
   Pencil,
   Plus,
   SearchX,
@@ -250,8 +250,7 @@ export function CollectionTree() {
 
     if (target.kind === "folder") {
       const folder = target.folder;
-      const store = useWorkspaceStore.getState();
-      return [
+      const items: MenuItem[] = [
         {
           key: "new-request",
           label: t("collections.newRequestIn"),
@@ -264,15 +263,15 @@ export function CollectionTree() {
           icon: FolderPlus,
           onSelect: () => useUiStore.getState().openCreateDialog("folder", folder.id),
         },
-        {
-          key: "token-source",
-          label: folder.isTokenSource
-            ? t("collections.unmarkTokenSource")
-            : t("collections.markTokenSource"),
-          icon: KeyRound,
-          separatorBefore: true,
-          onSelect: () => void store.setFolderTokenSource(folder.id, !folder.isTokenSource),
-        },
+      ];
+
+      // 系统分类（「token刷新」）只有「往里放东西」这一半是开放给用户的：
+      // 它由后端在启动时建好，删 / 改名 / 移动在仓储层就是硬拒绝
+      // （`E_SYSTEM_FOLDER`）。这里**直接不画**那几项，而不是让用户点了
+      // 才吃一个错误 —— 菜单里出现一个按了必然失败的条目，比没有更糟。
+      if (folder.isSystem) return items;
+
+      items.push(
         {
           key: "rename",
           label: t("common.rename"),
@@ -294,7 +293,8 @@ export function CollectionTree() {
           separatorBefore: true,
           onSelect: () => askDelete({ kind: "folder", id: folder.id }, folder.name),
         },
-      ];
+      );
+      return items;
     }
 
     const request = target.request;
@@ -462,7 +462,15 @@ export function CollectionTree() {
                     )}
                     <span className="truncate font-medium text-ink">{folder.name}</span>
 
-                    {folder.isTokenSource ? (
+                    {folder.isSystem ? (
+                      <span
+                        className="flex shrink-0 items-center gap-0.5 rounded-sm bg-brand/12 px-1 text-[10px] font-medium text-brand"
+                        title={t("collections.systemFolder")}
+                      >
+                        <Lock size={9} strokeWidth={2.4} aria-hidden />
+                        {t("collections.systemBadge")}
+                      </span>
+                    ) : folder.isTokenSource ? (
                       <span
                         className="shrink-0 rounded-sm bg-brand/12 px-1 text-[10px] font-medium text-brand"
                         title={t("auth.tokenSource")}
@@ -912,11 +920,16 @@ function currentParentOf(
   return requests.find((r) => r.id === node.id)?.folderId ?? null;
 }
 
-/** 行内的键盘快捷键：Shift+F10 / 菜单键打开菜单，F2 重命名，Delete 删除 */
+/**
+ * 行内的键盘快捷键：Shift+F10 / 菜单键打开菜单，F2 重命名，Delete 删除。
+ *
+ * `onRename` / `onDelete` 传 `null` 表示**这个节点没有这个动作**（系统分类），
+ * 此时快捷键整个不接：按了没反应，好过按了弹一个「不可删除」的错误。
+ */
 function rowKeys(handlers: {
   onMenu: (e: React.KeyboardEvent) => void;
-  onRename: () => void;
-  onDelete: () => void;
+  onRename: (() => void) | null;
+  onDelete: (() => void) | null;
 }) {
   return (e: React.KeyboardEvent) => {
     // Shift+F10 与「菜单键」是各平台约定的「右键菜单」键盘等价物。
@@ -925,12 +938,12 @@ function rowKeys(handlers: {
       handlers.onMenu(e);
       return;
     }
-    if (e.key === "F2") {
+    if (e.key === "F2" && handlers.onRename) {
       e.preventDefault();
       handlers.onRename();
       return;
     }
-    if (e.key === "Delete") {
+    if (e.key === "Delete" && handlers.onDelete) {
       e.preventDefault();
       handlers.onDelete();
     }

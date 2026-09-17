@@ -79,6 +79,14 @@ pub mod codes {
     /// 没有可用缓存，且该 Token 源关闭了自动刷新（需要用户手动刷一次）
     pub const TOKEN_EXPIRED: &str = "E_TOKEN_EXPIRED";
 
+    // ---- 系统分类（P8 打磨） ----
+    /// 对系统分类（「token刷新」）做了删除 / 改名 / 移动。
+    ///
+    /// 单开一个码而不是复用 `E_INVALID_INPUT`：这条**不是用户填错了什么**，
+    /// 而是「这个分类本来就不归你管」，界面上该说的是「系统分类不可删除」
+    /// 而不是「输入不合法」。前端也靠它把菜单项直接置灰，而不是等用户点了才报错。
+    pub const SYSTEM_FOLDER: &str = "E_SYSTEM_FOLDER";
+
     // ---- 导入器（P5） ----
     //
     // 三个码分开的理由是**用户的下一个动作不同**：
@@ -134,6 +142,9 @@ pub enum AppError {
     #[error("invalid request url `{raw}`: {reason}")]
     InvalidUrl { raw: String, reason: String },
 
+    #[error("system folder #{id} cannot be {action}")]
+    SystemFolder { id: i64, action: &'static str },
+
     #[error("not implemented: {feature}")]
     NotImplemented { feature: &'static str },
 
@@ -170,6 +181,7 @@ impl AppError {
             AppError::Internal(_) => codes::INTERNAL,
             AppError::Http { code, .. } => code,
             AppError::InvalidUrl { .. } => codes::URL,
+            AppError::SystemFolder { .. } => codes::SYSTEM_FOLDER,
             AppError::NotImplemented { .. } => codes::NOT_IMPLEMENTED,
             AppError::Cancelled => codes::CANCELLED,
             AppError::ReadOnly { .. } => codes::READ_ONLY,
@@ -206,6 +218,7 @@ impl AppError {
             AppError::Migration { version, .. } => Some(json!({ "version": version })),
             AppError::Http { params, .. } => params.clone(),
             AppError::InvalidUrl { raw, .. } => Some(json!({ "raw": raw })),
+            AppError::SystemFolder { id, .. } => Some(json!({ "id": id })),
             AppError::NotImplemented { feature } => Some(json!({ "feature": feature })),
             AppError::ReadOnly { tool } => Some(json!({ "tool": tool })),
             _ => None,

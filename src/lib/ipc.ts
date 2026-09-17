@@ -129,6 +129,12 @@ export const ERROR_KEYS = {
   E_TOKEN_REFRESH: "error.tokenRefresh",
   E_TOKEN_EXTRACT: "error.tokenExtract",
   E_TOKEN_EXPIRED: "error.tokenExpired",
+  // ---- 系统分类 ----
+  //
+  // 单开一个码而不是复用 `E_INVALID_INPUT`：这条不是「用户填错了什么」，
+  // 而是「这行由程序托管」。界面该说的是「系统分类不能删」，
+  // 而且前端靠它把菜单项直接置灰，不必等用户点了才报错。
+  E_SYSTEM_FOLDER: "error.systemFolder",
   // ---- 导入器（P5） ----
   //
   // 三个码分开是因为**用户的下一个动作不同**：识别失败 = 这段东西我们压根不认
@@ -406,13 +412,6 @@ export const folders = {
 
   rename: (id: number, name: string): Promise<Folder> =>
     call("rename_folder", { id, name }, { parse: (v) => folderSchema.parse(v) }),
-
-  setTokenSource: (id: number, isTokenSource: boolean): Promise<Folder> =>
-    call(
-      "set_folder_token_source",
-      { id, isTokenSource },
-      { parse: (v) => folderSchema.parse(v) },
-    ),
 
   /**
    * 设置分类的授权（P4）。这是**继承链的数据源** ——

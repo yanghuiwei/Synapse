@@ -1,4 +1,4 @@
-import { ChevronDown, Globe, KeyRound, Save, ShieldQuestion } from "lucide-react";
+import { ChevronDown, Globe, KeyRound, ShieldQuestion } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
@@ -8,10 +8,14 @@ import * as ipc from "@/lib/ipc";
 import type { AuthConfig, Folder, TokenSource, TokenStatus } from "@/lib/types";
 import { useRequestStore } from "@/store/request";
 import { useTokenStore } from "@/store/token";
-import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
-import { TokenSourceDialog } from "@/features/token/TokenSourceDialog";
+import {
+  draftFromSource,
+  emptyTokenSourceDraft,
+  TokenSourceForm,
+  type TokenSourceDraft,
+} from "@/features/token/TokenSourceForm";
 import { TokenStatusBadge } from "@/features/token/TokenStatusBadge";
 import { PlaceholderInput } from "./PlaceholderInput";
 
@@ -68,11 +72,15 @@ export function AuthTab() {
   const folders = useWorkspaceStore((s) => s.folders);
   const setFolderAuth = useWorkspaceStore((s) => s.setFolderAuth);
 
-  /** 配置对话框改完之后要重新解析一次「生效的 Token 来源」 */
+  /** 配置改完之后要重新解析一次「生效的 Token 来源」 */
   const [configVersion, setConfigVersion] = useState(0);
-  const [dialog, setDialog] = useState<{ folderId: number; source: TokenSource | null } | null>(
-    null,
-  );
+
+  /**
+   * 系统分类「token刷新」。Token 来源固定配在它下面 —— 后端在启动时就把它
+   * 建好了（`folder::ensure_system_folder`），所以这里找不到只可能是
+   * 「工作区还没加载完」这一个瞬时状态。
+   */
+  const systemFolder = useMemo(() => folders.find((f) => f.isSystem) ?? null, [folders]);
 
   const inherited = useMemo(
     () => findInheritedAuth(folders, draft.folderId),
@@ -117,29 +125,15 @@ export function AuthTab() {
         <AuthFields value={auth} onChange={setAuth} />
       )}
 
-      <TokenSourceBlock
-        folderId={draft.folderId}
-        folders={folders}
+      <TokenSourcePanel
+        folder={systemFolder}
         source={resolvedSource}
         status={status}
         refreshing={resolvedSource !== null && refreshingId === resolvedSource.id}
         onRefresh={() => resolvedSource && void refresh(resolvedSource.id)}
-        onConfigure={() =>
-          setDialog({ folderId: draft.folderId as number, source: resolvedSource })
-        }
+        // 新建 / 修改之后「生效的来源」很可能变了，重新解析一次
+        onSaved={() => setConfigVersion((v) => v + 1)}
       />
-
-      {dialog ? (
-        <TokenSourceDialog
-          folderId={dialog.folderId}
-          source={dialog.source}
-          onClose={() => {
-            setDialog(null);
-            // 重新解析：新建/修改之后「生效的来源」很可能变了
-            setConfigVersion((v) => v + 1);
-          }}
-        />
-      ) : null}
     </div>
   );
 }
@@ -442,21 +436,21 @@ function FolderAuthBlock({
 // ---------------------------------------------------------------
 
 /**
- * 分类链上生效的 Token 来源。
+ * 这条请求实际会用到哪个 Token 来源。
  *
- * 前端**自己不做继承推导**（不像授权那样在本地走一遍链）：判定要用到
- * `is_token_source` 标记与「最近的优先」，而那条 SQL（`first_in_chain`）
- * 已经在后端了。再写一遍就多一处会漂移的规则。
+ * 前端**自己不做推导**（不像授权那样在本地走一遍链）：判定规则是
+ * 「先沿分类链找最近的，再兜底到系统分类那个」，而这条规则连同它的 SQL
+ * （`first_in_chain` / `system_source`）都已经在后端了。再写一遍就多一处
+ * 会漂移的东西 —— 而漂移的后果是「界面说生效的是 A，发送时用的是 B」。
+ *
+ * ⚠️ `folderId` 为 `null`（请求还没归档）时**同样要解析**：Token 来源固定配在
+ * 系统分类下，那恰恰是最常见的情形。早先这里直接置 `null`，于是所有没归档的
+ * 请求一律显示「还没有配置」。
  */
 function useResolvedTokenSource(folderId: number | null, version: number) {
   const [source, setSource] = useState<TokenSource | null>(null);
 
   useEffect(() => {
-    if (folderId === null) {
-      setSource(null);
-      return;
-    }
-
     let cancelled = false;
     void ipc.tokens
       .resolve(folderId)
@@ -477,82 +471,162 @@ function useResolvedTokenSource(folderId: number | null, version: number) {
   return { source };
 }
 
-function TokenSourceBlock({
-  folderId,
-  folders,
+/**
+ * Token 来源。
+ *
+ * ## 为什么是页内展开，而不是对话框
+ *
+ * 这一块原先点「配置」会弹一个对话框，里面还要先选分类再选请求 —— 而
+ * 分类固定是系统分类「token刷新」、获取与刷新又是同一个接口，
+ * 那三个选择项里有两个是假的。现在直接在这一块里展开表单，
+ * 页面上下文（我正在看哪条请求）全程不丢，也少一层遮罩。
+ *
+ * ## 为什么保存按钮的可用性在这里算，而不是在表单里
+ *
+ * 表单只管「这几个字段长什么样」，而「能不能保存」取决于**跨字段**的约束
+ * （名字非空 + 选了接口 + access 路径合法）。把它放进表单里，表单就得暴露一个
+ * `onValidityChange` 回调给调用方 —— 一个组件两个出口，还不如让持有提交动作的
+ * 那一层自己判断。
+ */
+function TokenSourcePanel({
+  folder,
   source,
   status,
   refreshing,
   onRefresh,
-  onConfigure,
+  onSaved,
 }: {
-  folderId: number | null;
-  folders: readonly Folder[];
+  /** 系统分类「token刷新」。`null` = 工作区还没加载完 */
+  folder: Folder | null;
   source: TokenSource | null;
   status: TokenStatus | null;
   refreshing: boolean;
   onRefresh: () => void;
-  onConfigure: () => void;
+  onSaved: () => void;
 }) {
   const { t } = useI18n();
-  // 「保存到分类」对话框挂在 `RequestPane` 上（它得跟着当前请求走），
-  // 所以这里只能通过 store 触发
-  const openSaveDraft = useUiStore((s) => s.openSaveDraft);
-  const owner = source ? folders.find((f) => f.id === source.folderId) : undefined;
+  const create = useTokenStore((s) => s.create);
+  const save = useTokenStore((s) => s.save);
+
+  /**
+   * `null` = 没在编辑。
+   *
+   * 草稿**只在用户点了「配置」时算一次**（而不是挂个依赖 `source` 的 effect）：
+   * 那样的 effect 会把用户已经敲进去的内容在父组件重渲染时冲掉 ——
+   * 而这里每次自动保存都会让父组件重渲染。
+   */
+  const [draft, setDraft] = useState<TokenSourceDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const requests = useWorkspaceStore((s) => s.requests);
+  /** 能当 Token 接口的候选：系统分类「token刷新」下的那些请求 */
+  const candidates = useMemo(
+    () => (folder ? requests.filter((r) => r.folderId === folder.id) : []),
+    [requests, folder],
+  );
+
+  if (!folder) return null;
+
+  const beginCreate = () =>
+    setDraft({
+      ...emptyTokenSourceDraft(folder.id),
+      // 预填一个名字：这个分类下就一份配置，让用户少想一件事。
+      // 名字不能留空（后端 `clean_name` 会拒），也不能是中文文案常量 ——
+      // 所以走 i18n，换语言时它跟着换
+      name: t("token.defaultName"),
+    });
+
+  const canSave =
+    draft !== null &&
+    draft.name.trim() !== "" &&
+    draft.fetchRequestId !== 0 &&
+    pathOk(draft.accessPath, true) &&
+    pathOk(draft.refreshPath, false) &&
+    pathOk(draft.expiresInPath, false) &&
+    !saving;
+
+  const submit = async () => {
+    if (!draft) return;
+    setSaving(true);
+    const done = source
+      ? await save({ ...source, ...draft, name: draft.name.trim() })
+      : await create({ ...draft, name: draft.name.trim() });
+    setSaving(false);
+    if (!done) return;
+    setDraft(null);
+    onSaved();
+  };
+
+  const editable = draft !== null;
 
   return (
-    <div className="space-y-1.5 rounded-md border border-line p-2.5">
+    <div className="space-y-2 rounded-md border border-line p-2.5">
       <div className="flex items-center gap-1.5">
         <KeyRound size={11} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
-        <span className="text-[11px] font-medium text-ink-muted">{t("auth.tokenSource")}</span>
+        <span className="text-[11px] font-medium text-ink-muted">{t("token.refreshTitle")}</span>
 
         <span className="flex-1" />
 
-        {folderId !== null ? (
+        {editable ? null : (
           <Button
             size="sm"
             variant="ghost"
             icon={<KeyRound size={12} strokeWidth={2} />}
-            onClick={onConfigure}
+            onClick={() => (source ? setDraft(draftFromSource(source)) : beginCreate())}
           >
             {source ? t("token.manage") : t("token.configure")}
           </Button>
-        ) : null}
+        )}
       </div>
 
-      {folderId === null ? (
-        <div className="space-y-2">
-          <p className="text-[11px] leading-relaxed text-ink-faint">
-            {t("token.unsavedFolder")}
-          </p>
-          {/* 光说「没有归属分类」没用 —— 用户会照着去左栏找「选一个分类」这个动作，
-              而那里只有展开/折叠。必须给一个真能走通的按钮 */}
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={<Save size={12} strokeWidth={2} />}
-            onClick={openSaveDraft}
-          >
-            {t("request.saveAs")}
-          </Button>
-        </div>
+      {editable ? (
+        <>
+          <TokenSourceForm value={draft} onChange={setDraft} requests={candidates} />
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="secondary" onClick={() => setDraft(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={!canSave}
+              onClick={() => void submit()}
+            >
+              {saving ? t("common.loading") : t("common.save")}
+            </Button>
+          </div>
+        </>
       ) : source === null ? (
-        <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.noneHint")}</p>
+        <>
+          <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.noneHint")}</p>
+          <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.globalHint")}</p>
+        </>
       ) : (
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-xs text-ink">
-            {source.folderId === folderId
-              ? t("token.effectiveSelf", { name: source.name })
-              : t("token.effectiveInherited", {
-                  name: source.name,
-                  folder: owner?.name ?? String(source.folderId),
-                })}
-          </span>
-          <TokenStatusBadge status={status} refreshing={refreshing} onRefresh={onRefresh} />
-        </div>
+        <>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-xs text-ink">
+              {t("token.effectiveName", { name: source.name })}
+            </span>
+            <TokenStatusBadge status={status} refreshing={refreshing} onRefresh={onRefresh} />
+          </div>
+          {/* 配置不在系统分类下说明这是一份老的「按分类配的」来源 ——
+              那它只对那个分类的子树生效，别让用户以为它对所有请求都算数 */}
+          <p className="text-[11px] leading-relaxed text-ink-faint">
+            {source.folderId === folder.id
+              ? t("token.globalHint")
+              : t("token.scopedHint")}
+          </p>
+        </>
       )}
     </div>
   );
+}
+
+/** 保存按钮的判据，与 `TokenSourceForm` 里那三个 `pathError` 是同一条规则 */
+function pathOk(path: string, required: boolean): boolean {
+  const trimmed = path.trim();
+  if (trimmed === "") return !required;
+  return trimmed.startsWith("$");
 }
 
 /** 高亮输入框的外框（与 `UrlBar` 同一套视觉） */

@@ -571,6 +571,14 @@ fn auth_param(value: &Value, group: &str, key: &str) -> Option<String> {
 // ============================================================
 
 fn parse_apipost(root: &Value, warnings: &mut Vec<ImportWarning>) -> ImportBundle {
+    // ApiPost 有两套长相完全不同的导出。桌面端「导出项目」是
+    // `project` / `apis` / `envs` 那套（有真实文件逐字段对过，见下面的严格路径），
+    // 另一套是扁平 `children` + 字段直挂在节点上（下面这套宽松路径）。
+    // 判据只看形状，不看版本号 —— 真实文件里没有可靠的版本字段
+    if super::is_apipost_export(root) {
+        return parse_apipost_export(root, warnings);
+    }
+
     let mut bundle = ImportBundle::default();
     let collection_name = str_any(root, &["name", "title", "target_name"]).unwrap_or_default();
 
@@ -860,6 +868,322 @@ fn collect_apipost_vars(node: &Value, out: &mut Vec<EnvVarDraft>) {
                 .unwrap_or(false),
         });
     }
+}
+
+// ============================================================
+// apipost 桌面端「导出项目」（严格）
+// ============================================================
+//
+// 这一套是**拿着真实导出文件逐字段对过的**（2026-09-15），所以不玩「多个候选字段名」：
+// 字段在哪儿就是哪儿，缺什么记什么。
+//
+// 形状（顶层四个键，`target_type` 在 `apis[]` 里）：
+//
+// ```text
+// { "project": {...}, "apis": [ { target_type: "folder", children: [...] },
+//                               { target_type: "api", method, request: { url, header, query,
+//                                 body: { mode, parameter, raw }, event: { pre_script, test },
+//                                 pre_tasks, post_tasks } } ],
+//   "envs": [ { name, list, pre_url } ], "models": [] }
+// ```
+//
+// 与上面那套宽松路径最容易搞混的一处：`header` / `query` 都**不是数组**，
+// 而是包了一层 `{ "parameter": [...] }`。按数组去读会一条都取不到，且不报错。
+
+fn parse_apipost_export(root: &Value, warnings: &mut Vec<ImportWarning>) -> ImportBundle {
+    let mut bundle = ImportBundle::default();
+
+    for item in root
+        .get("apis")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match walk_apipost_export(item, warnings) {
+            Walked::Folder(node) => bundle.folders.push(node),
+            Walked::Request(draft) => bundle.requests.push(draft),
+            Walked::Skipped => {}
+        }
+    }
+
+    bundle.environments = apipost_export_envs(root, warnings);
+    bundle
+}
+
+fn walk_apipost_export(item: &Value, warnings: &mut Vec<ImportWarning>) -> Walked {
+    let kind = str_any(item, &["target_type"]).unwrap_or_default();
+    let name = str_any(item, &["name"]).unwrap_or_default();
+
+    match kind.as_str() {
+        "folder" => {
+            let mut node = FolderNode::new(name);
+            for child in item
+                .get("children")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                match walk_apipost_export(child, warnings) {
+                    Walked::Folder(child_node) => node.folders.push(child_node),
+                    Walked::Request(draft) => node.requests.push(draft),
+                    Walked::Skipped => {}
+                }
+            }
+            Walked::Folder(node)
+        }
+        // 没写 target_type 的节点按接口试一把：拿得出 URL 就当接口，
+        // 拿不出就记警告 —— 猜成文件夹会让整棵子树静默消失
+        "api" | "" => match apipost_export_request(item, warnings) {
+            Some(draft) => Walked::Request(draft),
+            None => Walked::Skipped,
+        },
+        other => {
+            warnings.push(ImportWarning::new(
+                WarningKind::SkippedItem,
+                Some(name),
+                format!("unknown apipost node type `{other}`"),
+            ));
+            Walked::Skipped
+        }
+    }
+}
+
+fn apipost_export_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Option<RequestDraft> {
+    let request = item.get("request").cloned().unwrap_or(Value::Null);
+    let raw_url = str_any(&request, &["url"]).unwrap_or_default();
+
+    let params = apipost_export_kv_list(request.get("query"));
+    // 口径与 postman / har 一致：**只有真拿到参数表**才把 query 从 URL 上切掉。
+    // 表是空的还去切，等于把 URL 上原有的参数整段丢掉
+    let url = if params.is_empty() {
+        raw_url
+    } else {
+        let without_anchor = raw_url.split('#').next().unwrap_or(&raw_url);
+        without_anchor
+            .split_once('?')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or_else(|| without_anchor.to_string())
+    };
+
+    let (body_type, body) = apipost_export_body(request.get("body"), warnings);
+    let (pre_script, test_script) = apipost_export_scripts(&request);
+    apipost_export_notes(&request, warnings);
+
+    let mut draft = RequestDraft {
+        name: str_any(item, &["name"]).unwrap_or_default(),
+        method: str_any(item, &["method"]).unwrap_or_else(|| "GET".into()),
+        url,
+        params,
+        headers: apipost_export_kv_list(request.get("header")),
+        body_type,
+        body,
+        auth: AuthConfig::Inherit,
+        settings: Default::default(),
+        pre_script,
+        test_script,
+    };
+    // 没有 URL 的那条**留着**（由 `finalize_draft` 记警告）——
+    // 真实文件里确实有一条只有标题、`request.url` 是空串的占位接口，
+    // 丢掉它用户只会看到「怎么少了一条」，留着他在界面上补一下就好了
+    finalize_draft(&mut draft, warnings);
+    Some(draft)
+}
+
+/// `{"parameter": [ {key, value, is_checked, description, ...} ]}`。
+///
+/// 单独一个数组也认（同一份格式在不同小版本里两种都出现过）。
+fn apipost_export_kv_list(value: Option<&Value>) -> Vec<KeyValueItem> {
+    let Some(container) = value else {
+        return Vec::new();
+    };
+    let items = container
+        .get("parameter")
+        .and_then(Value::as_array)
+        .or_else(|| container.as_array());
+    items
+        .map(|items| items.iter().filter_map(apipost_export_kv).collect())
+        .unwrap_or_default()
+}
+
+fn apipost_export_kv(entry: &Value) -> Option<KeyValueItem> {
+    let key = entry.get("key").and_then(Value::as_str)?.trim().to_string();
+    // 界面上「还没填」的占位行 key 是空的（还带 `"static": true`）——
+    // 留着会变成一堆空行
+    if key.is_empty() {
+        return None;
+    }
+    let mut item = KeyValueItem::new(
+        key,
+        entry.get("value").map(value_to_string).unwrap_or_default(),
+    );
+    item.enabled = apipost_export_checked(entry);
+    item.desc = str_at(entry, "description").filter(|text| !text.is_empty());
+    Some(item)
+}
+
+/// `is_checked` 在同一个文件里就是混着的：数字 `1` 与字符串 `"1"` 都出现过。
+/// 缺字段按「勾上」算 —— 没写就没禁用
+fn apipost_export_checked(entry: &Value) -> bool {
+    match entry.get("is_checked") {
+        None => true,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(number)) => number.as_f64().map(|n| n != 0.0).unwrap_or(true),
+        Some(Value::String(text)) => text != "0" && !text.is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// `mode` 在真实文件里只有 `json` / `urlencoded` / `form-data` 三种，
+/// 但另外两种（各版本 / 手工改过的文件）也照 curl 那边的口径认
+fn apipost_export_body(
+    value: Option<&Value>,
+    warnings: &mut Vec<ImportWarning>,
+) -> (String, String) {
+    let Some(body) = value else {
+        return ("none".to_string(), String::new());
+    };
+    let mode = str_any(body, &["mode"])
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let raw = str_any(body, &["raw"]).unwrap_or_default();
+
+    match mode.as_str() {
+        "json" => {
+            if raw.trim().is_empty() {
+                let items = apipost_export_kv_list(Some(body));
+                if items.is_empty() {
+                    ("none".to_string(), String::new())
+                } else {
+                    // 界面上填的是参数表、没落 `raw`：拼回 JSON 比丢掉强
+                    warnings.push(ImportWarning::simple(
+                        WarningKind::UnsupportedField,
+                        "json body had no raw text; rebuilt from the parameter table".to_string(),
+                    ));
+                    ("json".to_string(), kv_items_to_json(&items))
+                }
+            } else {
+                ("json".to_string(), raw)
+            }
+        }
+        "urlencoded" | "x-www-form-urlencoded" => (
+            "urlencoded".to_string(),
+            kv_items_to_form(&apipost_export_kv_list(Some(body))),
+        ),
+        "form-data" | "formdata" | "multipart" => {
+            let items = apipost_export_kv_list(Some(body));
+            warnings.push(ImportWarning::simple(
+                WarningKind::UnsupportedField,
+                "multipart body is kept as `key=value` lines but cannot be sent yet".to_string(),
+            ));
+            (
+                "form".to_string(),
+                items
+                    .iter()
+                    .map(|item| format!("{}={}", item.key, item.value))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        "raw" | "text" => (guess_body_type(&raw), raw),
+        "" => ("none".to_string(), String::new()),
+        other => {
+            warnings.push(ImportWarning::simple(
+                WarningKind::UnsupportedField,
+                format!("unknown apipost body mode `{other}`; body dropped"),
+            ));
+            ("none".to_string(), String::new())
+        }
+    }
+}
+
+/// `request.event` 在这一套里是**对象**（宽松那套的 `pre_script` 直挂在节点上）
+fn apipost_export_scripts(request: &Value) -> (String, String) {
+    let Some(event) = request.get("event") else {
+        return (String::new(), String::new());
+    };
+    (
+        str_any(event, &["pre_script", "prerequest_script"]).unwrap_or_default(),
+        str_any(event, &["test", "test_script"]).unwrap_or_default(),
+    )
+}
+
+/// `pre_tasks` / `post_tasks`（前后置操作链）reqly 没有对应实现。
+/// 汇总成一条 —— 真实文件里它们是空数组，但装着东西的那种不该静默消失
+fn apipost_export_notes(request: &Value, warnings: &mut Vec<ImportWarning>) {
+    let count = ["pre_tasks", "post_tasks"]
+        .iter()
+        .filter_map(|key| request.get(*key).and_then(Value::as_array))
+        .map(Vec::len)
+        .sum::<usize>();
+    if count > 0 {
+        warnings.push(ImportWarning::simple(
+            WarningKind::UnsupportedField,
+            format!("{count} apipost pre/post task(s) cannot be imported; dropped"),
+        ));
+    }
+}
+
+/// `envs[]`：`list` 是 `{key: value}` 映射，`pre_url` 是环境级前置 URL。
+///
+/// `pre_url` reqly 没有对应概念 —— 环境变量表里凭空多一个 `pre_url`
+/// 会让用户以为它已经生效了，所以记警告而不是硬塞进变量表。
+fn apipost_export_envs(root: &Value, warnings: &mut Vec<ImportWarning>) -> Vec<EnvDraft> {
+    let mut out = Vec::new();
+    let mut dropped_pre_url = 0usize;
+
+    for env in root
+        .get("envs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let mut vars = Vec::new();
+        if let Some(map) = env.get("list").and_then(Value::as_object) {
+            for (key, value) in map {
+                let key = key.trim().to_string();
+                if key.is_empty() {
+                    continue;
+                }
+                vars.push(EnvVarDraft {
+                    key,
+                    value: value_to_string(value),
+                    is_secret: false,
+                });
+            }
+        }
+        if str_any(env, &["pre_url"]).is_some_and(|url| !url.is_empty()) {
+            dropped_pre_url += 1;
+        }
+        out.push(EnvDraft {
+            name: str_any(env, &["name"]).unwrap_or_default(),
+            vars,
+        });
+    }
+
+    if dropped_pre_url > 0 {
+        warnings.push(ImportWarning::simple(
+            WarningKind::UnsupportedField,
+            format!("{dropped_pre_url} environment pre-url(s) cannot be represented; dropped"),
+        ));
+    }
+    out
+}
+
+fn kv_items_to_form(items: &[KeyValueItem]) -> String {
+    items
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| format!("{}={}", item.key, urlencode(&item.value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn kv_items_to_json(items: &[KeyValueItem]) -> String {
+    let map: serde_json::Map<String, Value> = items
+        .iter()
+        .map(|item| (item.key.clone(), json!(item.value)))
+        .collect();
+    Value::Object(map).to_string()
 }
 
 // ============================================================
@@ -1307,5 +1631,237 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.kind == WarningKind::UnsupportedField));
+    }
+
+    // ---- apipost 桌面端「导出项目」 ----
+    //
+    // 这份样本照 `C:\Users\yhweix\Downloads\默认离线项目.json` 裁剪，
+    // 字段名与嵌套层次都是**真实文件里的原样**。它和上面那套 `children` 扁平结构的
+    // 差别不是「字段名不同」，是**层次不同**（header/query 包了一层 `parameter`），
+    // 所以必须有一个能一眼看出漏读的用例
+
+    const APIPOST_EXPORT: &str = r#"{
+      "project": {
+        "name": "默认离线项目", "description": "",
+        "details": { "markList": [], "script": { "pre_script": "", "test": "" },
+                     "request": { "query": [], "header": [], "body": [] }, "mock_rules": [] }
+      },
+      "apis": [
+        {
+          "target_type": "folder", "name": "TS相关接口", "mark": "developing", "sort": 7,
+          "tags": [], "created_uuid": "-1", "request": { "description": "" },
+          "children": [
+            {
+              "target_type": "api", "name": "TS校验填写", "mark": "developing", "sort": 1,
+              "tags": [], "created_uuid": "-1", "method": "GET", "mock": "{}",
+              "mock_url": "/PMPFIN/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs",
+              "request": {
+                "url": "https://api.example.com/PMPFIN/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs?empNo=",
+                "description": "",
+                "event": { "pre_script": "console.log(1)", "test": "assert(1)" },
+                "pre_tasks": [], "post_tasks": [],
+                "query": { "parameter": [
+                  { "description": "", "is_checked": 1, "key": "empNo", "type": "Text",
+                    "not_null": 1, "field_type": "String", "value": "" } ] },
+                "body": { "mode": "json", "parameter": [], "raw_para": [],
+                          "raw": "{\r\n    \"a\": 1\r\n}" }
+              },
+              "response": { "success": {}, "error": {} }, "children": []
+            },
+            {
+              "target_type": "api", "name": "生产拿token", "method": "POST",
+              "request": {
+                "url": "http://api.example.com/ids/connect/token",
+                "description": "", "event": { "pre_script": "", "test": "" },
+                "pre_tasks": [], "post_tasks": [],
+                "header": { "parameter": [
+                  { "is_checked": "1", "type": "Text", "key": "X-Access-Token",
+                    "value": "eyJhbGci", "not_null": "1", "description": "生产令牌",
+                    "field_type": "Text" },
+                  { "description": "", "field_type": "String", "is_checked": 0,
+                    "key": "x-debug", "value": "1", "not_null": 1, "type": "Text" },
+                  { "description": "", "field_type": "String", "is_checked": 1,
+                    "key": "", "value": "", "not_null": 1, "type": "Text", "static": true } ] },
+                "body": { "mode": "urlencoded", "raw": "", "raw_para": [],
+                  "parameter": [
+                    { "is_checked": "1", "key": "client_id", "value": "7a805f44" },
+                    { "is_checked": "1", "key": "scope", "value": "Media SAP" } ] }
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "target_type": "api", "name": "健康检查", "method": "GET",
+          "request": { "url": "https://api.example.com/health", "description": "",
+                       "event": { "pre_script": "", "test": "" },
+                       "pre_tasks": [], "post_tasks": [] },
+          "children": []
+        }
+      ],
+      "envs": [
+        { "env_id": "-1", "list": {}, "name": "默认环境", "pre_url": "",
+          "pre_urls": { "default": "" } },
+        { "env_id": "-2", "list": { "token": "abc", "host": "https://mock.example.com" },
+          "name": "Mock环境", "pre_url": "https://console-mock.apipost.cn/mock/7df09d72/",
+          "pre_urls": { "default": "https://console-mock.apipost.cn/mock/7df09d72/" } }
+      ],
+      "models": []
+    }"#;
+
+    #[test]
+    fn apipost_export_tree_is_walked_by_target_type() {
+        let bundle = apipost(APIPOST_EXPORT);
+        assert_eq!(bundle.folders.len(), 1, "一个文件夹 + 一条根级接口");
+        assert_eq!(bundle.requests.len(), 1);
+        assert_eq!(bundle.folders[0].name, "TS相关接口");
+        assert_eq!(bundle.folders[0].requests.len(), 2);
+        assert_eq!(bundle.request_count(), 3);
+    }
+
+    #[test]
+    fn apipost_export_reads_url_from_inside_request() {
+        let bundle = apipost(APIPOST_EXPORT);
+        let draft = &bundle.folders[0].requests[0];
+        assert_eq!(draft.name, "TS校验填写");
+        assert_eq!(draft.method, "GET");
+        assert_eq!(
+            draft.url,
+            "https://api.example.com/PMPFIN/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs",
+            "url 在 request.url 里，且 query 表非空时要从 URL 上切掉"
+        );
+    }
+
+    #[test]
+    fn apipost_export_query_parameter_becomes_params() {
+        let bundle = apipost(APIPOST_EXPORT);
+        let draft = &bundle.folders[0].requests[0];
+        assert_eq!(draft.params.len(), 1);
+        assert_eq!(draft.params[0].key, "empNo");
+        assert!(draft.params[0].enabled, "is_checked=1（数字）要认成勾上");
+    }
+
+    #[test]
+    fn apipost_export_headers_are_unwrapped_from_parameter() {
+        let bundle = apipost(APIPOST_EXPORT);
+        let headers = &bundle.folders[0].requests[1].headers;
+        assert_eq!(headers.len(), 2, "空 key 的占位行要丢掉");
+        assert_eq!(headers[0].key, "X-Access-Token");
+        assert!(headers[0].enabled);
+        assert_eq!(headers[0].desc.as_deref(), Some("生产令牌"));
+        assert_eq!(headers[1].key, "x-debug");
+        assert!(!headers[1].enabled, "is_checked=0（数字）要认成未勾选");
+    }
+
+    #[test]
+    fn apipost_export_bodies_map_by_mode() {
+        let bundle = apipost(APIPOST_EXPORT);
+        let check = &bundle.folders[0].requests[0];
+        assert_eq!(check.body_type, "json");
+        assert_eq!(check.body, "{\r\n    \"a\": 1\r\n}");
+
+        let token = &bundle.folders[0].requests[1];
+        assert_eq!(token.body_type, "urlencoded");
+        assert_eq!(token.body, "client_id=7a805f44&scope=Media%20SAP");
+    }
+
+    #[test]
+    fn apipost_export_event_object_feeds_both_scripts() {
+        let bundle = apipost(APIPOST_EXPORT);
+        let draft = &bundle.folders[0].requests[0];
+        assert_eq!(draft.pre_script, "console.log(1)");
+        assert_eq!(draft.test_script, "assert(1)");
+    }
+
+    #[test]
+    fn apipost_export_envs_take_the_list_mapping() {
+        let bundle = apipost(APIPOST_EXPORT);
+        assert_eq!(bundle.environments.len(), 2);
+        assert!(
+            bundle.environments[0].vars.is_empty(),
+            "默认环境的 list 是空的"
+        );
+
+        let mock = &bundle.environments[1];
+        assert_eq!(mock.name, "Mock环境");
+        assert_eq!(mock.vars.len(), 2);
+        // `list` 是 JSON 对象，遍历顺序由它决定（按 key 排），所以按 key 找、不按位置找
+        let value_of = |key: &str| {
+            mock.vars
+                .iter()
+                .find(|var| var.key == key)
+                .map(|var| var.value.as_str())
+        };
+        assert_eq!(value_of("token"), Some("abc"));
+        assert_eq!(value_of("host"), Some("https://mock.example.com"));
+    }
+
+    #[test]
+    fn apipost_export_pre_url_is_reported_not_silently_dropped() {
+        let bundle = apipost(APIPOST_EXPORT);
+        assert!(
+            bundle
+                .warnings
+                .iter()
+                .any(|w| w.kind == WarningKind::UnsupportedField && w.detail.contains("pre-url")),
+            "pre_url 装不进变量表，但必须说出来：{:?}",
+            bundle.warnings
+        );
+    }
+
+    #[test]
+    fn apipost_export_empty_query_keeps_the_url_query() {
+        // query 表为空时不能去切 URL —— 那等于把参数整段丢掉
+        let text = r#"{"project":{},"apis":[{"target_type":"api","name":"a","method":"GET",
+            "request":{"url":"https://x/y?a=1&b=2","event":{},"pre_tasks":[],"post_tasks":[]},
+            "children":[]}],"envs":[]}"#;
+        let bundle = apipost(text);
+        assert_eq!(bundle.requests[0].url, "https://x/y?a=1&b=2");
+        assert!(bundle.requests[0].params.is_empty());
+    }
+
+    #[test]
+    fn apipost_export_unknown_node_type_warns() {
+        let text = r#"{"project":{},"apis":[{"target_type":"mark","name":"怪节点"}],"envs":[]}"#;
+        let bundle = apipost(text);
+        assert_eq!(bundle.request_count(), 0);
+        assert!(bundle
+            .warnings
+            .iter()
+            .any(|w| w.kind == WarningKind::SkippedItem && w.detail.contains("mark")));
+    }
+
+    /// 真实文件里确实有一条只有标题、`request.url` 是空串的占位接口（`预发布` 分类下）。
+    /// 它要**留着**（跟 postman 口径一致）：丢掉的话用户只会看到「怎么少了一条」
+    #[test]
+    fn apipost_export_request_without_url_is_kept_and_flagged() {
+        let text = r#"{"project":{},"apis":[{"target_type":"api","name":"http://10.136.0.86:8001",
+            "method":"GET","request":{"url":"","event":{},"pre_tasks":[],"post_tasks":[]},
+            "children":[]}],"envs":[]}"#;
+        let bundle = apipost(text);
+        assert_eq!(bundle.request_count(), 1);
+        assert_eq!(bundle.requests[0].url, "");
+        assert_eq!(bundle.requests[0].name, "http://10.136.0.86:8001");
+        assert!(bundle
+            .warnings
+            .iter()
+            .any(|w| w.kind == WarningKind::SkippedItem));
+    }
+
+    #[test]
+    fn apipost_export_task_chain_warns() {
+        let text = r#"{"project":{},"apis":[{"target_type":"api","name":"a","method":"GET",
+            "request":{"url":"https://x/y","event":{},"pre_tasks":[{"a":1}],"post_tasks":[]},
+            "children":[]}],"envs":[]}"#;
+        let bundle = apipost(text);
+        assert_eq!(
+            bundle.request_count(),
+            1,
+            "任务链导不进来，但接口本身要留下"
+        );
+        assert!(bundle
+            .warnings
+            .iter()
+            .any(|w| w.kind == WarningKind::UnsupportedField && w.detail.contains("task")));
     }
 }

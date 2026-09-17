@@ -308,7 +308,13 @@ pub fn detect(input: &ImportInput) -> AppResult<Format> {
                 serde_json::json!({ "line": err.line(), "column": err.column() }),
             )
         })?;
-        return Ok(json_format(&value));
+        return json_format(&value).ok_or_else(|| {
+            AppError::http_with(
+                codes::IMPORT_DETECT,
+                "no known fingerprint".to_string(),
+                serde_json::json!({ "reason": "unknown" }),
+            )
+        });
     }
 
     // 不是 JSON 就只能是 curl（本阶段支持的范围里）
@@ -335,14 +341,23 @@ pub fn parse(input: &ImportInput) -> AppResult<(Format, ImportBundle)> {
     Ok((format, bundle))
 }
 
-/// JSON 根节点的指纹 → 格式。
+/// JSON 根节点的指纹 → 格式。认不出返回 `None`（由 [`detect`] 翻成 `E_IMPORT_DETECT`）。
 ///
 /// 放在 mod.rs 而不是 postman.rs，是因为 `detect` 要它，而 detect 是所有格式共用的。
-fn json_format(value: &serde_json::Value) -> Format {
+///
+/// **判据顺序是硬契约**：越具体的形状越靠前。一条新指纹如果排在靠后的分支后面，
+/// 就会被那个分支抢走，而抢走的后果通常不是报错，是「导进来 0 条」。
+fn json_format(value: &serde_json::Value) -> Option<Format> {
     // apipost 原生导出的标志位。放在最前面：它的结构里也有 `info`，
     // 先按 `apipost` 认出来，免得被 Postman 的分支抢走
     if value.get("apipost").is_some() || value.get("target_type").is_some() {
-        return Format::Apipost;
+        return Some(Format::Apipost);
+    }
+    // ApiPost 桌面端「导出项目」的固定搭配：顶层 `project` / `apis` / `envs` / `models`，
+    // 三个 `target_type` 都在 `apis[]` 里面 —— 上面那条只认顶层的，正好漏掉这一种。
+    // 漏掉的后果不是报错，是掉进 reqly 兜底 → 静默 0 条（2026-09-15 实际踩到）
+    if is_apipost_export(value) {
+        return Some(Format::Apipost);
     }
     // HAR 1.2 靠 `log.entries` 认。它和下面几家的顶层键都不撞，
     // 但顺序还是放在 Postman 之前 —— 以后加 OpenAPI 时那个 `info` 是要抢的，
@@ -352,18 +367,48 @@ fn json_format(value: &serde_json::Value) -> Format {
         .and_then(serde_json::Value::as_array)
         .is_some()
     {
-        return Format::Har;
+        return Some(Format::Har);
     }
     if let Some(info) = value.get("info") {
         if info.get("schema").is_some() || value.get("_postman_id").is_some() {
-            return Format::Postman;
+            return Some(Format::Postman);
         }
     }
     if value.get("_postman_id").is_some() || value.get("item").is_some() {
-        return Format::Postman;
+        return Some(Format::Postman);
     }
-    // 其余当作 reqly 自有格式（结构最松，放最后兜底）
-    Format::Reqly
+    // reqly 自有格式：带版本号，或三个结构键之一，或顶层直接就是数组。
+    //
+    // 这里**不再无条件兜底**。认不出的 JSON（ApiPost 桌面端导出、OpenAPI、
+    // Insomnia…）以前会落到这个分支，然后 `reqly.rs` 因为字段全带 `#[serde(default)]`
+    // 「解析成功但内容为空」→ 界面显示「已导入 0 个接口」。
+    // 用户看到的是「成功」，真相是「这个格式我们不认」—— 他会去翻自己的文件语法。
+    // 三个错误码的语义边界本来就划好了（见 `error.rs`），只是这一处兑现错了
+    if value.is_array()
+        || value.get("reqly").is_some()
+        || value.get("folders").is_some()
+        || value.get("requests").is_some()
+        || value.get("environments").is_some()
+    {
+        return Some(Format::Reqly);
+    }
+    None
+}
+
+/// 是不是 ApiPost 桌面端「导出项目」的原生结构。
+///
+/// 判据得同时落在**嵌套层**上：这份结构顶层只有 `project` / `apis` / `envs` / `models`
+/// 这四个键，`target_type` 藏在 `apis[]` 的元素里。放在 mod.rs 是因为
+/// [`detect`] 与 `postman::parse` 两边都要用它 —— 各写一份迟早会分叉成两套判据。
+pub(crate) fn is_apipost_export(value: &serde_json::Value) -> bool {
+    let Some(apis) = value.get("apis").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    // `apis` + `envs`/`project` 是官方导出的固定搭配；
+    // 再退一步，只要有一个节点带着 `target_type` 也认
+    value.get("envs").is_some()
+        || value.get("project").is_some()
+        || apis.iter().any(|item| item.get("target_type").is_some())
 }
 
 /// 宽松的 auth 反序列化。见 [`AuthConfig::from_json`] 的注释 ——
@@ -510,6 +555,58 @@ mod tests {
         // apipost 的结构里同时有 info 与 apipost 标志 → 必须优先认出 apipost
         let input = ImportInput::text(r#"{"apipost":"1.0","info":{"name":"c"},"item":[]}"#);
         assert_eq!(detect(&input).unwrap(), Format::Apipost);
+    }
+
+    /// ApiPost 桌面端「导出项目」：`target_type` 全在 `apis[]` 里，顶层一个都没有。
+    /// 早先只认顶层 `apipost` / `target_type`，这一种会掉进 reqly 兜底 → 静默 0 条
+    #[test]
+    fn detects_apipost_desktop_export() {
+        let input = ImportInput::text(
+            r#"{"project":{"name":"默认离线项目"},"apis":[{"target_type":"folder","name":"f","children":[]}],"envs":[],"models":[]}"#,
+        );
+        assert_eq!(detect(&input).unwrap(), Format::Apipost);
+    }
+
+    #[test]
+    fn detects_apipost_export_without_the_project_key() {
+        // 只有 `apis` + 带 `target_type` 的元素也认（`envs` / `project` 都可能被裁剪掉）
+        let input = ImportInput::text(r#"{"apis":[{"target_type":"api","name":"a"}],"envs":[]}"#);
+        assert_eq!(detect(&input).unwrap(), Format::Apipost);
+    }
+
+    #[test]
+    fn apis_key_alone_is_not_enough_to_claim_apipost() {
+        // 只有 `apis`，既没有 `envs`/`project`，元素也不带 `target_type`
+        // → 不误判成 apipost
+        let input = ImportInput::text(r#"{"apis":[{"name":"a","url":"https://x"}]}"#);
+        assert_eq!(detect(&input).unwrap_err().code(), codes::IMPORT_DETECT);
+    }
+
+    /// 认不出的 JSON 必须**报错**，不能落到 reqly 兜底。
+    ///
+    /// 兜底的后果是 `reqly.rs` 因为字段全带 `#[serde(default)]` 而「解析成功、内容为空」，
+    /// 界面显示「已导入 0 个接口」—— 看着像文件坏了，真相是这个格式还不支持。
+    #[test]
+    fn unknown_json_reports_detect_failure_instead_of_falling_back() {
+        let input = ImportInput::text(r#"{"swagger":"2.0","paths":{}}"#);
+        assert_eq!(detect(&input).unwrap_err().code(), codes::IMPORT_DETECT);
+    }
+
+    #[test]
+    fn reqly_shapes_are_still_recognised() {
+        for text in [
+            r#"{"reqly":1,"name":"c"}"#,
+            r#"{"name":"c","folders":[]}"#,
+            r#"{"requests":[{"name":"a","url":"https://x"}]}"#,
+            r#"{"environments":[]}"#,
+            r#"[{"name":"a","url":"https://x"}]"#,
+        ] {
+            assert_eq!(
+                detect(&ImportInput::text(text)).unwrap(),
+                Format::Reqly,
+                "{text} 应该还认得出来"
+            );
+        }
     }
 
     #[test]

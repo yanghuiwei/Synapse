@@ -96,6 +96,13 @@ export interface Folder {
   /** 是否被标记为 Token 源分组 */
   isTokenSource: boolean;
   /**
+   * 系统分类（「token刷新」）：**不可删除 / 改名 / 移动**。
+   *
+   * 每个工作区固定有一个，由后端在启动时建好（`folder::ensure_system_folder`）——
+   * Token 来源就配在它下面，所以它同时也是 Token 分组。
+   */
+  isSystem: boolean;
+  /**
    * 这个分类给其下所有请求提供的授权（P4）。
    *
    * 之所以放在**分类**上：一个团队的内网接口往往共用一套 Bearer，

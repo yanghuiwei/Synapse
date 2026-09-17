@@ -102,21 +102,30 @@ pub async fn delete_token_source(state: State<'_, AppState>, id: i64) -> AppResu
     with_conn(&state.pool, move |conn| repo::token::delete(conn, id)).await
 }
 
-/// 某条请求（按文件夹）实际会用到哪个 Token 源 —— 沿文件夹链向上找第一个。
+/// 某条请求实际会用到哪个 Token 源。
 ///
-/// 前端用它显示「当前生效的 Token 源」，免得用户对着三个配置猜到底哪个在起作用。
+/// 两级判定，与 `http::pipeline::find_token_source` 是**同一套规则的两份实现**：
+/// 先沿文件夹链向上找第一个，再兜底到系统分类「token刷新」下的全局那一个。
+/// 两份必须一起改 —— 界面显示的和发送时用的要是两个源，用户就会看到一个
+/// 「明明配好了却不生效」的假象。
+///
+/// ⚠️ 请求**没有归属分类**时也要照常解析（`folder_id = None`）：Token 来源
+/// 固定配在系统分类下，这条路径恰恰是最常见的。早先这里直接返回 `None`，
+/// 界面上就永远显示「没有可用 Token 来源」。
 #[tauri::command]
 pub async fn resolve_token_source(
     state: State<'_, AppState>,
     folder_id: Option<i64>,
 ) -> AppResult<Option<TokenSource>> {
-    let Some(folder_id) = folder_id else {
-        return Ok(None);
-    };
     with_conn(&state.pool, move |conn| {
-        let chain = repo::folder::ancestry(conn, folder_id)?;
-        let ids: Vec<i64> = chain.iter().map(|f| f.id).collect();
-        repo::token::first_in_chain(conn, &ids)
+        if let Some(folder_id) = folder_id {
+            let chain = repo::folder::ancestry(conn, folder_id)?;
+            let ids: Vec<i64> = chain.iter().map(|f| f.id).collect();
+            if let Some(source) = repo::token::first_in_chain(conn, &ids)? {
+                return Ok(Some(source));
+            }
+        }
+        repo::token::system_source(conn)
     })
     .await
 }

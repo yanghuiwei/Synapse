@@ -74,10 +74,16 @@ impl AppState {
             }
 
             let ws = repo::workspace::ensure_default(&conn)?;
+            // 系统分类「token刷新」：Token 来源固定配在它下面。**必须在这里补一句** ——
+            // 004 迁移只加了列，存量库里那个分类是启动时才建出来的，
+            // 而三个入口（桌面 / MCP / CLI）共用这条路径，漏了就会有人打开一个
+            // 「没有分类可配 Token」的库。
+            let sys = repo::folder::ensure_system_folder(&conn, ws.id)?;
             eprintln!(
-                "[reqly] db ready: {} (workspace #{})",
+                "[reqly] db ready: {} (workspace #{}, system folder #{})",
                 db_path.display(),
-                ws.id
+                ws.id,
+                sys.id
             );
         }
 
