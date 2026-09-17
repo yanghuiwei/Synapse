@@ -483,6 +483,7 @@ fn run_engine(runtime: &Runtime, url: &str, keep_alive: bool) -> RunOutcome {
         headers: Vec::new(),
         body_type: BodyType::None,
         body: String::new(),
+        form_fields: Vec::new(),
         auth: AuthConfig::None,
         settings,
         folder_id: None,

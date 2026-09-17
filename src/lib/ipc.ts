@@ -39,6 +39,7 @@ import {
   purgeTrashResultSchema,
   purgeTreeResultSchema,
   responsePayloadSchema,
+  savedFileSchema,
   settingSchema,
   tokenSourceSchema,
   tokenStatusSchema,
@@ -75,6 +76,7 @@ import type {
   PurgeTreeResult,
   ReportLabels,
   RequestSpec,
+  SavedFile,
   Setting,
   TokenSource,
   TokenStatus,
@@ -381,6 +383,35 @@ export const app = {
     if (!isTauriRuntime()) return Promise.resolve(() => {});
     return listen<null>(DB_CHANGED_EVENT, () => handler());
   },
+};
+
+/**
+ * 文件对话框（P8）。
+ *
+ * 两件事都在 Rust 侧弹框 / 落盘，前端只拿结果 —— 理由见
+ * `src-tauri/src/commands/file.rs` 的模块头。这里只保持「取消」与「失败」
+ * 可区分：取消返回 `null`，不抛错。
+ *
+ * 「打开所在目录」不在这里：`@tauri-apps/plugin-opener` 的 `revealItemInDir`
+ * 前端本来就能直接调（`opener:default` 已开），不必再包一层。
+ */
+export const files = {
+  /** 选一个文件，回绝对路径。用户取消 → `null` */
+  pickFile: async (): Promise<string | null> => {
+    const raw = await call<unknown>("pick_file");
+    return typeof raw === "string" ? raw : null;
+  },
+
+  /**
+   * 把一份「文件型」响应存到用户选的位置。
+   *
+   * `sourcePath` 必须是后端在本次执行里落的临时文件（后端会校验前缀）——
+   * 拿别处的路径调它会直接被拒。
+   */
+  saveResponseBody: (sourcePath: string, fileName: string): Promise<SavedFile | null> =>
+    call("save_response_body", { sourcePath, fileName }, {
+      parse: (v) => savedFileSchema.nullable().parse(v),
+    }),
 };
 
 /**

@@ -29,6 +29,16 @@ pub struct KeyValueItem {
     /// 备注（Postman 的 description）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
+    /// 文件字段的**磁盘路径**（只有 `multipart/form-data` 用得上）。
+    ///
+    /// 为什么不新开一个 `FormField` 类型：multipart 的每一行要么是文本、
+    /// 要么是文件，两者共用「键 / 值 / 是否启用」这套形状。拆成两个类型意味着
+    /// 两张表、两套占位符扫描、两处解析 —— 而它们的差别只有一个字段。
+    ///
+    /// 非空即表示这一行是文件：`value` 被忽略，发送时才去读这个路径
+    /// （不在编辑期读，是因为大文件不该被搬进内存再由 IPC 传一遍）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 impl KeyValueItem {
@@ -38,6 +48,7 @@ impl KeyValueItem {
             value: value.into(),
             enabled: true,
             desc: None,
+            file: None,
         }
     }
 }
@@ -339,7 +350,15 @@ pub struct ApiRequest {
     pub body_by_type: BTreeMap<String, String>,
     /// 键值型请求体（当前只有 urlencoded）的行。与 `params` / `headers` 同构，
     /// 所以键值表组件、占位符高亮都能直接复用。
+    ///
+    /// ⚠️ 它**只服务 `urlencoded`**。`form` 的行在 [`Self::form_fields`] ——
+    /// 两种类型共用一列会让「切类型」把上一种表格的行带过去（005 迁移的说明里有完整推演）。
     pub body_rows: Vec<KeyValueItem>,
+    /// `multipart/form-data` 的字段行（005 起）。
+    ///
+    /// 与 `body_rows` 同构，差别只在多一点：`file` 非空的行是**文件字段**，
+    /// 值是一个磁盘路径，发送时才读。
+    pub form_fields: Vec<KeyValueItem>,
     /// 授权配置。P4 起定稿（design.md §4.4）。
     pub auth: AuthConfig,
     pub settings: RequestSettings,

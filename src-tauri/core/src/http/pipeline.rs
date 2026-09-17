@@ -285,6 +285,7 @@ mod tests {
             auth: AuthConfig::Inherit,
             settings: RequestSettings::default(),
             folder_id: None,
+            form_fields: Vec::new(),
         }
     }
 

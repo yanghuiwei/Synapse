@@ -22,6 +22,12 @@ pub struct AppState {
     pub pool: SqlitePool,
     /// 保留绝对路径：设置页要显示、出问题时用户要能自己去打开
     pub db_path: PathBuf,
+    /// 「文件型」响应（导出 Excel / PDF / 图片）的临时落点。
+    ///
+    /// 为什么必须有这么一个目录：那些响应的字节只存在于执行的那一刻，
+    /// 而「保存到文件」是用户之后才点的动作。不先落一份，用户点保存时
+    /// 手里什么都没有 —— 除了被内联上限截断的那 8MB。
+    pub blob_dir: PathBuf,
     /// 按 `RequestSettings` 复用的 HTTP 客户端。**必须全局只有一份** ——
     /// 它的价值在于内部的连接池（keep-alive），每次命令都新建就白搭了。
     pub clients: ClientCache,
@@ -89,6 +95,14 @@ impl AppState {
 
         Ok(Self {
             pool,
+            // 「文件型」响应的临时区：与库同一个目录，跟着库走。
+            // 不做「启动即清空」—— 桌面端与 MCP 可能同时开着，先启动的那个
+            // 会把另一个刚落的文件删掉，表现为「保存按钮点了报文件不存在」。
+            // 增长由写入侧的 `prune_blobs` 按数量兜住（见 `http::execute`）。
+            blob_dir: db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("blobs"),
             db_path,
             clients: ClientCache::new(),
             inflight: InflightRegistry::new(),

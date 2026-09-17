@@ -8,6 +8,7 @@ import { tryPrettyJson } from "@/lib/json";
 import type { BodyType, KeyValueItem } from "@/lib/types";
 import { Button } from "@/features/ui/Button";
 import { JsonCodeArea } from "@/features/ui/JsonCodeArea";
+import { FormFieldTable } from "./FormFieldTable";
 import { KeyValueTable } from "./KeyValueTable";
 import { PlaceholderHint } from "./PlaceholderInput";
 
@@ -22,15 +23,15 @@ interface BodyTypeOption {
  * 可选的请求体类型。
  *
  * 这个列表**必须与 Rust 侧 `build_body()` 的实现对齐**：
- * `none / json / raw / urlencoded` 已实现（另外 graphql 后端支持但 P2 不给入口），
- * `form`（multipart）和 `binary` 要读磁盘 / 拼流，涉及文件选择器，排在 P8。
+ * `none / json / raw / urlencoded / form` 已实现（另外 graphql 后端支持但不给入口），
+ * `binary` 要选一个磁盘上的文件当**整个**请求体，涉及文件选择器，排在后面。
  */
 const BODY_TYPES: readonly BodyTypeOption[] = [
   { value: "none", labelKey: "request.bodyNone", ready: true },
   { value: "json", labelKey: "request.bodyRawJson", ready: true },
   { value: "raw", labelKey: "request.bodyRawText", ready: true },
   { value: "urlencoded", labelKey: "request.bodyFormUrlencoded", ready: true },
-  { value: "form", labelKey: "request.bodyFormData", ready: false },
+  { value: "form", labelKey: "request.bodyFormData", ready: true },
   { value: "binary", labelKey: "request.bodyBinary", ready: false },
 ];
 
@@ -45,24 +46,29 @@ export interface BodyEditorProps {
   body: string;
   /** urlencoded 的键值行。只有这个类型用到，但始终透传 —— 见 `store/request` */
   bodyRows: KeyValueItem[];
+  /** multipart 的字段行（含文件）。同上，只有 `form` 用到 */
+  formFields: KeyValueItem[];
   onBodyTypeChange: (bodyType: BodyType) => void;
   onBodyChange: (body: string) => void;
   onBodyRowsChange: (rows: KeyValueItem[]) => void;
+  onFormFieldsChange: (rows: KeyValueItem[]) => void;
   className?: string;
 }
 
 /**
  * 请求体编辑器。
  *
- * ## 两类编辑器，按类型分派
+ * ## 三类编辑器，按类型分派
  *
  * `urlencoded` 是一张**键值表**（跟请求头长得一样）—— 那种接口的 body
  * 本来就是一组 `k=v`，让人手写 `a=1&b=2` 再自己数 `&` 是没道理的。
+ * `form` 也是一张表，但多一列「类型」，文件字段填的是**路径**而不是内容。
  * 其余类型是一块**文本区**。
  *
  * 两者写进的都是同一个 `body`：键值表在每次编辑后立刻拼好串（见
- * `store/request` 的 `setBodyRows`），所以后端、压测、历史只认 `body`
- * 这一条口径没有分叉。
+ * `store/request` 的 `setBodyRows` / `setFormFields`），所以后端、压测、历史
+ * 只认 `body` 这一条口径没有分叉。但 multipart 的文件字段**拼不进字符串**，
+ * 所以它另有一份 `formFields` 随请求一起落库（见 `ApiRequest::form_fields`）。
  *
  * ## 为什么不做行号 / 折叠 / 内联校验波浪线
  *
@@ -79,9 +85,11 @@ export function BodyEditor({
   bodyType,
   body,
   bodyRows,
+  formFields,
   onBodyTypeChange,
   onBodyChange,
   onBodyRowsChange,
+  onFormFieldsChange,
   className,
 }: BodyEditorProps) {
   const { t } = useI18n();
@@ -165,6 +173,12 @@ export function BodyEditor({
           <span className="truncate text-[11px] text-ink-faint">
             {t("request.bodyUrlencodedHint")}
           </span>
+        ) : bodyType === "form" ? (
+          // multipart 的 boundary 由后端生成、文件按路径现读 —— 这两件事
+          // 用户看不出来，但正是它和 urlencoded 的全部差别
+          <span className="truncate text-[11px] text-ink-faint">
+            {t("request.bodyFormHint")}
+          </span>
         ) : null}
       </div>
 
@@ -180,6 +194,10 @@ export function BodyEditor({
             keyPlaceholder={t("kv.key")}
             valuePlaceholder={t("kv.value")}
           />
+        </div>
+      ) : bodyType === "form" ? (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <FormFieldTable rows={formFields} onChange={onFormFieldsChange} />
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto">

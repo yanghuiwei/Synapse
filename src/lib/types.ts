@@ -24,6 +24,13 @@ export interface KeyValueItem {
   enabled: boolean;
   /** 备注（Postman 的 description） */
   desc?: string;
+  /**
+   * 文件字段的**磁盘路径**，只有 multipart 表单用得上。
+   *
+   * 非空即表示这一行是文件：`value` 会被忽略，发送时由后端去读这个路径
+   * （不在这里读，是因为大文件不该先进内存再走一遍 IPC）。
+   */
+  file?: string;
 }
 
 export type BodyType =
@@ -142,8 +149,17 @@ export interface ApiRequest {
   /**
    * 键值型请求体（当前只有 urlencoded）的行，形状与 `params` / `headers` 一致，
    * 所以能直接复用键值表组件与占位符高亮。
+   *
+   * 只服务 `urlencoded` —— multipart 的行在 `formFields`，两者刻意分槽。
    */
   bodyRows: KeyValueItem[];
+  /**
+   * `multipart/form-data` 的字段行（005 起）。
+   *
+   * 与 `bodyRows` 分槽的理由：共用一列的话，从 urlencoded 切到 form
+   * 会把上一种表格的行原样带过去，而用户以为那是 form 的内容。
+   */
+  formFields: KeyValueItem[];
   auth: AuthConfig;
   settings: RequestSettings;
   preScript: string;
@@ -294,8 +310,22 @@ export interface RequestSpec {
    * urlencoded 请求，表格会退化成一行 `a=1&b=2` 纯文本。
    */
   bodyByType: Record<string, string>;
-  /** 键值型请求体（urlencoded）的行。后端同样不读 */
+  /**
+   * 键值型请求体（urlencoded）的行。后端同样不读
+   */
   bodyRows: KeyValueItem[];
+  /**
+   * `multipart/form-data` 的字段行（含文件）。后端**只在这个类型下读它**。
+   *
+   * 为什么一个字段装不下、非要再开一条通道：multipart 的成品不是一段字符串
+   * —— boundary 必须由发送方现生成，文件内容也不该跟着 IPC 走一趟。
+   * `formFields` 非空时它是权威；为空而后端拿到非空 `body` 时，
+   * 会退回解析 `body`（`k=v&k=@路径`，curl 的 `-F` 那套）。
+   *
+   * 老快照（P2/P3 写下的）里没有这个字段 —— 由 `schemas.ts` 兜底成 `[]`，
+   * 而不是让整条历史记录打不开。
+   */
+  formFields: KeyValueItem[];
   auth: AuthConfig;
   settings: RequestSettings;
   /**
@@ -362,6 +392,28 @@ export interface UnresolvedPlaceholder {
  */
 export type BodyEncoding = "text" | "lossy" | "binary";
 
+/**
+ * 一份「看起来是文件」的响应落在后端临时区的位置。
+ *
+ * 它**不是**用户磁盘上的最终文件：执行时先落一份，用户点「保存到文件」
+ * 才由后端弹框、复制到他选的地方。分两步是因为落盘发生在执行那一刻，
+ * 而问用户存哪儿是个交互动作 —— 合成一步就等于每个疑似文件的响应都弹一次框。
+ */
+export interface BodyFile {
+  /** 后端临时区里的绝对路径 */
+  path: string;
+  /** 建议的文件名（Content-Disposition → URL 末段 → 兜底） */
+  name: string;
+  /** 完整字节数，不受内联截断影响 */
+  size: number;
+}
+
+/** 另存成功后的结果 */
+export interface SavedFile {
+  path: string;
+  bytes: number;
+}
+
 /** 一次请求的结果，对应 Rust 的 `http::HttpResponsePayload` */
 export interface HttpResponsePayload {
   status: number;
@@ -383,6 +435,14 @@ export interface HttpResponsePayload {
   downloadMs: number;
   /** 端到端总耗时（含组装与解析，比 ttfb + download 略大） */
   totalMs: number;
+  /**
+   * 非空 = 这份响应是个文件，完整字节已经落在后端临时区，界面上要给「保存到文件」。
+   *
+   * 判据是三者取并集：解不出 UTF-8、`Content-Disposition: attachment`、
+   * Content-Type 落在二进制清单里 —— 所以 **CSV 这类合法 UTF-8 的导出也会有它**
+   * （那时 `bodyEncoding` 是 `text`，内容照样在 `body` 里能看）。
+   */
+  bodyFile?: BodyFile;
   /**
    * 本次发送里没解析出来的占位符。
    *

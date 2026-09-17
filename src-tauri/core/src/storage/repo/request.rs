@@ -18,7 +18,7 @@ use crate::storage::now_iso;
 use crate::storage::repo::{opt_text, parse_json_column, to_json_column, ORDER_BY_SORT};
 
 const COLUMNS: &str = "id, folder_id, workspace_id, name, method, url, params, headers, \
-     body_type, body, body_by_type, body_rows, auth, settings, pre_script, test_script, \
+     body_type, body, body_by_type, body_rows, form_fields, auth, settings, pre_script, test_script, \
      sort_order, created_at, updated_at, deleted_at";
 
 fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
@@ -29,6 +29,7 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
     let body_type_raw: String = row.get("body_type")?;
     let body_by_type_raw: String = row.get("body_by_type")?;
     let body_rows_raw: String = row.get("body_rows")?;
+    let form_fields_raw: String = row.get("form_fields")?;
 
     Ok(ApiRequest {
         id: row.get("id")?,
@@ -46,6 +47,10 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
             "request.body_by_type",
         )?,
         body_rows: parse_json_column::<Vec<KeyValueItem>>(&body_rows_raw, "request.body_rows")?,
+        form_fields: parse_json_column::<Vec<KeyValueItem>>(
+            &form_fields_raw,
+            "request.form_fields",
+        )?,
         // 宽松解析：存量值是 `{}`（P2 起 auth 一直只做透传），见 AuthConfig 的注释
         auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "request.auth")?),
         settings: parse_json_column(&settings_raw, "request.settings")?,
@@ -157,12 +162,13 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
            body         = ?9,
            body_by_type = ?10,
            body_rows    = ?11,
-           auth         = ?12,
-           settings     = ?13,
-           pre_script   = ?14,
-           test_script  = ?15,
-           sort_order   = ?16,
-           updated_at   = ?17
+           form_fields  = ?12,
+           auth         = ?13,
+           settings     = ?14,
+           pre_script   = ?15,
+           test_script  = ?16,
+           sort_order   = ?17,
+           updated_at   = ?18
          WHERE id = ?1",
         rusqlite::params![
             req.id,
@@ -176,6 +182,7 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
             req.body,
             to_json_column(&req.body_by_type, "request.body_by_type")?,
             to_json_column(&req.body_rows, "request.body_rows")?,
+            to_json_column(&req.form_fields, "request.form_fields")?,
             serde_json::to_string(&req.auth)
                 .map_err(|e| AppError::Internal(format!("request.auth: {e}")))?,
             to_json_column(&req.settings, "request.settings")?,
@@ -230,11 +237,11 @@ pub fn duplicate(conn: &Connection, id: i64, name: &str) -> AppResult<ApiRequest
     conn.execute(
         "INSERT INTO request
            (folder_id, workspace_id, name, method, url, params, headers,
-            body_type, body, body_by_type, body_rows,
+            body_type, body, body_by_type, body_rows, form_fields,
             auth, settings, pre_script, test_script,
             sort_order, created_at, updated_at)
          SELECT folder_id, workspace_id, ?2, method, url, params, headers,
-                body_type, body, body_by_type, body_rows,
+                body_type, body, body_by_type, body_rows, form_fields,
                 auth, settings, pre_script, test_script,
                 ?3, ?4, ?4
          FROM request WHERE id = ?1",

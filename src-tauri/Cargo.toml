@@ -46,6 +46,10 @@ reqly-core = { path = "core" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# 选文件 / 另存为。**只在 Rust 侧用**（`commands/file.rs`）——
+# 后端调插件不受 capability 约束，所以不必装 JS 包、也不必在
+# `capabilities/default.json` 里开权限，少一层「权限没配、运行时静默失败」。
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

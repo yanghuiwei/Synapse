@@ -6,6 +6,7 @@
 
 pub mod collection;
 pub mod env;
+pub mod file;
 pub mod folder;
 pub mod history;
 pub mod import_;

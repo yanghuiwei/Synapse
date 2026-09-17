@@ -105,7 +105,7 @@ export function AuthTab() {
   const status = resolvedSource ? (statuses[resolvedSource.id] ?? null) : null;
 
   return (
-    <div className="space-y-3 p-3">
+    <div className="space-y-2 p-2.5">
       <Row label={t("request.tab.auth")}>
         <KindSelect value={auth.type} onChange={(kind) => setAuth(emptyAuth(kind))} />
       </Row>
@@ -408,7 +408,7 @@ function FolderAuthBlock({
   const current = folder?.auth ?? { type: "inherit" as const };
 
   return (
-    <div className="space-y-2 rounded-md border border-line p-2.5">
+    <div className="space-y-1.5 rounded-md border border-line p-2">
       <p className="text-[11px] text-ink-muted">
         <span className="text-ink">{folder?.name ?? ""}</span>
         {" · "}
@@ -541,7 +541,6 @@ function TokenSourcePanel({
     draft.name.trim() !== "" &&
     draft.fetchRequestId !== 0 &&
     pathOk(draft.accessPath, true) &&
-    pathOk(draft.refreshPath, false) &&
     pathOk(draft.expiresInPath, false) &&
     !saving;
 
@@ -560,14 +559,30 @@ function TokenSourcePanel({
   const editable = draft !== null;
 
   return (
-    <div className="space-y-2 rounded-md border border-line p-2.5">
+    <div className="space-y-1.5 rounded-md border border-line p-2">
       <div className="flex items-center gap-1.5">
         <KeyRound size={11} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
         <span className="text-[11px] font-medium text-ink-muted">{t("token.refreshTitle")}</span>
 
         <span className="flex-1" />
 
-        {editable ? null : (
+        {/* 编辑时保存/取消跟着标题走：表单本身已经压到三行，再单开一行按钮
+            就是白白多占一行 —— 这块面板排在授权页最下面，用户得多滚一次 */}
+        {editable ? (
+          <>
+            <Button size="sm" variant="secondary" onClick={() => setDraft(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={!canSave}
+              onClick={() => void submit()}
+            >
+              {saving ? t("common.loading") : t("common.save")}
+            </Button>
+          </>
+        ) : (
           <Button
             size="sm"
             variant="ghost"
@@ -580,22 +595,7 @@ function TokenSourcePanel({
       </div>
 
       {editable ? (
-        <>
-          <TokenSourceForm value={draft} onChange={setDraft} requests={candidates} />
-          <div className="flex items-center gap-1.5">
-            <Button size="sm" variant="secondary" onClick={() => setDraft(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={!canSave}
-              onClick={() => void submit()}
-            >
-              {saving ? t("common.loading") : t("common.save")}
-            </Button>
-          </div>
-        </>
+        <TokenSourceForm value={draft} onChange={setDraft} requests={candidates} />
       ) : source === null ? (
         <>
           <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.noneHint")}</p>
@@ -622,7 +622,7 @@ function TokenSourcePanel({
   );
 }
 
-/** 保存按钮的判据，与 `TokenSourceForm` 里那三个 `pathError` 是同一条规则 */
+/** 保存按钮的判据，与 `TokenSourceForm` 里那两个 `pathError` 是同一条规则 */
 function pathOk(path: string, required: boolean): boolean {
   const trimmed = path.trim();
   if (trimmed === "") return !required;

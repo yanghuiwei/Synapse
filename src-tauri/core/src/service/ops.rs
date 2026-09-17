@@ -274,6 +274,11 @@ impl From<KeyValueInput> for KeyValueItem {
             value: input.value,
             enabled: input.enabled,
             desc: input.desc,
+            // 入参里没有「文件」这一说：AI 要发 multipart 的文件字段，
+            // 走 `body` 的 `k=@路径` 写法（curl `-F` 那套，见 `http::execute`）。
+            // 不在这里另开一个参数，是因为那样就有两条互相竞争的文件表达方式，
+            // 而「哪个赢」会成为下一个要解释的规则。
+            file: None,
         }
     }
 }
@@ -1166,6 +1171,10 @@ impl Ops {
                 auth: crate::storage::models::AuthConfig::Inherit,
                 settings: crate::storage::models::RequestSettings::default(),
                 folder_id: req.folder_id,
+                // 内联定义里的 multipart 字段：留空，让 `body` 的
+                // `k=v&k=@路径` 回退解析来接管（见 `http::execute::build_body`）。
+                // 这条路径上多一个参数就是多一处要解释「谁覆盖谁」的地方。
+                form_fields: Vec::new(),
             },
         };
 

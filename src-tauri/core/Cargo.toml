@@ -21,6 +21,11 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # 而这里没有需要 bind 的东西 —— core 只做「连接池 / 执行 / 压测」三件事。
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tokio-util = { version = "0.7.19", default-features = false }
+# `url` 本来就是 reqwest 的依赖（`reqwest::Url` 就是它），这里只是把它提成直接依赖。
+# 用到的只有 `form_urlencoded::parse` —— 解析 multipart 回退路径上的 `k=v&k=@file`。
+# 自己写一份百分号解码看着简单，但 `+` ↔ 空格、多字节 UTF-8 这两处细节
+# 正是「看起来能用、遇到中文就错」的那类地方。
+url = "2"
 
 # reqwest 必须关掉 default features：默认会拉 native-tls(OpenSSL)，那是"要求系统装 OpenSSL"的老路。
 # 用 rustls + **系统根证书**（native-roots）而不是 webpki-roots：

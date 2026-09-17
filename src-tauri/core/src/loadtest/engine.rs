@@ -516,6 +516,7 @@ mod tests {
             auth: Default::default(),
             settings: RequestSettings::default(),
             folder_id: None,
+            form_fields: Vec::new(),
         }
     }
 
@@ -534,6 +535,7 @@ mod tests {
             ttfb_ms: 1,
             download_ms: 1,
             total_ms: 2,
+            body_file: None,
             unresolved_placeholders: Vec::new(),
         }
     }

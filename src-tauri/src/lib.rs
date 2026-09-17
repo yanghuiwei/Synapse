@@ -94,6 +94,7 @@ fn init_storage(app: &tauri::AppHandle) -> AppResult<AppState> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // setup 的错误类型是 Box<dyn Error>，转成 String 以保留原始描述
             let state = init_storage(app.handle()).map_err(|e| e.to_string())?;
@@ -151,6 +152,9 @@ pub fn run() {
             // 请求执行
             commands::request::send_request,
             commands::request::cancel_request,
+            // 文件对话框与响应另存（上传文件 / 导出流落盘）
+            commands::file::pick_file,
+            commands::file::save_response_body,
             // 导入器（P5）
             commands::import_::preview_import,
             commands::import_::commit_import,

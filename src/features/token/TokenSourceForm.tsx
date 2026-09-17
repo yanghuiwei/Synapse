@@ -20,12 +20,16 @@ export type TokenSourceDraft = Omit<TokenSource, "id" | "createdAt" | "updatedAt
 /**
  * 新建时的初值。
  *
- * 四个路径刻意与 design.md §4.3 的示例一致：绝大多数 OAuth 接口就是这个形状，
+ * 路径的初值刻意与 design.md §4.3 的示例一致：绝大多数 OAuth 接口就是这个形状，
  * 让常见情况开箱可用，而不是让用户从空白开始填。
  *
- * `refreshRequestId` 恒为 `null` —— 「获取 Token」与「刷新 Token」在本产品里
- * 是同一个接口，界面上已经没有第二个请求可配了（后端仍支持分开配，
- * 老库里配过的那种照常走 `refresh_request_id`，只是新建时不会再有值）。
+ * `refreshPath` 给**空串** —— 本产品没有「拿 refresh_token 去续期」这条路径，
+ * Token 一过期就重新打一次取 Token 的接口（见 `http/token.rs` 的 `fetch`），
+ * 所以不再要求用户配一个提取路径。字段本身留在数据模型里没删：
+ * 老库里配过的照原样读出来，只是界面上不再有它的位置。
+ *
+ * `refreshRequestId` 同理恒为 `null` —— 获取与刷新是同一个接口，
+ * 界面上没有第二个请求可配（后端仍支持分开配，老配置照常走 `refresh_request_id`）。
  */
 export function emptyTokenSourceDraft(folderId: number): TokenSourceDraft {
   return {
@@ -34,7 +38,7 @@ export function emptyTokenSourceDraft(folderId: number): TokenSourceDraft {
     name: "",
     fetchRequestId: 0,
     accessPath: "$.access_token",
-    refreshPath: "$.refresh_token",
+    refreshPath: "",
     expiresInPath: "$.expires_in",
     expiresInUnit: "seconds",
     refreshRequestId: null,
@@ -70,16 +74,19 @@ export interface TokenSourceFormProps {
 /**
  * Token 来源配置表单。
  *
- * ## 为什么只留 6 组字段
+ * ## 为什么没有「refresh_token 路径」
  *
- * 早先还有「所属分类」和「刷新 Token 的请求」两项，现在都去掉了：
- * 分类固定成系统分类「token刷新」（见 `folder::ensure_system_folder`），
- * 而获取与刷新本来就是同一个接口 —— 多配一次只是多一次配错的机会。
+ * 「获取 Token」与「刷新 Token」在本产品里是**同一次请求**：Token 一过期就
+ * 重新打一遍取 Token 的接口（`http/token.rs` 的 `fetch` 走的就是
+ * `fetch_request_id`）。既然没有「拿 refresh_token 换新 Token」这条路径，
+ * 再要用户配一个提取路径，只是多一处会配错的地方。
  *
- * ## 布局为什么是一列
+ * ## 布局为什么一行塞多个输入框
  *
- * 剩下这几项里「过期时间路径」+「单位」必须挨着读（单位是给路径的解释），
- * 强行两列会把它们拆开。一列 + 分组标题读起来更省事。
+ * 这块面板排在授权页最下面（上面还有授权类型、继承提示、分类授权），
+ * 每多占一行，用户就多下拉一次才能看到「保存」。所以按**字段的亲疏**排：
+ * 名称与接口一条线、三个路径/单位一条线、自动刷新与提前量一条线；
+ * 只有成对读才有意义的组合（过期路径 + 它的单位）才必须挨着。
  */
 export function TokenSourceForm({
   value,
@@ -111,78 +118,76 @@ export function TokenSourceForm({
   }, [requests, value.fetchRequestId, t]);
 
   const accessError = pathError(value.accessPath, true, t);
-  const refreshError = pathError(value.refreshPath, false, t);
   const expiresError = pathError(value.expiresInPath, false, t);
 
   return (
-    <div className={cn("space-y-3", className)}>
-      <Field label={t("token.name")}>
-        <input
-          value={value.name}
-          onChange={(e) => patch({ name: e.target.value })}
-          placeholder={t("token.namePlaceholder")}
-          spellCheck={false}
-          autoComplete="off"
-          className={INPUT}
-        />
-      </Field>
-
-      <Field label={t("token.fetchRequest")} hint={t("token.fetchRequestHint")}>
-        {requests.length === 0 ? (
-          <div className="space-y-2">
-            <p className="flex items-start gap-1.5 py-1 text-[11px] text-warn">
-              <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
-              {t("token.noRequestInFolder")}
-            </p>
-            {/* 光说「还没有接口」是个死路：用户会去左栏找「把刚才那个登录接口挪过来」
-                这个动作，而那里只有拖拽。直接给一个能在该分类下建接口的入口。 */}
-            <Button
-              size="sm"
-              variant="secondary"
-              icon={<Plus size={11} strokeWidth={2.2} />}
-              onClick={() => useUiStore.getState().openCreateDialog("request", value.folderId)}
-            >
-              {t("token.createFetchRequest")}
-            </Button>
-          </div>
-        ) : (
-          <Select
-            value={String(value.fetchRequestId)}
-            onChange={(raw) => patch({ fetchRequestId: Number(raw) })}
-            options={options}
+    <div className={cn("space-y-2", className)}>
+      {/* 名称与「取 Token 的接口」都是短字段，各占一整行只是浪费高度 */}
+      <div className="flex flex-wrap items-start gap-2">
+        <Field label={t("token.name")} className="w-[160px] shrink-0">
+          <input
+            value={value.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            placeholder={t("token.namePlaceholder")}
+            spellCheck={false}
+            autoComplete="off"
+            className={INPUT}
           />
-        )}
-      </Field>
+        </Field>
+
+        <Field label={t("token.fetchRequest")} className="min-w-[180px] flex-1">
+          {requests.length === 0 ? (
+            <div className="flex items-center gap-2">
+              <p className="flex min-w-0 flex-1 items-start gap-1.5 py-1 text-[11px] text-warn">
+                <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
+                {t("token.noRequestInFolder")}
+              </p>
+              {/* 光说「还没有接口」是个死路：用户会去左栏找「把刚才那个登录接口挪过来」
+                  这个动作，而那里只有拖拽。直接给一个能在该分类下建接口的入口。 */}
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<Plus size={11} strokeWidth={2.2} />}
+                onClick={() => useUiStore.getState().openCreateDialog("request", value.folderId)}
+              >
+                {t("token.createFetchRequest")}
+              </Button>
+            </div>
+          ) : (
+            <Select
+              value={String(value.fetchRequestId)}
+              onChange={(raw) => patch({ fetchRequestId: Number(raw) })}
+              options={options}
+              // 「为什么不用另配刷新接口」压在 title 上：这句话只在第一次配的时候
+              // 值得读，而它占的那一行高度每次都要付
+              title={t("token.fetchRequestHint")}
+            />
+          )}
+        </Field>
+      </div>
 
       <Group title={t("token.extractTitle")} icon={KeyRound}>
-        <Field label={t("token.accessPath")}>
-          <PathInput
-            value={value.accessPath}
-            onChange={(accessPath) => patch({ accessPath })}
-            error={accessError}
-          />
-        </Field>
+        {/* 三个字段同一行；面板被拖窄时靠 `min-w` 换行，而不是把输入框挤成一条缝 */}
+        <div className="flex flex-wrap items-start gap-2">
+          <Field label={t("token.accessPath")} className="min-w-[190px] flex-1">
+            <PathInput
+              value={value.accessPath}
+              onChange={(accessPath) => patch({ accessPath })}
+              error={accessError}
+            />
+          </Field>
 
-        <Field label={t("token.refreshPath")} hint={t("token.refreshPathHint")}>
-          <PathInput
-            value={value.refreshPath}
-            onChange={(refreshPath) => patch({ refreshPath })}
-            error={refreshError}
-            optional
-          />
-        </Field>
-
-        <Field label={t("token.expiresInPath")} hint={t("token.expiresInPathHint")}>
-          <div className="flex items-center gap-1.5">
+          <Field label={t("token.expiresInPath")} className="min-w-[190px] flex-1">
             <PathInput
               value={value.expiresInPath}
               onChange={(expiresInPath) => patch({ expiresInPath })}
               error={expiresError}
-              optional
-              className="flex-1"
+              placeholder={t("token.expiresInPathPlaceholder")}
             />
+          </Field>
+
+          <Field label={t("token.expiresInUnit")} className="w-[132px] shrink-0">
             <Select
-              className="w-[132px] shrink-0"
               value={value.expiresInUnit}
               onChange={(raw) => patch({ expiresInUnit: raw as ExpiryUnit })}
               options={(Object.keys(UNIT_LABELS) as ExpiryUnit[]).map((u) => ({
@@ -191,41 +196,48 @@ export function TokenSourceForm({
               }))}
               disabled={value.expiresInPath.trim() === ""}
             />
-          </div>
-        </Field>
+          </Field>
+        </div>
       </Group>
 
-      <Group title={t("token.autoRefresh")}>
-        <label className="flex items-start gap-2 text-xs">
+      {/* 这一行不套 box：它本身就是一行控件，box 的图例 + 内边距要多花 30px 高度 */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-line pt-2">
+        <label className="flex items-center gap-1.5 text-xs">
           <input
             type="checkbox"
             checked={value.autoRefresh}
             onChange={(e) => patch({ autoRefresh: e.target.checked })}
-            className="mt-0.5 h-3.5 w-3.5 cursor-pointer accent-[var(--brand)]"
+            className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand)]"
           />
-          <span className="min-w-0">
-            <span className="block text-ink">{t("token.autoRefresh")}</span>
-            <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-faint">
-              {t("token.autoRefreshHint")}
-            </span>
-          </span>
+          <span className="text-ink">{t("token.autoRefresh")}</span>
         </label>
 
-        <Field label={t("token.skew")} hint={t("token.skewHint")}>
+        {/* 提前量只在自动重新获取时才有人读它 —— 关掉时灰掉，省一次「为什么填了没用」 */}
+        <label
+          className="flex items-center gap-1.5 text-[11px] text-ink-muted"
+          title={t("token.skewHint")}
+        >
+          {t("token.skew")}
           <input
             type="number"
             min={0}
             step={5}
             value={value.skewSeconds}
+            disabled={!value.autoRefresh}
             // 负数由后端拒（`E_INVALID_INPUT`），这里先夹住 —— 没必要为一次
             // 输入法的手滑走一趟 IPC 再弹一个红框
             onChange={(e) =>
               patch({ skewSeconds: Math.max(0, Math.trunc(Number(e.target.value)) || 0) })
             }
-            className={cn(INPUT, "w-24 tabular")}
+            className={cn(INPUT, "h-7 w-[76px] tabular")}
           />
-        </Field>
-      </Group>
+        </label>
+
+        {/* 这一行是唯一能解释「关掉会怎样」的地方，压成一行小字而不是一条独立说明行 */}
+        <span className="min-w-0 flex-1 truncate text-[11px] text-ink-faint">
+          {t("token.autoRefreshHint")}
+        </span>
+      </div>
     </div>
   );
 }
@@ -265,14 +277,17 @@ const SELECT = cn(
 function Field({
   label,
   hint,
+  className,
   children,
 }: {
   label: string;
   hint?: string;
+  /** 用于在 flex 行里分配宽度（`w-[160px]` / `min-w-0 flex-1` 这类） */
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <label className="block space-y-1">
+    <label className={cn("block space-y-1", className)}>
       <span className="block text-[11px] text-ink-muted">{label}</span>
       {children}
       {hint ? (
@@ -307,12 +322,15 @@ function Select({
   onChange,
   options,
   disabled,
+  title,
   className,
 }: {
   value: string;
   onChange: (value: string) => void;
   options: readonly { value: string; label: string }[];
   disabled?: boolean;
+  /** 原生 tooltip。用它承载「说明」，省掉输入框下面那行小字 */
+  title?: string;
   className?: string;
 }) {
   return (
@@ -320,6 +338,7 @@ function Select({
       <select
         value={value}
         disabled={disabled}
+        title={title}
         onChange={(e) => onChange(e.target.value)}
         className={SELECT}
       >
@@ -346,28 +365,31 @@ function Select({
  * （见 `src-tauri/src/template/jsonpath.rs`），不支持通配符与递归下降。
  * 与其让用户配完一个不支持的路径、发送时拿到 `E_TOKEN_EXTRACT`，
  * 不如在输入框上就标出来。
+ *
+ * 「留空 = 什么」这类说明走 `placeholder` 而不是输入框下的一行小字 ——
+ * 留空的时候那行小字最该出现，而它恰好就在输入框里，还省一行高度。
  */
 function PathInput({
   value,
   onChange,
   error,
-  optional = false,
+  placeholder = "$.access_token",
   className,
 }: {
   value: string;
   onChange: (value: string) => void;
   /** 错误文案；`null` = 合法 */
   error: string | null;
-  optional?: boolean;
+  /** 空值时的提示，默认是这个字段最常见的写法 */
+  placeholder?: string;
   className?: string;
 }) {
-  const { t } = useI18n();
   return (
     <div className={cn("space-y-1", className)}>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={optional ? t("token.refreshPathHint") : "$.access_token"}
+        placeholder={placeholder}
         spellCheck={false}
         autoComplete="off"
         aria-invalid={error !== null}

@@ -1,13 +1,18 @@
 import type { BodyType, KeyValueItem } from "@/lib/types";
 
 /**
- * `application/x-www-form-urlencoded` 的键值行 ↔ 字符串互转。
+ * 键值型请求体（`urlencoded` 与 `multipart`）的键值行 ↔ 字符串互转。
  *
  * ## 为什么序列化放在前端
  *
  * 后端 `execute::build_body` 对 `Urlencoded` 的处理是**原样发出** `body` 字符串。
  * 让它去拼键值对意味着 `RequestSpec` 协议、压测、MCP 三条调用链都要跟着改；
  * 而前端只要在写库/发送前拼好，后端、压测、历史、导入全都自动一致。
+ *
+ * multipart 走的是另一条路（boundary 与文件内容只能由后端拼，见
+ * `types.ts` 里 `formFields` 的说明），但这里仍给它拼一份 `k=v&k=@路径` 的
+ * **文本镜像**：历史快照、MCP 写入、导入器都只认 `body` 这一列，
+ * 没有镜像的话「从历史里打开一条 multipart 请求」会看到一张空表。
  *
  * ## 占位符必须原样留着
  *
@@ -57,13 +62,21 @@ function usableRows(rows: readonly KeyValueItem[]): KeyValueItem[] {
  *
  * 键与值都做百分号编码（空格编成 `%20` 而不是 `+`，两者服务端都认，
  * 但 `%20` 不与「`+` 表示空格」的老约定纠缠）。
+ *
+ * 带 `file` 的行输出 `键=@路径` —— curl `-F name=@file` 的写法，
+ * 后端 `form_fields_from_body` 认这个前缀。它在 urlencoded 上不会出现
+ * （那种行不带 `file`），所以这一个函数服务两种类型是安全的。
  */
 export function serializeUrlencoded(rows: readonly KeyValueItem[]): string {
   return usableRows(rows)
-    .map(
-      (row) =>
-        `${encodePreservingPlaceholders(row.key)}=${encodePreservingPlaceholders(row.value)}`,
-    )
+    .map((row) => {
+      const key = encodePreservingPlaceholders(row.key);
+      const file = row.file?.trim();
+      if (file !== undefined && file !== "") {
+        return `${key}=@${encodePreservingPlaceholders(file)}`;
+      }
+      return `${key}=${encodePreservingPlaceholders(row.value)}`;
+    })
     .join("&");
 }
 
@@ -76,8 +89,14 @@ export function serializeUrlencoded(rows: readonly KeyValueItem[]): string {
  * 只存在于界面上的状态会在切走再切回来时消失。
  *
  * 没写 `=` 的段（`a&b`）按「键名 a、值为空」处理，与常见实现的宽容度一致。
+ *
+ * `files` 只在 multipart 下开：把 `@路径` 认成文件字段。urlencoded 上**必须关掉** ——
+ * `email=@qq.com` 这种值会被误判成文件行，而那一行在发送时会被当成路径去读盘。
  */
-export function parseUrlencoded(body: string): KeyValueItem[] {
+export function parseUrlencoded(
+  body: string,
+  opts: { files?: boolean } = {},
+): KeyValueItem[] {
   const text = body.trim();
   if (text === "") return [];
 
@@ -89,18 +108,27 @@ export function parseUrlencoded(body: string): KeyValueItem[] {
       if (eq === -1) {
         return { key: safeDecode(pair), value: "", enabled: true };
       }
-      return {
-        key: safeDecode(pair.slice(0, eq)),
-        value: safeDecode(pair.slice(eq + 1)),
-        enabled: true,
-      };
+
+      const key = safeDecode(pair.slice(0, eq));
+      const raw = safeDecode(pair.slice(eq + 1));
+      if (opts.files === true) {
+        const path = raw.startsWith("@") ? raw.slice(1) : null;
+        if (path !== null && path !== "") {
+          return { key, value: "", enabled: true, file: path };
+        }
+      }
+      return { key, value: raw, enabled: true };
     });
 }
 
 /**
- * 从库里读出来的键值行。
+ * **urlencoded 的**键值行：库里有就用库里的，没有才去解析 `body`。
  *
- * 库里有行就用库里的（那份带着「未勾选」这类界面状态）；没有才去解析 `body`。
+ * 库里有行时优先用它，是因为那份带着「未勾选」这类只存在于界面上的状态；
+ * 每次都从 `body` 重解析会把它们悄悄丢掉。
+ *
+ * 只服务 `urlencoded` 一种类型 —— multipart 有自己的列与自己的入口
+ * （见 [`formFieldsFrom`]）。两者共用一列的话，切类型会把上一种表格的行带过去。
  */
 export function rowsFrom(
   bodyType: BodyType,
@@ -108,6 +136,22 @@ export function rowsFrom(
   body: string,
 ): KeyValueItem[] {
   const copy = rows.map((row) => ({ ...row }));
-  if (bodyType !== "urlencoded") return copy;
-  return copy.length > 0 ? copy : parseUrlencoded(body);
+  if (copy.length > 0) return copy;
+  if (bodyType === "urlencoded") return parseUrlencoded(body);
+  return [];
+}
+
+/**
+ * multipart 的字段行：库里有就用库里的，没有才从 `body` 的镜像串还原。
+ *
+ * 需要这条兜底的是「只写 `body` 的写入方」——MCP 的 `update_request`、curl 导入、
+ * 手改过的旧数据。它们写下的 `k=v&k=@路径` 必须能重新长出表格来，
+ * 否则从那些路径进来的 multipart 请求打开就是一张空表，而请求本身看着是好的。
+ */
+export function formFieldsFrom(
+  rows: readonly KeyValueItem[],
+  body: string,
+): KeyValueItem[] {
+  const copy = rows.map((row) => ({ ...row }));
+  return copy.length > 0 ? copy : parseUrlencoded(body, { files: true });
 }

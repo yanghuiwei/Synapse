@@ -346,6 +346,7 @@ pub fn resolve_spec(spec: &RequestSpec, ctx: &mut TemplateContext<'_>) -> Resolv
     let headers = resolve_rows(&spec.headers, ctx, &mut acc);
     let url = resolve_into(&spec.url, ctx, &mut acc);
     let body = resolve_into(&spec.body, ctx, &mut acc);
+    let form_fields = resolve_rows(&spec.form_fields, ctx, &mut acc);
     let auth = resolve_auth(&spec.auth, ctx, &mut acc);
 
     let resolved = RequestSpec {
@@ -358,6 +359,7 @@ pub fn resolve_spec(spec: &RequestSpec, ctx: &mut TemplateContext<'_>) -> Resolv
         auth,
         settings: spec.settings.clone(),
         folder_id: spec.folder_id,
+        form_fields,
     };
 
     // 去重：按原文（`{{env.nope}}`）判重，保留第一次出现的那条
@@ -386,9 +388,19 @@ pub fn resolve_spec(spec: &RequestSpec, ctx: &mut TemplateContext<'_>) -> Resolv
 /// 请求定义里所有可能含占位符的字符串。**改字段时这里和 `resolve_spec` 一起改。**
 fn spec_text_fields(spec: &RequestSpec) -> Vec<&str> {
     let mut out = vec![spec.url.as_str(), spec.body.as_str()];
-    for row in spec.params.iter().chain(spec.headers.iter()) {
+    for row in spec
+        .params
+        .iter()
+        .chain(spec.headers.iter())
+        .chain(spec.form_fields.iter())
+    {
         out.push(row.key.as_str());
         out.push(row.value.as_str());
+        // 文件路径也扫：`{{env.dir}}/模板.xlsx` 是很自然的写法，
+        // 而漏扫它的表现是「文件读不出来」，错的地方离原因很远
+        if let Some(file) = row.file.as_deref() {
+            out.push(file);
+        }
     }
     out
 }
@@ -419,6 +431,8 @@ fn resolve_rows(
             enabled: row.enabled,
             // 备注是给人看的，不参与请求 —— 解析它只会让「未命中」列表变噪
             desc: row.desc.clone(),
+            // 文件路径参与解析（`{{env.dir}}/a.xlsx`），读盘发生在发送前一刻
+            file: row.file.as_deref().map(|path| resolve_into(path, ctx, acc)),
         })
         .collect()
 }
@@ -516,6 +530,7 @@ mod tests {
             auth: AuthConfig::None,
             settings: RequestSettings::default(),
             folder_id: Some(3),
+            form_fields: Vec::new(),
         }
     }
 

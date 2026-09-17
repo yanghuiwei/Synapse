@@ -210,6 +210,8 @@ export function RequestPane() {
   // 请求体类型不走 `patch` —— 它要先把当前内容写回分槽快照，见 `setBodyType`
   const setBodyType = useRequestStore((s) => s.setBodyType);
   const setBodyRows = useRequestStore((s) => s.setBodyRows);
+  // multipart 与 urlencoded 各自一张表，也一样不能走 `patch` —— 见 `setFormFields`
+  const setFormFields = useRequestStore((s) => s.setFormFields);
   const send = useRequestStore((s) => s.send);
   const cancel = useRequestStore((s) => s.cancel);
 
@@ -322,9 +324,11 @@ export function RequestPane() {
           bodyType={draft.bodyType}
           body={draft.body}
           bodyRows={draft.bodyRows}
+          formFields={draft.formFields}
           onBodyTypeChange={setBodyType}
           onBodyChange={(body) => patch({ body })}
           onBodyRowsChange={setBodyRows}
+          onFormFieldsChange={setFormFields}
         />
       ) : tab === "settings" ? (
         <div className="min-h-0 flex-1 overflow-auto">

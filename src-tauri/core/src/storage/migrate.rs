@@ -45,6 +45,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "system_folder",
         sql: include_str!("../../migrations/004_system_folder.sql"),
     },
+    Migration {
+        version: 5,
+        name: "form_fields",
+        sql: include_str!("../../migrations/005_form_fields.sql"),
+    },
 ];
 
 /// 代码里定义的最高版本号
@@ -153,7 +158,7 @@ mod tests {
         let applied = run(&mut conn).expect("migrate");
         assert_eq!(
             applied,
-            vec![1, 2, 3, 4],
+            vec![1, 2, 3, 4, 5],
             "fresh db should apply every migration"
         );
         assert_eq!(current_version(&conn).unwrap(), latest_version());
@@ -172,7 +177,7 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 4, "version table must have one row per migration");
+        assert_eq!(rows, 5, "version table must have one row per migration");
     }
 
     /// schema 完整性：design.md §3.2 的表一张都不能少。

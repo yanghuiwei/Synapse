@@ -40,6 +40,7 @@ fn spec(method: &str, url: &str) -> RequestSpec {
         headers: Vec::new(),
         body_type: BodyType::None,
         body: String::new(),
+        form_fields: Vec::new(),
         auth: AuthConfig::None,
         settings: settings(),
         folder_id: None,

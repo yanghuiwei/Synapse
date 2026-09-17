@@ -11,7 +11,7 @@ import type {
   RequestSettings,
   RequestSpec,
 } from "@/lib/types";
-import { rowsFrom, serializeUrlencoded } from "@/lib/urlencoded";
+import { formFieldsFrom, rowsFrom, serializeUrlencoded } from "@/lib/urlencoded";
 import { useEnvStore } from "@/store/env";
 import { useHistoryStore } from "@/store/history";
 import { useWorkspaceStore } from "@/store/workspace";
@@ -44,10 +44,18 @@ export interface RequestDraft {
   /**
    * 键值型请求体（urlencoded）的行。
    *
-   * 只有一份 —— 当前也只有 urlencoded 一种类型用到它。将来 multipart
-   * (`form`) 落地时**必须**改成按类型分槽，否则两者会串。
+   * 只服务 `urlencoded` 一种类型 —— multipart 的行在 [`RequestDraft.formFields`]。
+   * 两者**刻意分槽**：共用一份的话，从 urlencoded 切到 form 会把上一种表格的
+   * 行原样带过去（表格里显示着 urlencoded 的键值对，而用户以为那是 form 的内容）。
    */
   bodyRows: KeyValueItem[];
+  /**
+   * `multipart/form-data` 的字段行（含文件）。
+   *
+   * 与 `bodyRows` 同样分槽存放，理由见上。`file` 非空的行是文件字段，
+   * 值是磁盘路径 —— 发送时由后端去读，前端不碰文件内容。
+   */
+  formFields: KeyValueItem[];
   auth: AuthConfig;
   settings: RequestSettings;
   /**
@@ -71,6 +79,7 @@ function emptyDraft(): RequestDraft {
     body: "",
     bodyByType: {},
     bodyRows: [],
+    formFields: [],
     // 新请求默认**继承分类**：绝大多数时候用户会在分类上配一次授权，
     // 然后希望下面所有请求自动用上
     auth: { type: "inherit" },
@@ -112,6 +121,8 @@ function draftFrom(req: ApiRequest): RequestDraft {
     body: req.body,
     bodyByType: bodySnapshot(req.bodyType, req.body, req.bodyByType),
     bodyRows: rowsFrom(req.bodyType, req.bodyRows, req.body),
+    // schema 把缺失的兜成 `[]` 了（老快照没有这一列），所以这里不必再判空
+    formFields: formFieldsFrom(req.formFields, req.body),
     // 授权配置也是对象（apiKey 变体有字段），同样得拷贝
     auth: { ...req.auth },
     settings: { ...req.settings },
@@ -140,6 +151,7 @@ export function draftToSpec(draft: RequestDraft): RequestSpec {
     body: draft.body,
     bodyByType: bodySnapshot(draft.bodyType, draft.body, draft.bodyByType),
     bodyRows: draft.bodyRows,
+    formFields: draft.formFields,
     auth: draft.auth,
     settings: draft.settings,
     folderId: draft.folderId,
@@ -163,6 +175,7 @@ function draftFromSpec(spec: RequestSpec): RequestDraft {
     body: spec.body,
     bodyByType: bodySnapshot(spec.bodyType, spec.body, spec.bodyByType),
     bodyRows: rowsFrom(spec.bodyType, spec.bodyRows, spec.body),
+    formFields: formFieldsFrom(spec.formFields, spec.body),
     auth: { ...spec.auth },
     settings: { ...spec.settings },
     // 历史快照可能来自 P2/P3，那时没有这个字段 —— 缺失就是「无分类」。
@@ -323,6 +336,7 @@ function draftFields(draft: RequestDraft): Partial<ApiRequest> {
     // 「保存过再切类型，别的类型的内容还是没了」—— 而那正是这次要修的问题本身
     bodyByType: bodySnapshot(draft.bodyType, draft.body, draft.bodyByType),
     bodyRows: draft.bodyRows,
+    formFields: draft.formFields,
     // 授权**必须**落库：用户在授权页签改完之后多半不会点保存，
     // 靠的就是自动保存。漏了这一个字段的表现是「切走再切回来，授权没了」——
     // 而请求本身看起来完全正常
@@ -411,6 +425,14 @@ export interface RequestState {
   setBodyType: (bodyType: BodyType) => void;
   /** 整块替换 urlencoded 的键值行，并同步 `body`（后端只认它） */
   setBodyRows: (rows: KeyValueItem[]) => void;
+  /**
+   * 整块替换 multipart 的字段行，并同步 `body` 的镜像串。
+   *
+   * 镜像串（`k=v&k=@路径`）是给**只读 `body` 的那些路径**用的：
+   * 历史快照、MCP 写入、导入器。发送本身不看它 —— multipart 的成品
+   * 只能由后端按 `formFields` 现拼（boundary 要现生成，文件要现读）。
+   */
+  setFormFields: (rows: KeyValueItem[]) => void;
 
   send: () => Promise<void>;
   cancel: () => Promise<void>;
@@ -565,8 +587,9 @@ export const useRequestStore = create<RequestState>((set, get) => ({
       const d = s.draft;
       // 先把当前这份写回它自己的格子，再取新那格 —— 顺序反过来等于没存
       const bodyByType = bodySnapshot(d.bodyType, d.body, d.bodyByType);
-      // `bodyRows` 刻意**不动**：它只服务 urlencoded 一种类型，切到别处再切
-      // 回来时那几行得原样还在（包括「未勾选」这种只存在于界面上的状态）。
+      // `bodyRows` / `formFields` 刻意**不动**：它们各自只服务一种类型
+      // （urlencoded / form），切到别处再切回来时那几行得原样还在
+      // （包括「未勾选」这种只存在于界面上的状态）。
       // 若在这里从 body 重新解析，未勾选的行就悄悄没了。
       return {
         draft: { ...d, bodyType, bodyByType, body: bodyByType[bodyType] ?? "" },
@@ -584,6 +607,22 @@ export const useRequestStore = create<RequestState>((set, get) => ({
       draft: {
         ...s.draft,
         bodyRows: rows,
+        body,
+        bodyByType: bodySnapshot(s.draft.bodyType, body, s.draft.bodyByType),
+      },
+      dirty: true,
+    }));
+    scheduleAutosave();
+  },
+
+  setFormFields: (rows) => {
+    // 镜像串同步一份（见接口上的说明）。它与 urlencoded 共用同一个序列化函数：
+    // 文件行输出 `k=@路径`，后端 `form_fields_from_body` 认这个前缀。
+    const body = serializeUrlencoded(rows);
+    set((s) => ({
+      draft: {
+        ...s.draft,
+        formFields: rows,
         body,
         bodyByType: bodySnapshot(s.draft.bodyType, body, s.draft.bodyByType),
       },

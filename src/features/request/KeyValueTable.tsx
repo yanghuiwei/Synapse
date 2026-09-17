@@ -16,7 +16,8 @@ export interface KeyValueTableProps {
   className?: string;
 }
 
-function isBlankRow(row: KeyValueItem | undefined): row is undefined | never {
+/** 空行判定：什么都没写、且仍是启用状态。文件行由调用方另行判定（见 `FormFieldTable`） */
+export function isBlankRow(row: KeyValueItem | undefined): boolean {
   return !row || (row.key === "" && row.value === "" && row.enabled);
 }
 
@@ -33,10 +34,16 @@ function isBlankRow(row: KeyValueItem | undefined): row is undefined | never {
  *     从外部灌入的行（urlencoded 从 `body` 解析出来的、导入器写进去的）
  *     恰好全都不以空行结尾，所以那条路径上是必然踩到。
  *   * 末行已空时再补一个 —— 末尾会并排出现两个空行。
+ *
+ * `isBlank` 可替换：multipart 的表格里「只有文件路径、没有文本值」的行
+ * **不是空行**，照通用的判定会被补出一个空行并排在它下面。
  */
-function withTrailingBlank(rows: readonly KeyValueItem[]): KeyValueItem[] {
+export function withTrailingBlank(
+  rows: readonly KeyValueItem[],
+  isBlank: (row: KeyValueItem | undefined) => boolean = isBlankRow,
+): KeyValueItem[] {
   const list = rows.slice();
-  if (list.length === 0 || !isBlankRow(list[list.length - 1])) {
+  if (list.length === 0 || !isBlank(list[list.length - 1])) {
     list.push({ key: "", value: "", enabled: true });
   }
   return list;
@@ -98,7 +105,7 @@ export function KeyValueTable({
 
         <tbody>
           {view.map((row, index) => {
-            const blank = isBlankRow(row).valueOf();
+            const blank = isBlankRow(row);
             const dim = row.enabled ? "text-ink" : "text-ink-faint";
             return (
               <tr key={index} className="group border-b border-line/60">

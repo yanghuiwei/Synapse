@@ -28,6 +28,8 @@ export const keyValueItemSchema = z.looseObject({
   value: z.string(),
   enabled: z.boolean(),
   desc: z.string().optional(),
+  // multipart 的文件列。老库里没有它，所以是可选的
+  file: z.string().optional(),
 });
 
 export const bodyTypeSchema = z.enum([
@@ -140,6 +142,8 @@ export const apiRequestSchema = z.looseObject({
    */
   bodyByType: z.record(z.string(), z.string()).catch({}),
   bodyRows: z.array(keyValueItemSchema).catch([]),
+  // 005 迁移新增的列，兜底理由同上
+  formFields: z.array(keyValueItemSchema).catch([]),
   // 老库里是 `{}`，Rust 侧宽松解析成 inherit；这里同样兜底（见 authConfigSchema）
   auth: authConfigSchema.catch({ type: "inherit" }),
   settings: requestSettingsSchema,
@@ -268,6 +272,23 @@ export const httpHeaderSchema = z.looseObject({
 });
 
 /**
+ * `BodyFile` —— 「文件型」响应在后端临时区的位置。
+ *
+ * 三项都是必填且不兜底：缺任何一项这个入口都没法用（没有路径就无从复制），
+ * 与其退化成一个点了报错的文件名，不如让整份 payload 校验失败、当场暴露漂移。
+ */
+export const bodyFileSchema = z.looseObject({
+  path: z.string(),
+  name: z.string(),
+  size: z.number(),
+});
+
+export const savedFileSchema = z.looseObject({
+  path: z.string(),
+  bytes: z.number(),
+});
+
+/**
  * 发给后端执行的请求定义。
  *
  * 有它的理由：历史记录里存的是**原样 JSON 快照**，回填编辑器时要先把
@@ -289,6 +310,8 @@ export const requestSpecSchema = z.looseObject({
   // 分槽快照与键值行同样兜底：P2/P3 时期的历史快照里没有它们
   bodyByType: z.record(z.string(), z.string()).catch({}),
   bodyRows: z.array(keyValueItemSchema).catch([]),
+  // multipart 的字段行。同理兜底 —— 它是本轮才加上的字段
+  formFields: z.array(keyValueItemSchema).catch([]),
   auth: authConfigSchema.catch({ type: "inherit" }),
   settings: requestSettingsSchema.catch(() => ({ ...DEFAULT_REQUEST_SETTINGS })),
   // 老快照里没有这个字段 —— 缺失按「无分类」处理，而不是整条记录打不开
@@ -346,6 +369,10 @@ export const responsePayloadSchema = z.looseObject({
   ttfbMs: z.number(),
   downloadMs: z.number(),
   totalMs: z.number(),
+  // 只有「看起来是文件」的响应才有它（见 Rust `http::execute::looks_like_file`）。
+  // 缺省 undefined 而不是 null：没有它就是「没有下载入口」，与 `bodyFile: null`
+  // 是同义，多一种表示只会让判断写成两处。
+  bodyFile: bodyFileSchema.optional(),
   // 缺省空数组而不是必填：P2/P3 的后端没有这个字段，
   // 而「没有未解析项」本来就是这个字段的绝大多数取值
   unresolvedPlaceholders: z.array(unresolvedPlaceholderSchema).catch([]),

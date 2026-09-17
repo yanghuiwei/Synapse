@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
-use crate::http::{execute_with_cancel, BodyEncoding, HttpResponsePayload, Pipeline, RequestSpec};
+use crate::http::{execute_with_blobs, BodyEncoding, HttpResponsePayload, Pipeline, RequestSpec};
 use crate::AppState;
 
 /// 发一次请求，把结果原样交给调用方。
@@ -56,7 +56,18 @@ pub async fn send_request_with(
 
     // ⚠️ `guard` 是 RAII 句柄，必须活到请求结束 —— 提前丢掉会让登记表
     // 以为这次已经跑完了，「取消」就再也找不到它。
-    let mut payload = execute_with_cancel(&client, &prepared.spec, Some(guard.token())).await?;
+    //
+    // 走 `execute_with_blobs` 而不是 `execute_with_cancel`：导出类接口
+    // （Excel / PDF / 图片流）的字节只在这一次执行里存在，先落到会话临时区，
+    // 用户之后点「保存到文件」才拿得到。其余入口（MCP / CLI / 压测）
+    // 仍然走不带目录的那条，行为一字不变。
+    let mut payload = execute_with_blobs(
+        &client,
+        &prepared.spec,
+        Some(guard.token()),
+        &state.blob_dir,
+    )
+    .await?;
 
     // 未解析的占位符随响应回给调用方：它们没被替换掉，原文已经原样发出去了，
     // 用户需要知道「你发出去的不是你以为的那串 URL」。

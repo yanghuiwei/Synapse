@@ -65,6 +65,22 @@ pub struct RequestSpec {
     /// 可空 + `serde(default)`：P2/P3 时期存下来的历史快照里没有这个字段。
     #[serde(default)]
     pub folder_id: Option<i64>,
+    /// `multipart/form-data` 的字段行。**只有 `body_type = form` 时才被读取**。
+    ///
+    /// ## 为什么这里要多开一条通道
+    ///
+    /// 其余类型的 body 都是一段文本，`body` 一个字段装得下。multipart 装不下：
+    /// 它每一行要么是文本、要么是一个**磁盘上的文件**（文件内容不进内存，
+    /// 更不该跟着 IPC 走一趟），而 boundary 又必须由发送方生成 ——
+    /// 也就是说这份内容只能由后端来拼，前端给不出成品串。
+    ///
+    /// ## 与 `body` 的关系
+    ///
+    /// `form_fields` 非空时它是**权威**；为空而 `body` 非空时退回解析 `body`
+    /// （`k=v&k=@路径`，curl 的 `-F` 那套），这样 MCP / CLI / 导入器
+    /// 只写 `body` 列也能发出 multipart 请求。
+    #[serde(default)]
+    pub form_fields: Vec<KeyValueItem>,
 }
 
 /// `AuthConfig` 的宽松反序列化。
@@ -104,6 +120,17 @@ impl From<&crate::storage::models::ApiRequest> for RequestSpec {
             auth: request.auth.clone(),
             settings: request.settings.clone(),
             folder_id: request.folder_id,
+            // 无条件带上：`build_body` 只在 `body_type = form` 时读它，
+            // 按类型过滤反而多一处可能在「切类型后忘同步」的地方。
+            //
+            // 这条路径**必须**带上它：Token 源那个取 token 的请求如果是
+            // multipart 表单（OAuth 的 `client_credentials` 就是），
+            // 字段漏掉的表现是「token 接口收到一个空表单」，服务端回 400，
+            // 而界面上看不出任何异常。
+            //
+            // ⚠️ 取的是 `form_fields`，不是 `body_rows` —— 后者是 urlencoded 那一槽，
+            // 拿错了会把 urlencoded 的键值当成 multipart 字段发出去。
+            form_fields: request.form_fields.clone(),
         }
     }
 }
@@ -113,6 +140,30 @@ impl From<&crate::storage::models::ApiRequest> for RequestSpec {
 pub struct HttpHeader {
     pub name: String,
     pub value: String,
+}
+
+/// 一份「这是个文件」的响应落在磁盘上的位置（导出 Excel / PDF / 图片…）。
+///
+/// ## 为什么先落在临时区，而不是直接问用户存哪儿
+///
+/// 落盘发生**在执行时**（那会儿字节还在手里），而问用户存哪儿是个交互动作。
+/// 合成一步的代价是：每一次「看起来像文件」的响应都弹一次对话框 ——
+/// 包括用户只是想看一眼状态码的那些请求。
+/// 所以分两步：执行时写进会话临时区，用户点了「保存到文件」才复制到他选的地方。
+///
+/// ## 为什么不是「前端拿字节自己存」
+///
+/// 两个原因：① 超过内联上限的响应在前端只剩被截断的前 8MB，存下来是个坏文件；
+/// ② 二进制内容本来就没进 `body`（见 [`BodyEncoding::Binary`]）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyFile {
+    /// 临时区里的绝对路径。**不是**用户的最终落点。
+    pub path: String,
+    /// 建议的文件名：Content-Disposition → URL 末段 → `download-<时间戳>.<扩展名>`
+    pub name: String,
+    /// 完整字节数（不受内联截断影响）
+    pub size: u64,
 }
 
 /// 响应体是怎么解读出来的。
@@ -153,6 +204,13 @@ pub struct HttpResponsePayload {
     pub download_ms: u64,
     /// 端到端总耗时（含组装与解析；比 ttfb + download 略大）
     pub total_ms: u64,
+    /// 这份响应看起来是个文件、且执行时给了临时区 → 完整字节已经落在那儿。
+    ///
+    /// `None` 的两种含义（前端只需按「有没有保存按钮」处理，不必区分）：
+    /// ① 这不是文件响应（绝大多数情况）；② 调用方没给临时区
+    /// （MCP / CLI / 压测路径都不给 —— 它们不需要这个入口）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<BodyFile>,
     /// 本次发送里**没能解析**的占位符（它们的原文被原样留在了请求里）。
     ///
     /// 挂在响应上而不是单开一条事件：它就是「这一次发送」的属性，
@@ -175,7 +233,21 @@ pub async fn execute_with_cancel(
     spec: &RequestSpec,
     cancel: Option<&CancellationToken>,
 ) -> AppResult<HttpResponsePayload> {
-    execute_inner(client, spec, MAX_INLINE_BODY, cancel).await
+    execute_inner(client, spec, MAX_INLINE_BODY, cancel, None).await
+}
+
+/// 可取消 + 给一个临时目录：**看起来是文件**的响应会把完整字节落到那里，
+/// 并在结果里回一个 [`BodyFile`]（前端据此给「保存到文件」）。
+///
+/// 不给目录（MCP / CLI / 压测）就是 [`execute_with_cancel`] 的行为 ——
+/// 那些入口没有「点一下存到磁盘」这个动作，白白占磁盘没有意义。
+pub async fn execute_with_blobs(
+    client: &Client,
+    spec: &RequestSpec,
+    cancel: Option<&CancellationToken>,
+    blobs: &std::path::Path,
+) -> AppResult<HttpResponsePayload> {
+    execute_inner(client, spec, MAX_INLINE_BODY, cancel, Some(blobs)).await
 }
 
 /// 带上限的版本。单独拆出来是为了让截断逻辑可测 ——
@@ -185,7 +257,7 @@ pub async fn execute_with_limit(
     spec: &RequestSpec,
     max_inline: usize,
 ) -> AppResult<HttpResponsePayload> {
-    execute_inner(client, spec, max_inline, None).await
+    execute_inner(client, spec, max_inline, None, None).await
 }
 
 async fn execute_inner(
@@ -193,6 +265,7 @@ async fn execute_inner(
     spec: &RequestSpec,
     max_inline: usize,
     cancel: Option<&CancellationToken>,
+    blobs: Option<&std::path::Path>,
 ) -> AppResult<HttpResponsePayload> {
     let method = parse_method(&spec.method)?;
     let mut url = parse_url(&spec.url)?;
@@ -202,13 +275,24 @@ async fn execute_inner(
         url.query_pairs_mut().append_pair(key, value);
     }
 
-    let (body, default_content_type) = build_body(&spec.body_type, &spec.body)?;
+    let built = build_body(&spec.body_type, &spec.body, &spec.form_fields)?;
     let mut headers = build_headers(&spec.headers)?;
     // 用户显式设了 content-type 就以他为准（Postman 的行为，也是唯一不让人意外的行为）
-    if let Some(ct) = default_content_type {
-        if !headers.contains_key(CONTENT_TYPE) {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+    match &built {
+        BuiltBody::Text(_, Some(ct)) => {
+            if !headers.contains_key(CONTENT_TYPE) {
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+            }
         }
+        // multipart 的 content-type 里必须带 boundary，而 boundary 是 reqwest
+        // 按这份 form 现生成的 —— 用户手写的那条注定对不上（他没有 boundary 可写）。
+        // 所以这里清掉它，让 reqwest 自己设，而不是发两条冲突的头出去。
+        BuiltBody::Multipart(_) => {
+            headers.remove(CONTENT_TYPE);
+        }
+        // 文本体但没有缺省类型（目前只有「空 JSON」这一种）→ 什么都不加，
+        // 与 `Text(_, None)` 的语义一致：这段内容不自带类型
+        BuiltBody::Text(_, None) | BuiltBody::None => {}
     }
     // API Key 放 header 的那一支同理，用 `insert` 而不是 `append`：见 `apply_auth` 的注释
     if let Some((name, value)) = header_auth_pair(&spec.auth)? {
@@ -216,8 +300,10 @@ async fn execute_inner(
     }
 
     let mut builder = client.request(method, url.clone()).headers(headers);
-    if let Some(body) = body {
-        builder = builder.body(body);
+    match built {
+        BuiltBody::None => {}
+        BuiltBody::Text(text, _) => builder = builder.body(text),
+        BuiltBody::Multipart(form) => builder = builder.multipart(form),
     }
     // Bearer / Basic 交给 reqwest：它内部已经处理好了 `Basic` 的 base64 与
     // `Bearer ` 前缀，自己拼一遍只是多一处会写错的地方
@@ -292,6 +378,23 @@ async fn execute_inner(
     };
     let (body, body_encoding) = decode_body(slice, truncated, &content_type);
 
+    // 落盘用**完整**字节（`bytes`），不是被截断的 `slice`。
+    // 导出 Excel 这类响应的体积往往就在内联上限附近，拿截断的那段存出来是个坏文件。
+    let body_file = match blobs {
+        Some(dir) => {
+            match spill_response_file(dir, &bytes, &headers_out, &final_url, body_encoding) {
+                Ok(found) => found,
+                Err(e) => {
+                    // 落盘失败**不**让这次请求失败：响应本身是好的，用户少一个下载按钮而已。
+                    // 把它升成错误会让「服务端答 200、界面报红」这种最费解的现象出现。
+                    eprintln!("[reqly] 响应落盘失败（不影响本次响应）：{e}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     Ok(HttpResponsePayload {
         status: status.as_u16(),
         status_text: status.canonical_reason().unwrap_or_default().to_string(),
@@ -306,6 +409,7 @@ async fn execute_inner(
         ttfb_ms: ttfb.as_millis() as u64,
         download_ms: total.saturating_sub(ttfb).as_millis() as u64,
         total_ms: total.as_millis() as u64,
+        body_file,
         // 占位符报告归流水线填 —— 执行层不知道模板的存在
         unresolved_placeholders: Vec::new(),
     })
@@ -454,16 +558,31 @@ fn build_headers(items: &[KeyValueItem]) -> AppResult<HeaderMap> {
     Ok(map)
 }
 
-/// 返回 `(请求体, 缺省 content-type)`。
+/// 组装好的请求体。
+///
+/// 用枚举而不是 `Option<String>`：multipart 的成品**不是字符串**
+/// （boundary 由 reqwest 现生成），而且它与文本体对 `Content-Type` 的处理正好相反
+/// —— 文本体允许被用户手写的头覆盖，multipart 必须由我们设。
+enum BuiltBody {
+    /// 没有请求体
+    None,
+    /// 一段文本 + 缺省 content-type（用户显式设了就以他为准）
+    Text(String, Option<&'static str>),
+    /// `multipart/form-data`，`Content-Type` 由 reqwest 连 boundary 一起生成
+    Multipart(reqwest::multipart::Form),
+}
+
+/// 返回组装好的请求体。
 fn build_body(
     body_type: &BodyType,
     body: &str,
-) -> AppResult<(Option<String>, Option<&'static str>)> {
-    match body_type {
-        BodyType::None => Ok((None, None)),
+    form_fields: &[KeyValueItem],
+) -> AppResult<BuiltBody> {
+    Ok(match body_type {
+        BodyType::None => BuiltBody::None,
         BodyType::Json => {
             if body.trim().is_empty() {
-                return Ok((None, None));
+                return Ok(BuiltBody::None);
             }
             // 顺手校验：JSON 写错了当场告诉用户，比等服务端回一个语焉不详的 400 强得多
             serde_json::from_str::<serde_json::Value>(body).map_err(|e| {
@@ -472,21 +591,382 @@ fn build_body(
                     format!("request body is not valid json: {e}"),
                 )
             })?;
-            Ok((Some(body.to_string()), Some("application/json")))
+            BuiltBody::Text(body.to_string(), Some("application/json"))
         }
         // GraphQL 的 body 本身就是 JSON 字符串 `{"query":"…","variables":{…}}`
-        BodyType::Graphql => Ok((Some(body.to_string()), Some("application/json"))),
-        BodyType::Urlencoded => Ok((
-            Some(body.to_string()),
-            Some("application/x-www-form-urlencoded"),
-        )),
-        BodyType::Raw => Ok((Some(body.to_string()), Some("text/plain; charset=utf-8"))),
-        // 这两个要读磁盘 / 拼 multipart 流，涉及文件选择器（design.md 排在 P8）。
+        BodyType::Graphql => BuiltBody::Text(body.to_string(), Some("application/json")),
+        BodyType::Urlencoded => {
+            BuiltBody::Text(body.to_string(), Some("application/x-www-form-urlencoded"))
+        }
+        BodyType::Raw => BuiltBody::Text(body.to_string(), Some("text/plain; charset=utf-8")),
+        BodyType::Form => {
+            // 字段以 `form_fields` 为准；它空而 `body` 非空时说明这份内容来自
+            // 只认 `body` 的写入方（MCP / CLI / 导入器），退回按 `k=v&k=@路径` 解析。
+            let owned;
+            let fields: &[KeyValueItem] = if form_fields.is_empty() {
+                owned = form_fields_from_body(body);
+                &owned
+            } else {
+                form_fields
+            };
+
+            // 空表单：与空 JSON body 一样，什么都不发 —— 发一个只有结束边界的
+            // 空 multipart 只会让服务端回一个莫名其妙的 400。
+            // 计数在这里做是因为 `Form` 没有公开的读取接口。
+            let usable = fields.iter().any(|f| f.enabled && !f.key.trim().is_empty());
+            if usable {
+                BuiltBody::Multipart(build_multipart(fields)?)
+            } else {
+                BuiltBody::None
+            }
+        }
+        // 要读磁盘上的一个文件当整个请求体，涉及文件选择器（design.md 排在 P8）。
         // 明确报「未实现」，而不是把一段 JSON 当文件内容发出去。
-        BodyType::Form => Err(AppError::NotImplemented {
-            feature: "multipart",
-        }),
-        BodyType::Binary => Err(AppError::NotImplemented { feature: "binary" }),
+        BodyType::Binary => return Err(AppError::NotImplemented { feature: "binary" }),
+    })
+}
+
+/// 拼 multipart。文件字段在这一步才真正读盘 —— 编辑期只存路径。
+fn build_multipart(fields: &[KeyValueItem]) -> AppResult<reqwest::multipart::Form> {
+    let mut form = reqwest::multipart::Form::new();
+
+    for field in fields
+        .iter()
+        .filter(|f| f.enabled && !f.key.trim().is_empty())
+    {
+        let name = field.key.trim().to_string();
+
+        let Some(path) = field
+            .file
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        else {
+            form = form.text(name, field.value.clone());
+            continue;
+        };
+
+        let bytes = std::fs::read(path).map_err(|e| AppError::InvalidInput {
+            field: "formFields",
+            reason: format!("文件字段「{name}」读不出来：{path}（{e}）"),
+        })?;
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+
+        let mut part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.clone());
+        // 显式带上 Content-Type：.NET / Java 那几套 multipart 解析器是**按 part 的
+        // Content-Type 判断「这是不是文件」的**，缺了它有些框架会当成普通表单值，
+        // 表现是服务端说「文件字段为空」而请求明明带着几百 KB。
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(mime_for(&file_name)));
+        part = part.headers(headers);
+
+        form = form.part(name, part);
+    }
+
+    Ok(form)
+}
+
+/// `k=v&k=@C:\path\a.xlsx` → 字段行。
+///
+/// `@` 前缀是 curl `-F name=@file` 的写法（导入器与 MCP 都从那条路径进来）。
+/// 只把这一个前缀当文件标记，其余原样 —— 值里出现 `@`（邮箱、`@handler`）不受影响。
+///
+/// **只服务 multipart**：urlencoded 那边值里的 `@` 很常见（`email=@qq.com`），
+/// 按文件解释会让那行在发送时被当成路径去读盘。
+fn form_fields_from_body(body: &str) -> Vec<KeyValueItem> {
+    let text = body.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    url::form_urlencoded::parse(text.as_bytes())
+        .map(|(key, value)| {
+            let (key, value) = (key.into_owned(), value.into_owned());
+            match value.strip_prefix('@') {
+                Some(path) if !path.trim().is_empty() => KeyValueItem {
+                    key,
+                    value: String::new(),
+                    enabled: true,
+                    desc: None,
+                    file: Some(path.to_string()),
+                },
+                _ => KeyValueItem::new(key, value),
+            }
+        })
+        .collect()
+}
+
+/// 按扩展名给个 Content-Type。认不出的一律 `application/octet-stream` ——
+/// 猜错比不猜更坏（服务端会按错误类型去解析内容）。
+fn mime_for(file_name: &str) -> &'static str {
+    let ext = file_name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/vnd.microsoft.icon",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "html" | "htm" => "text/html; charset=utf-8",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "7z" => "application/x-7z-compressed",
+        "rar" => "application/vnd.rar",
+        "tar" => "application/x-tar",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+// ---------------------------------------------------------------
+// 「这是一个文件」的响应：落盘 + 命名
+// ---------------------------------------------------------------
+
+/// 临时区里最多留几份。超了按修改时间删最旧的。
+///
+/// 为什么要上限：每发一次导出类请求就落一份文件，不设限就是慢性占盘 ——
+/// 而用户真正会去点「保存」的只是最后那几次。
+const KEEP_BLOBS: usize = 24;
+
+/// 把一份「看起来是文件」的响应落到临时区。
+///
+/// 返回 `Ok(None)` = 判断下来这不是文件响应（绝大多数请求）；
+/// 返回 `Err` = 磁盘写不进去，调用方按「没有下载入口」处理即可。
+fn spill_response_file(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    headers: &[HttpHeader],
+    final_url: &str,
+    encoding: BodyEncoding,
+) -> std::io::Result<Option<BodyFile>> {
+    let content_type = content_type_of(headers);
+    if !looks_like_file(headers, &content_type, encoding) {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(dir)?;
+
+    let name = suggested_file_name(headers, final_url, &content_type);
+    // 前缀一个时间戳：同一个接口导出两次不该互相覆盖
+    // （覆盖掉一份刚生成、用户可能正在看的文件是没法挽回的）
+    let path = dir.join(format!("{}-{name}", stamp()));
+    std::fs::write(&path, bytes)?;
+    prune_blobs(dir, KEEP_BLOBS);
+
+    Ok(Some(BodyFile {
+        path: path.display().to_string(),
+        name,
+        size: bytes.len() as u64,
+    }))
+}
+
+/// 这份响应该不该给「保存到文件」。
+///
+/// 三个判据取并集，且**都是「是」的充分条件**：
+/// * 解不出 UTF-8（`Binary`）—— 内容本来就不是文本；
+/// * `Content-Disposition: attachment` —— 服务端明说了这是下载；
+/// * Content-Type 落在二进制清单里 —— 导出接口的常规形态。
+///
+/// 为什么不单看第一条：CSV / 纯文本导出是合法 UTF-8，会被当成文本渲染，
+/// 而用户要的是文件。反过来只看 Content-Type 又会漏掉那些把 Excel 标成
+/// `text/plain` 的老接口。
+fn looks_like_file(headers: &[HttpHeader], content_type: &str, encoding: BodyEncoding) -> bool {
+    if encoding == BodyEncoding::Binary {
+        return true;
+    }
+
+    if headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("content-disposition")
+            && h.value.to_ascii_lowercase().contains("attachment")
+    }) {
+        return true;
+    }
+
+    const BINARY_TYPES: [&str; 15] = [
+        "application/octet-stream",
+        "application/zip",
+        "application/pdf",
+        "application/gzip",
+        "application/x-7z-compressed",
+        "application/vnd.rar",
+        "application/x-tar",
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-",
+        "image/",
+        "audio/",
+        "video/",
+        "font/",
+    ];
+    BINARY_TYPES.iter().any(|t| content_type.starts_with(t))
+}
+
+/// 建议的文件名：`Content-Disposition` → URL 末段 → `download-<时间戳>.<扩展名>`。
+fn suggested_file_name(headers: &[HttpHeader], final_url: &str, content_type: &str) -> String {
+    if let Some(name) = headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("content-disposition"))
+        .and_then(|h| filename_from_disposition(&h.value))
+    {
+        return name;
+    }
+
+    if let Some(name) = filename_from_url(final_url) {
+        return name;
+    }
+
+    format!("download-{}.{}", stamp(), extension_for(content_type))
+}
+
+/// 从 `Content-Disposition` 里取文件名。
+///
+/// 两种写法都要认：`filename*=UTF-8''%E6%8A%A5%E8%A1%A8.xlsx`（RFC 5987，
+/// 中文名走这条）与 `filename="report.xlsx"`。**先看带星号的** ——
+/// 带星号的那条是扩展，服务端同时给两条时它是更准的那个。
+fn filename_from_disposition(value: &str) -> Option<String> {
+    for param in value.split(';').skip(1) {
+        let param = param.trim();
+        let Some(rest) = param.strip_prefix("filename*=") else {
+            continue;
+        };
+        // `UTF-8''<百分号编码>`
+        let encoded = rest.splitn(3, '\'').nth(2).unwrap_or("");
+        let decoded = decode_percent(encoded);
+        if let Some(name) = sanitize_file_name(&decoded) {
+            return Some(name);
+        }
+    }
+
+    for param in value.split(';').skip(1) {
+        let param = param.trim();
+        let Some(rest) = param.strip_prefix("filename=") else {
+            continue;
+        };
+        if let Some(name) = sanitize_file_name(rest.trim().trim_matches('"')) {
+            return Some(name);
+        }
+    }
+
+    None
+}
+
+/// URL 的最后一段。要求带扩展名 —— `…/export` 这种取出来的「名字」
+/// 存到磁盘上是个没有类型的文件，不如退回带时间戳的兜底名。
+fn filename_from_url(url: &str) -> Option<String> {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let last = without_query.rsplit('/').find(|s| !s.is_empty())?;
+    let decoded = decode_percent(last);
+    if !decoded.contains('.') {
+        return None;
+    }
+    sanitize_file_name(&decoded)
+}
+
+/// 洗掉路径分隔符与 Windows 不允许的字符。
+///
+/// 这不是洁癖：`filename` 来自服务端，`../` 能把它变成往任意目录写文件。
+fn sanitize_file_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    // Windows 上结尾的点和空格会被静默吃掉，留下一个打不开的文件
+    let cleaned = cleaned.trim().trim_matches(['.', ' ']).to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn decode_percent(text: &str) -> String {
+    url::form_urlencoded::parse(text.replace('+', " ").as_bytes())
+        .map(|(k, _)| k.into_owned())
+        .next()
+        .unwrap_or_else(|| text.to_string())
+}
+
+fn extension_for(content_type: &str) -> &'static str {
+    let ct = content_type.split(';').next().unwrap_or("").trim();
+    match ct {
+        "application/pdf" => "pdf",
+        "application/zip" | "application/x-zip-compressed" => "zip",
+        "application/gzip" => "gz",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "text/csv" => "csv",
+        "text/plain" => "txt",
+        "text/html" => "html",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        _ => "bin",
+    }
+}
+
+/// 文件名前缀用的时间戳。用本地时间 —— 它是给用户认的，不是给机器比大小的。
+fn stamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S%3f").to_string()
+}
+
+/// 只保留最近的 `keep` 份，其余按修改时间从旧到新删掉。删不掉就算了 ——
+/// 临时区清理失败不该影响任何一次发送。
+fn prune_blobs(dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some((meta.modified().ok()?, entry.path()))
+        })
+        .collect();
+
+    if files.len() <= keep {
+        return;
+    }
+
+    files.sort_by_key(|(time, _)| *time);
+    for (_, path) in files.iter().take(files.len() - keep) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -854,6 +1334,7 @@ mod tests {
             auth: AuthConfig::None,
             settings: RequestSettings::default(),
             folder_id: None,
+            form_fields: Vec::new(),
         }
     }
 
@@ -971,6 +1452,7 @@ mod tests {
                 value: "x".into(),
                 enabled: false,
                 desc: None,
+                file: None,
             },
             KeyValueItem::new("", "empty-key-should-be-ignored"),
         ];
@@ -1295,16 +1777,307 @@ mod tests {
         assert_eq!(err.code(), codes::BODY_NOT_JSON, "实际：{err}");
     }
 
+    /// 只剩 `binary` 还没实现 —— multipart 从这一版起是真的发出去了。
     #[tokio::test]
-    async fn multipart_and_binary_are_reported_as_not_implemented() {
+    async fn binary_body_is_reported_as_not_implemented() {
+        let client = client();
+        let mut s = spec("POST", "http://127.0.0.1:1/".into());
+        s.body_type = BodyType::Binary;
+
+        // 明确报「未实现」，而不是把一段 JSON 当文件内容发出去
+        let err = execute(&client, &s).await.unwrap_err();
+        assert_eq!(err.code(), codes::NOT_IMPLEMENTED, "实际：{err}");
+    }
+
+    // ============================================================
+    // multipart（`body_type = form`）
+    // ============================================================
+
+    fn field(key: &str, value: &str) -> KeyValueItem {
+        KeyValueItem::new(key.to_string(), value.to_string())
+    }
+
+    /// 文件行：`value` 留空、`file` 是磁盘路径（与前端 `FormFieldTable` 存的一致）
+    fn file_field(key: &str, path: &str) -> KeyValueItem {
+        KeyValueItem {
+            file: Some(path.to_string()),
+            ..field(key, "")
+        }
+    }
+
+    /// 一次性临时目录，`Drop` 时整个删掉。
+    /// 名字带 pid + 纳秒：测试并行跑，同名目录会互相踩。
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟应当在 unix epoch 之后")
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("reqly-blob-{tag}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("建临时目录");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 从请求头里取出 multipart 的 boundary（头名大小写不保证）
+    fn boundary_of(raw: &str) -> String {
+        let head = raw
+            .split_once("\r\n\r\n")
+            .expect("请求应当有头")
+            .0
+            .to_lowercase();
+        head.lines()
+            .find_map(|l| l.split("boundary=").nth(1))
+            .expect("multipart 应当带 boundary")
+            .trim()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn form_body_is_sent_as_multipart_with_a_generated_boundary() {
+        let server = serve_once("200 OK", "text/plain", "ok");
         let client = client();
 
-        for body_type in [BodyType::Form, BodyType::Binary] {
-            let mut s = spec("POST", "http://127.0.0.1:1/".into());
-            s.body_type = body_type;
-            let err = execute(&client, &s).await.unwrap_err();
-            assert_eq!(err.code(), codes::NOT_IMPLEMENTED, "实际：{err}");
-        }
+        let mut s = spec("POST", server.url("/upload"));
+        s.body_type = BodyType::Form;
+        s.form_fields = vec![field("name", "reqly"), field("note", "a b")];
+
+        execute(&client, &s).await.expect("multipart 应当发得出去");
+
+        let raw = server.request();
+        let head = raw
+            .split_once("\r\n\r\n")
+            .expect("请求应当有头")
+            .0
+            .to_lowercase();
+
+        // boundary 由 reqwest 现生成。用户手写的那条 Content-Type 必须被清掉 ——
+        // 他自己生成不出对的 boundary，两条头同时发出去服务端只会挑一条
+        assert_eq!(
+            head.matches("content-type:").count(),
+            1,
+            "Content-Type 只该有一条：{head}"
+        );
+
+        let boundary = boundary_of(&raw);
+        let body = body_of(&raw);
+        assert!(body.contains("name=\"name\""), "实际：{body}");
+        assert!(body.contains("reqly"), "实际：{body}");
+        // 值原样进去，不做 urlencoded 编码 —— multipart 不是 `k=v&…`
+        assert!(body.contains("a b"), "实际：{body}");
+        // 收尾边界在：结构是完整的，服务端不会读到一半卡住
+        assert!(
+            body.trim_end().ends_with(&format!("--{boundary}--")),
+            "实际：{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_file_field_is_read_from_disk_with_name_and_part_type() {
+        let scratch = Scratch::new("upload");
+        let path = scratch.0.join("note.txt");
+        std::fs::write(&path, "file-bytes-123").expect("写测试文件");
+
+        let server = serve_once("200 OK", "text/plain", "ok");
+        let client = client();
+
+        let mut s = spec("POST", server.url("/upload"));
+        s.body_type = BodyType::Form;
+        s.form_fields = vec![file_field("doc", &path.to_string_lossy())];
+
+        execute(&client, &s)
+            .await
+            .expect("带文件的 multipart 应当发得出去");
+
+        let raw = server.request();
+        let lower = raw.to_lowercase();
+
+        assert!(lower.contains("filename=\"note.txt\""), "实际：{raw}");
+        // part 的 Content-Type 必须显式带上：.NET / Java 那几套解析器靠它判断
+        // 「这是不是文件」，缺了会当成普通表单值，报「文件字段为空」
+        assert!(
+            lower.contains("content-type: text/plain; charset=utf-8"),
+            "实际：{raw}"
+        );
+        assert!(raw.contains("file-bytes-123"), "实际：{raw}");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_upload_file_is_a_typed_input_error() {
+        let client = client();
+        let mut s = spec("POST", "http://127.0.0.1:1/".into());
+        s.body_type = BodyType::Form;
+        s.form_fields = vec![file_field("doc", r"C:\reqly\definitely\not\here\nope.txt")];
+
+        // 路径填错是**填错了**，不是网络问题。分类错了用户会去查网络和超时
+        let err = execute(&client, &s).await.unwrap_err();
+        assert_eq!(err.code(), codes::INVALID_INPUT, "实际：{err}");
+    }
+
+    #[tokio::test]
+    async fn form_body_string_is_parsed_when_there_are_no_field_rows() {
+        let server = serve_once("200 OK", "text/plain", "ok");
+        let client = client();
+
+        // 只写 `body` 的写入方（MCP / CLI / 导入器）走这条回退路径：
+        // 没有 `form_fields` 时按 `k=v&k=@路径` 解析，而不是发一个空表单
+        let mut s = spec("POST", server.url("/upload"));
+        s.body_type = BodyType::Form;
+        s.body = "name=reqly&note=hello%20there".into();
+
+        execute(&client, &s).await.expect("应当发出 multipart");
+
+        let body = body_of(&server.request()).to_string();
+        assert!(body.contains("name=\"name\""), "实际：{body}");
+        assert!(body.contains("reqly"), "实际：{body}");
+        // 百分号编码在解析这一步解回来 —— 服务端要看到的是原文
+        assert!(body.contains("hello there"), "实际：{body}");
+    }
+
+    #[tokio::test]
+    async fn an_all_blank_form_sends_no_body_at_all() {
+        let server = serve_once("200 OK", "text/plain", "ok");
+        let client = client();
+
+        let mut s = spec("POST", server.url("/post"));
+        s.body_type = BodyType::Form;
+        // 键名为空 = 这一行没写。发一个只有结束边界的空 multipart
+        // 只会换来一个莫名其妙的 400
+        s.form_fields = vec![field("", "leftover")];
+
+        execute(&client, &s).await.expect("空表单不该报错");
+        assert_eq!(body_of(&server.request()), "", "空表单不该发任何内容");
+    }
+
+    // ============================================================
+    // 「文件型」响应落盘
+    // ============================================================
+
+    /// 带 `Content-Disposition` 的响应（`raw_response` 不接受附加头）
+    fn attachment_response(content_type: &str, disposition: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: {content_type}\r\n\
+             Content-Disposition: {disposition}\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn an_attachment_response_is_spilled_with_its_full_bytes() {
+        let scratch = Scratch::new("spill");
+        let client = client();
+        let server = serve(vec![attachment_response(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "attachment; filename=\"report.xlsx\"",
+            "XLSX-BYTES",
+        )]);
+
+        let out = execute_with_blobs(
+            &client,
+            &spec("GET", server.url("/export")),
+            None,
+            &scratch.0,
+        )
+        .await
+        .expect("应当成功");
+
+        let file = out.body_file.expect("attachment 响应应当落盘");
+        assert_eq!(file.name, "report.xlsx");
+        assert_eq!(file.size, 10);
+        assert_eq!(
+            std::fs::read(&file.path).expect("读回落盘的文件"),
+            b"XLSX-BYTES"
+        );
+    }
+
+    /// CSV 是合法 UTF-8，但服务端明说了这是下载 —— 两条信息各管各的
+    #[tokio::test]
+    async fn a_utf8_csv_export_still_gets_a_download_entry() {
+        let scratch = Scratch::new("spill-csv");
+        let client = client();
+        let server = serve(vec![attachment_response(
+            "text/csv; charset=utf-8",
+            "attachment; filename=export.csv",
+            "a,b\n1,2\n",
+        )]);
+
+        let out = execute_with_blobs(
+            &client,
+            &spec("GET", server.url("/export")),
+            None,
+            &scratch.0,
+        )
+        .await
+        .expect("应当成功");
+
+        // 内容是文本 ⇒ 界面上照样能展开预览
+        assert_eq!(out.body_encoding, BodyEncoding::Text);
+        // 但**同时**有下载入口。只看「解不解得出 UTF-8」会把 CSV 导出漏掉
+        let file = out.body_file.expect("attachment 响应应当落盘");
+        assert_eq!(file.name, "export.csv");
+    }
+
+    #[tokio::test]
+    async fn a_plain_json_response_is_never_spilled() {
+        let scratch = Scratch::new("spill-none");
+        let client = client();
+        let server = serve_once("200 OK", "application/json", r#"{"ok":true}"#);
+
+        let out = execute_with_blobs(&client, &spec("GET", server.url("/api")), None, &scratch.0)
+            .await
+            .expect("应当成功");
+
+        assert!(out.body_file.is_none(), "JSON 不该产生下载入口");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_response_still_spills_its_complete_bytes() {
+        let scratch = Scratch::new("spill-truncated");
+        let client = client();
+
+        let payload = "A".repeat(4096);
+        let server = serve(vec![format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{payload}",
+            payload.len()
+        )]);
+
+        // 内联上限压到 64 字节。导出类的体积往往正好卡在 8MB 那条线上，
+        // 拿被截断的那一段存出来就是个坏文件
+        let out = super::execute_inner(
+            &client,
+            &spec("GET", server.url("/big")),
+            64,
+            None,
+            Some(&scratch.0),
+        )
+        .await
+        .expect("应当成功");
+
+        assert!(out.truncated, "前提：这个响应应当被截断");
+        assert_eq!(out.body.len(), 64);
+
+        let file = out.body_file.expect("octet-stream 应当落盘");
+        assert_eq!(file.size, 4096);
+        assert_eq!(
+            std::fs::read(&file.path).expect("读回落盘的文件").len(),
+            4096,
+            "落盘的必须是完整字节，不是被截断的那一段"
+        );
     }
 
     #[tokio::test]

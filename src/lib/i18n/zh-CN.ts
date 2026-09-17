@@ -174,7 +174,8 @@ export const zhCN = {
   "response.copyBody": "复制响应体",
   "response.saveToFile": "保存到文件",
   "response.emptyBody": "响应体为空",
-  "response.truncated": "响应过大，仅显示前 {size}，完整内容已存到文件",
+  "response.truncated": "响应过大，仅显示前 {size}",
+  "response.truncatedSaved": "响应过大，仅显示前 {size}；完整内容已存到文件",
   "response.timeline.dns": "DNS",
   "response.timeline.connect": "连接",
   "response.timeline.tls": "TLS",
@@ -264,8 +265,9 @@ export const zhCN = {
 
   // ---- Token 来源（P4） ----
   //
-  // 「获取 Token」与「刷新 Token」在本产品里是**同一个接口**，所以表单上只有
-  // 一个「获取 / 刷新 Token 的接口」，没有第二个请求可配。
+  // 「获取 Token」与「刷新 Token」在本产品里是**同一个接口**：Token 一过期就
+  // 重新调一遍取 Token 的接口，没有「拿 refresh_token 续期」这条路径 ——
+  // 所以表单上既没有第二个请求，也没有 refresh_token 提取路径。
   // 分类也不再由用户选：固定是系统分类「token刷新」（后端启动时建好，
   // 不可删除），见 `folder::ensure_system_folder`。
   "token.refreshTitle": "Token 刷新",
@@ -275,24 +277,23 @@ export const zhCN = {
   // 仍在 `SaveDraftDialog` 里当「保存到哪个分类」的字段名用
   "token.folder": "所属分类",
   "token.folderHint": "这个分类及其子分类下的请求都能用它",
-  "token.fetchRequest": "获取 / 刷新 Token 的接口",
-  "token.fetchRequestHint": "选一个登录或换 Token 的接口。获取和刷新走的是同一个，只配这一次",
+  "token.fetchRequest": "获取 Token 的接口",
+  "token.fetchRequestHint": "Token 过期时重新调它换一个，不用另配刷新接口",
   "token.pickRequest": "选择一个接口…",
   "token.noRequestInFolder": "「token刷新」分类下还没有接口",
   "token.createFetchRequest": "在该分类下新建接口",
   "token.fetchRequestGone": "（这个接口已经被删除了）",
   "token.extractTitle": "从响应里取什么",
   "token.accessPath": "access_token 路径",
-  "token.refreshPath": "refresh_token 路径",
-  "token.refreshPathHint": "留空 = 这个接口不返回 refresh_token",
   "token.expiresInPath": "过期时间路径",
-  "token.expiresInPathHint": "留空 = 永不过期（不会自动刷新）",
-  "token.expiresInUnit": "过期时间单位",
+  // 说明走 placeholder：留空的时候它最该出现，而留空时输入框里正好是空的
+  "token.expiresInPathPlaceholder": "留空 = 永不过期",
+  "token.expiresInUnit": "单位",
   "token.unit.seconds": "秒（相对）",
   "token.unit.millis": "毫秒（相对）",
   "token.unit.absolute": "绝对时间（Unix 秒）",
-  "token.autoRefresh": "自动刷新",
-  "token.autoRefreshHint": "关掉后不会偷偷用过期 Token，过期时直接报错",
+  "token.autoRefresh": "自动重新获取",
+  "token.autoRefreshHint": "关掉后过期直接报错，不会拿旧 Token 硬发",
   "token.skew": "提前量（秒）",
   "token.skewHint": "在过期前这么多秒就当成过期，避开时钟误差与网络延迟",
   "token.effective": "生效的 Token 来源",
@@ -629,10 +630,17 @@ export const zhCN = {
   "kv.empty": "还没有内容",
   "kv.enable": "启用此行",
   "kv.remove": "删除此行",
+  // multipart 专有的那一列（见 `FormFieldTable`）
+  "kv.fieldType": "类型",
+  "kv.fieldTypeText": "文本",
+  "kv.fieldTypeFile": "文件",
+  "kv.filePlaceholder": "没有选择文件",
+  "kv.pickFile": "选择文件",
 
   "request.bodyPlaceholder": "在这里粘贴或输入请求体…",
   "request.bodyJsonHint": "发送前会在本地校验一次 JSON，不合法的写法不用白跑一趟网络",
   "request.bodyUrlencodedHint": "这些键值对会拼成 a=1&b=2 发出去，{{…}} 占位符原样保留",
+  "request.bodyFormHint": "文件字段填的是本机路径，发送时才读盘；表单边界由 reqly 生成",
   "request.placeholderHint": "{{…}} 是占位符，发送前解析",
   "request.unsupportedBody": "{type} 暂未支持，P2 只做 JSON / 文本",
   "request.sendShortcut": "发送（Ctrl+Enter）",
@@ -641,7 +649,14 @@ export const zhCN = {
   "response.noResponse": "还没有响应",
   "response.noResponseHint": "按 Ctrl+Enter 发送当前请求",
   "response.binaryBody": "二进制内容，共 {size}",
-  "response.binaryHint": "无法当文本展示；用「保存到文件」导出后再查看",
+  "response.binaryHint": "内容不是文本，也没能存成文件（临时区写不进去）",
+  // 文件型响应（导出 Excel / CSV 这类）。执行时完整字节已经落在后端临时区，
+  // 这里只负责把它另存到用户选的位置
+  "response.fileHint": "这是文件流，界面里不展开；存下来用本机程序打开更合适",
+  "response.saveFailed": "保存失败",
+  "response.savedTo": "已保存到 {path}",
+  "response.openFolder": "打开所在目录",
+  "response.backToFile": "回到文件下载",
   "response.lossyBody": "内容里有不合法的字符，已用替换符显示",
   "response.headersEmpty": "响应头为空",
   "response.timelinePhase": "阶段",

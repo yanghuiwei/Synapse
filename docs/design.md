@@ -337,20 +337,19 @@ CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT 
 
 两级都空才算「没配 Token」。所以请求挂在哪、有没有归档，`{{token.access}}` 都能解析。
 
-**获取 Token 与刷新 Token 是同一件事**：只有一个 `fetch_request_id`，缓存失效就打它，拿回来的 access / refresh 一起写进 `token_cache`。不再单独配「刷新接口」。
+**获取 Token 与刷新 Token 是同一件事**：只有一个 `fetch_request_id`，缓存失效就打它，拿回来的 access 写进 `token_cache`。不单独配「刷新接口」，也**不问用户要 refresh_token 的路径** —— 没有「拿 refresh_token 去换新 Token」这条路径（表里的 `refresh_path` 列还在，老配置照原样读出来，界面上没有它的位置）。
 
-**配置界面**（Auth 面板 → Token 源 选项卡，**页内直配，不弹窗**）：
+**配置界面**（Auth 面板 → Token 源 选项卡，**页内直配，不弹窗**）。字段按亲疏排成三行，整页在请求面板的默认高度里**不用下拉**：
 
 ```
-获取 / 刷新 Token 的接口  [ POST /oauth/token  ▾ ] ← 工作区里所有请求
-  access_token  路径  [ $.data.accessToken   ]
-  refresh_token 路径  [ $.data.refreshToken  ]
-  有效期        路径  [ $.data.expiresIn     ]  单位 [ 秒 ▾ ]
-提前刷新        [ 30 ] 秒
-[✓] 自动刷新
-[ 保存 ]  [ 取消 ]
+名称 [ 内网 OAuth ]      获取 Token 的接口（重新调它换新） [ POST /oauth/token ▾ ]
+┌ 从响应里取什么 ──────────────────────────────────────────────────────┐
+│ access_token 路径 [ $.data.accessToken ]  过期时间路径 [ 留空 = 永不过期 ]  单位 [ 秒 ▾ ] │
+└──────────────────────────────────────────────────────────────────┘
+────────────────────────────────────────────────────────────────────
+[✓] 自动重新获取   提前量（秒） [ 30 ]        关掉后过期直接报错，不会拿旧 Token 硬发
 
-当前状态：● 有效  剩余 47 分 12 秒      [ 手动刷新 ]
+当前状态：● 有效  剩余 47 分 12 秒      [ 手动刷新 ]          [ 取消 ] [ 保存 ]
 ```
 
 **系统分类的约束**（三层防护，缺一层都会漏）：

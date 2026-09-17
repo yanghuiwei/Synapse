@@ -1,10 +1,12 @@
-import { Copy, TextWrap } from "lucide-react";
+import { Copy, FileDown, FolderOpen, TextWrap } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { cn } from "@/lib/cn";
 import { formatBytes, formatMs } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
+import * as ipc from "@/lib/ipc";
 import {
   HIGHLIGHT_LIMIT,
   JSON_TOKEN_CLASS,
@@ -12,8 +14,8 @@ import {
   tokenizeJson,
   tryPrettyJson,
 } from "@/lib/json";
-import type { HttpResponsePayload } from "@/lib/types";
-import { IconButton } from "@/features/ui/Button";
+import type { BodyFile, HttpResponsePayload, SavedFile } from "@/lib/types";
+import { Button, IconButton } from "@/features/ui/Button";
 
 export type ResponseTab = "body" | "headers" | "cookies" | "timeline";
 
@@ -49,6 +51,115 @@ function CopyButton({ text }: { text: string }) {
 // 各 Tab
 // ---------------------------------------------------------------
 
+/**
+ * 「文件型」响应的下载卡。
+ *
+ * 后端在执行时就把**完整字节**落到了自己的临时区（见 `http::execute` 的
+ * `spill_response_file`），所以这里只负责把它另存到用户选的位置 ——
+ * 界面全程不用碰内容本身。
+ *
+ * 为什么不在这里「顺便」直接用 base64 过 IPC：一个 8MB 的 Excel 过一趟
+ * 序列化不但慢，还会在渲染进程里留一份副本。临时区那一跳把这两件事都省了。
+ */
+function FileBodyCard({
+  file,
+  onPreview,
+  className,
+}: {
+  file: BodyFile;
+  /** `null` = 这份内容本来就不是文本（真二进制），没有可预览的东西 */
+  onPreview: (() => void) | null;
+  className?: string;
+}) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<SavedFile | null>(null);
+  const [err, setErr] = useState<ipc.IpcError | null>(null);
+
+  const save = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const result = await ipc.files.saveResponseBody(file.path, file.name);
+      // `null` = 用户在对话框里取消了。取消是正常操作，不该弹错误
+      if (result !== null) setSaved(result);
+    } catch (e) {
+      setErr(ipc.toIpcError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reveal = async () => {
+    if (saved === null || !ipc.isTauriRuntime()) return;
+    try {
+      await revealItemInDir(saved.path);
+    } catch (e) {
+      // 打不开目录不影响「已经存下来了」这个事实，留个控制台线索就够
+      console.warn("[reqly] 打开保存目录失败：", e);
+    }
+  };
+
+  return (
+    <div
+      className={cn(
+        "flex h-full flex-col items-center justify-center gap-3 p-6 text-center",
+        className,
+      )}
+    >
+      <FileDown size={26} strokeWidth={1.6} aria-hidden className="text-ink-faint" />
+
+      {/* 文件名是这张卡上最有用的信息 —— 用户靠它确认「导出的对不对」 */}
+      <div className="max-w-full min-w-0">
+        <p className="truncate font-mono text-[13px] text-ink" title={file.name}>
+          {file.name}
+        </p>
+        <p className="mt-0.5 text-xs text-ink-faint">{formatBytes(file.size)}</p>
+      </div>
+
+      <p className="max-w-[420px] text-[11px] leading-relaxed text-ink-faint">
+        {t("response.fileHint")}
+      </p>
+
+      <div className="flex items-center gap-1.5">
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy}
+          onClick={() => void save()}
+          icon={<FileDown size={12} strokeWidth={2.2} />}
+        >
+          {t("response.saveToFile")}
+        </Button>
+
+        {onPreview !== null ? (
+          <Button size="sm" variant="ghost" onClick={onPreview}>
+            {t("response.preview")}
+          </Button>
+        ) : null}
+      </div>
+
+      {err !== null ? (
+        <p className="max-w-[420px] text-[11px] text-err">
+          {t("response.saveFailed")}：{err.localized}
+        </p>
+      ) : null}
+
+      {saved !== null ? (
+        <div className="flex w-full max-w-[460px] items-center gap-1.5 rounded-sm border border-line bg-canvas-subtle px-2 py-1.5">
+          {/* 路径要能选中复制 —— 用户下一步往往就是把它粘到别处 */}
+          <p className="min-w-0 flex-1 select-text text-left font-mono text-[10px] break-all text-ink-muted">
+            {t("response.savedTo", { path: saved.path })}
+          </p>
+          <IconButton size="sm" label={t("response.openFolder")} onClick={() => void reveal()}>
+            <FolderOpen size={12} strokeWidth={2.2} />
+          </IconButton>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function BodyView({
   response,
   className,
@@ -60,7 +171,10 @@ function BodyView({
   /** 默认给「美化」；用户点了原文之后记住选择 */
   const [raw, setRaw] = useState(false);
   const [wrap, setWrap] = useState(true);
+  /** 文件型响应默认不展开文本；能展开的（CSV 这类）由用户自己点进来 */
+  const [preview, setPreview] = useState(false);
 
+  const file = response.bodyFile;
   const tooBig = response.bodySize > PRETTY_LIMIT;
   const pretty = useMemo(
     () => (raw || tooBig ? null : tryPrettyJson(response.body)),
@@ -74,6 +188,21 @@ function BodyView({
     [highlight, text],
   );
 
+  // 文件型响应默认给下载卡：服务端标了 `attachment`、或者内容根本不是文本时，
+  // 用户要的是那个文件，不是一块乱码。但 CSV / 纯文本导出确实还读得出来，
+  // 那就留一个「预览」入口 —— 小文件想扫一眼是很常见的需求。
+  if (file !== undefined && !preview) {
+    return (
+      <FileBodyCard
+        file={file}
+        onPreview={response.bodyEncoding === "binary" ? null : () => setPreview(true)}
+        className={className}
+      />
+    );
+  }
+
+  // 走到这里只可能是「文件型但后端没落上盘」（磁盘写不进去）——
+  // 那时没有可下载的东西，只能把「为什么看不到内容」说清楚
   if (response.bodyEncoding === "binary") {
     return (
       <div className={cn("flex h-full flex-col items-center justify-center gap-1.5 p-6 text-center", className)}>
@@ -120,6 +249,18 @@ function BodyView({
           </span>
         ) : null}
 
+        {file !== undefined ? (
+          // 从预览回到下载卡。用图标而不是文字：这一行已经挤了三个按钮
+          <IconButton
+            size="sm"
+            label={t("response.backToFile")}
+            onClick={() => setPreview(false)}
+            className="text-brand"
+          >
+            <FileDown size={13} strokeWidth={2} />
+          </IconButton>
+        ) : null}
+
         <IconButton
           size="sm"
           label={t("response.wrap")}
@@ -134,7 +275,10 @@ function BodyView({
 
       {response.truncated ? (
         <p className="shrink-0 border-b border-line bg-warn/8 px-2.5 py-1 text-[11px] text-warn">
-          {t("response.truncated", { size: formatBytes(response.body.length) })}
+          {/* 「已存到文件」这半句只在真存下来了的时候说 —— 没有它就说得像有 */}
+          {t(file !== undefined ? "response.truncatedSaved" : "response.truncated", {
+            size: formatBytes(response.body.length),
+          })}
         </p>
       ) : null}
 
