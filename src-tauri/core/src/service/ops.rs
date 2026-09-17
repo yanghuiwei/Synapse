@@ -50,8 +50,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{codes, AppError, AppResult};
+use crate::http::token::remaining_seconds;
 use crate::http::{HttpResponsePayload, Pipeline, RequestSpec};
 use crate::loadtest::{engine, LoadtestConfig, LoadtestDeps};
+use crate::redact::MASK;
 use crate::service::collection::ensure_usable_folder;
 use crate::service::import::{import_into_folder, Conflict, ImportLabels, ImportSource};
 use crate::service::loadtest::{discard_run, persist_outcome, stored_run_config};
@@ -72,29 +74,6 @@ use crate::AppState;
 /// 它的输出是文件或管道，而 MCP 的 stdout 是一条共享的 JSON-RPC 通道，
 /// 两者的约束本来就不一样。
 pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
-
-/// 敏感值的打码结果，与 design.md §8.3 写的字符一致。
-const MASK: &str = "••••";
-
-/// 响应头里默认打码的那些（小写字面量比较）。
-///
-/// design.md §8.3 只点名了 `set-cookie` 与 `authorization`，但**照字面做只防了一半**：
-/// 真实接口里 `x-api-key` / `x-auth-token` 这类自定义头与 `Authorization` 完全等价，
-/// 漏掉它们，凭据照样进 AI 的上下文。
-const MASKED_HEADERS: [&str; 6] = [
-    "set-cookie",
-    "cookie",
-    "authorization",
-    "proxy-authorization",
-    "x-api-key",
-    "api-key",
-];
-
-/// 再加一条后缀规则，省得穷举每个厂商的命名（`x-auth-token`、`x-client-secret`…）。
-///
-/// 方向刻意偏向「宁可多打」：多打一个非敏感头，代价是 AI 少看见一个值；
-/// 漏掉一个凭据头，代价是它进了 AI 的上下文。两者不对称，所以这里不追求精确白名单。
-const MASKED_HEADER_SUFFIXES: [&str; 4] = ["-key", "-token", "-secret", "-password"];
 
 /// `run_load_test` 的总超时上限。
 ///
@@ -558,6 +537,12 @@ pub struct SendRequestResponse {
     pub total_ms: u64,
     /// 没能解析掉的占位符（它们的原文已经原样发出去了）
     pub unresolved_placeholders: Vec<UnresolvedDto>,
+    // ⚠️ 这里**刻意**没有 `tokenUsage`（桌面端的 `HttpResponsePayload` 有）。
+    //
+    // 它是给人看的展示字段（「本次刷了没、走的是哪个接口」），服务于桌面端
+    // 「发送前能看见、发送后能复核」这条交互；而 MCP / CLI 的调用方要看 Token
+    // 状态有自己的入口（`refresh_token` 直接返回剩余有效期）。
+    // 加它要多一份 Dto + 一次转换，对当前使用场景没有增量 —— 需要时再补，不是漏。
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -828,7 +813,10 @@ impl Ops {
         // 先取出来：`send_request_with` 之后 `spec` 还活着，但把「这次用的类型」
         // 显式传给 DTO 而不是让 DTO 去猜，能让回显这件事只有一个来源。
         let body_type = spec.body_type;
-        let payload = send_request_with(&self.state, &run_id, &spec).await?;
+        // `emit_curl = false`：MCP / CLI 的输出会进 AI 的上下文，
+        // 而那份 curl 里带着展开后的 token。桌面端的「查看 curl」是另一条路
+        // （`send_request` 命令传 `true`），凭据不从这里出去。
+        let payload = send_request_with(&self.state, &run_id, &spec, false).await?;
 
         Ok(response_dto(payload, self.max_body_bytes, body_type))
     }
@@ -980,19 +968,15 @@ impl Ops {
             env: &env,
             cancel: None,
         };
-        let values = self.state.tokens.refresh_now(&deps).await?;
-
-        let expires_in_seconds = values.expires_at.as_deref().and_then(|raw| {
-            chrono::DateTime::parse_from_rfc3339(raw)
-                .ok()
-                .map(|at| (at.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds())
-        });
+        let values = self.state.tokens.refresh_now(&deps).await?.values;
 
         Ok(RefreshTokenResponse {
             source_id: source.id,
             source_name: source.name,
+            // 剩余秒数走 `http::token` 那一份实现（含「时间戳读不懂就是 None」），
+            // 不在这里再解析一次 ISO 字符串 —— 同一件事两处算，边界上迟早分叉
+            expires_in_seconds: remaining_seconds(values.expires_at.as_deref(), chrono::Utc::now()),
             expires_at: values.expires_at,
-            expires_in_seconds,
             has_refresh_token: values.refresh_token.is_some(),
         })
     }
@@ -1319,18 +1303,11 @@ fn response_dto(
 }
 
 /// 敏感响应头打码。其余原样。
+///
+/// 名单与 curl 导出共用（[`crate::redact`]），这里只是把「按名字判」这件事
+/// 换成调用点读得顺的写法。
 fn mask_header_value(name: &str, value: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    let sensitive = MASKED_HEADERS.contains(&lower.as_str())
-        || MASKED_HEADER_SUFFIXES
-            .iter()
-            .any(|suffix| lower.ends_with(suffix));
-
-    if sensitive {
-        MASK.to_string()
-    } else {
-        value.to_string()
-    }
+    crate::redact::mask_value(name, value)
 }
 
 /// 按 **UTF-8 字符边界**截断响应体。

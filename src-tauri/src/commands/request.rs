@@ -1,11 +1,13 @@
 //! 接口请求命令。
 
+use serde::Serialize;
 use tauri::State;
 
 use crate::error::AppResult;
-use crate::http::{HttpResponsePayload, RequestSpec};
+use crate::http::{to_curl, HttpResponsePayload, Pipeline, RequestSpec, TokenUsage};
 use crate::storage::models::ApiRequest;
 use crate::storage::{repo, with_conn};
+use crate::template::resolver::UnresolvedPlaceholder;
 use crate::AppState;
 
 // 编排本体已搬去 `reqly-core`（桌面 / MCP / CLI 共用一份）。这里转发路径，
@@ -44,7 +46,64 @@ pub async fn send_request(
     run_id: String,
     spec: RequestSpec,
 ) -> AppResult<HttpResponsePayload> {
-    send_request_with(&state, &run_id, &spec).await
+    // `emit_curl = true`：桌面端要在响应区给「这次到底发出去的是什么」。
+    // MCP / CLI 那条路上是 `false`（见 `send_request_with` 的说明）。
+    send_request_with(&state, &run_id, &spec, true).await
+}
+
+/// 「按当前编辑内容生成的 curl」——**不发送**，只解析。
+///
+/// 用在两种场合：这条请求还没跑过；或者历史里那条太老、用户想看「现在这份定义
+/// 打出去会是什么样」。返回形状与发送后回传的 curl 完全同构，
+/// 前端两条路径共用同一个面板。
+///
+/// ## 它可能**顺带刷新一次 Token**
+///
+/// `prepare` 里有「过期就刷」的逻辑，所以点这个按钮不保证纯只读：token 快到期时
+/// 会打一次取 token 的请求。这是刻意的 —— 不刷新的话，生成出来的是个已经过期的
+/// token，粘出去跑还是 401，那「核对」这件事就没意义了。
+///
+/// 不做的事：**不写历史**。看一眼不该在历史列表里占一行，那个列表只记录真实发送。
+#[tauri::command]
+pub async fn preview_curl(
+    state: State<'_, AppState>,
+    spec: RequestSpec,
+) -> AppResult<PreviewCurlResult> {
+    // `{{resp.$.xxx}}` 的来源要和真实发送时取同一份，否则预览出来的 URL
+    // 与真正发出去的那个不一样 —— 而「一样」正是这个功能的全部意义
+    let previous = state
+        .last_response
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
+
+    let pipeline = Pipeline::new(&state.pool, &state.clients, &state.tokens);
+    let prepared = pipeline.prepare(&spec, previous.as_deref(), None).await?;
+
+    Ok(PreviewCurlResult {
+        curl: to_curl(&prepared.spec, true),
+        curl_plain: to_curl(&prepared.spec, false),
+        unresolved_placeholders: prepared.unresolved,
+        token_usage: prepared.token,
+    })
+}
+
+/// [`preview_curl`] 的返回。
+///
+/// 与 [`HttpResponsePayload`] 上的 `curl` / `curlPlain` 刻意分开两个字段：
+/// 那两个是「已经发生过的事实」，这一份是「按现在的内容推演」，
+/// 前端必须在界面上把这两件事说清楚，否则用户会把推演当成事实。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCurlResult {
+    /// 凭据已打码
+    pub curl: String,
+    /// 凭据明文
+    pub curl_plain: String,
+    /// 没能解析的占位符（它们的原文被原样留在了命令里）
+    pub unresolved_placeholders: Vec<UnresolvedPlaceholder>,
+    /// 本次解析用到的 Token 情况：`None` 表示这条请求用不上 token
+    pub token_usage: Option<TokenUsage>,
 }
 
 /// 打断一次进行中的请求。返回值是「**有没有找到**这次执行」。

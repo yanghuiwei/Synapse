@@ -18,7 +18,7 @@ use tauri::State;
 
 use crate::commands::validate::clean_name;
 use crate::error::{AppError, AppResult};
-use crate::http::token::{is_expired, TokenDeps};
+use crate::http::token::{is_expired, remaining_seconds, TokenDeps};
 use crate::storage::models::TokenSource;
 use crate::storage::{repo, with_conn};
 use crate::AppState;
@@ -212,17 +212,18 @@ fn status_of(
     };
 
     let now = chrono::Utc::now();
-    let remaining = cache
-        .expires_at
-        .as_deref()
-        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-        .map(|at| (at.with_timezone(&chrono::Utc) - now).num_seconds());
 
     TokenStatus {
         has_cache: true,
+        // 过期判定与剩余秒数**取同一个 `now`**：两处各调一次 `Utc::now()`
+        // 会在「还剩 0.4 秒过期」这种边界上给出自相矛盾的组合
+        // （remaining 说还有 0 秒、expired 说已经过期）。
         expired: is_expired(cache, source.skew_seconds, now),
         expires_at: cache.expires_at.clone(),
-        remaining_seconds: remaining,
+        // 剩余秒数走 `http::token` 那一份实现：界面上这个数字与响应里
+        // `tokenUsage.remainingSeconds` 是同一个数，两处各算一遍迟早会差几秒 ——
+        // 那种差异会让人怀疑「刚刷完的 token 怎么倒计时不一样」
+        remaining_seconds: remaining_seconds(cache.expires_at.as_deref(), now),
         updated_at: Some(cache.updated_at.clone()),
         access_token: Some(cache.access_token.clone()),
         has_refresh_token: cache.refresh_token.is_some(),

@@ -149,9 +149,12 @@ pub fn run() {
             commands::history::restore_history,
             commands::history::purge_history,
             commands::history::clear_history,
+            commands::history::latest_history_curl,
             // 请求执行
             commands::request::send_request,
             commands::request::cancel_request,
+            // 「查看 curl」：不发只解析，用于还没跑过的那条请求
+            commands::request::preview_curl,
             // 文件对话框与响应另存（上传文件 / 导出流落盘）
             commands::file::pick_file,
             commands::file::save_response_body,

@@ -34,12 +34,14 @@
 //!   成立的几个函数
 //! * `mcp` —— 只放 [`mcp::config_gen`]（给 WorkBuddy / Hermes 生成配置片段，
 //!   桌面面板和 CLI 都要用同一份，所以它属于核心而不是某个入口）
+//! * `redact` —— 凭据打码的唯一名单（`service::ops` 与 `http::curl` 共用）
 
 pub mod error;
 pub mod http;
 pub mod importer;
 pub mod loadtest;
 pub mod mcp;
+pub mod redact;
 pub mod service;
 pub mod state;
 pub mod storage;

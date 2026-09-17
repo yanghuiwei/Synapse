@@ -451,6 +451,14 @@ pub struct HistoryEntry {
     pub executed_at: String,
     /// 非空 = 在回收站
     pub deleted_at: Option<String>,
+    /// 这次执行**真实发出**的请求对应的 curl（凭据为明文）。
+    ///
+    /// `None` 有两种来源：这条历史发生在 006 之前，或者写入方（MCP / CLI）没有
+    /// 这个入口。前端据此退化成「按当前内容重新生成」并标出来源 ——
+    /// 而不是把空字符串当成「当时就是一个空请求」。
+    pub curl: Option<String>,
+    /// 同上，凭据打码。给「要截图 / 要贴出去」的场合用。
+    pub curl_masked: Option<String>,
 }
 
 /// 写历史时的入参。
@@ -475,6 +483,15 @@ pub struct NewHistoryEntry {
     pub resp_size: Option<i64>,
     pub error: Option<String>,
     pub environment: Option<String>,
+    /// 本次真实发出的请求对应的 curl（见 [`HistoryEntry::curl`]）。
+    ///
+    /// 由前端从发送结果里原样带过来 —— 后端在 `send_request` 里已经算好了，
+    /// 前端只负责搬运，不重新拼一遍（两处拼法迟早会不一样）。
+    #[serde(default)]
+    pub curl: Option<String>,
+    /// 同上，凭据打码那一份。
+    #[serde(default)]
+    pub curl_masked: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

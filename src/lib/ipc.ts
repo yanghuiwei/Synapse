@@ -38,6 +38,7 @@ import {
   mcpSetupSchema,
   purgeTrashResultSchema,
   purgeTreeResultSchema,
+  previewCurlResultSchema,
   responsePayloadSchema,
   savedFileSchema,
   settingSchema,
@@ -72,6 +73,7 @@ import type {
   LoadtestTarget,
   McpSetup,
   NewHistoryEntry,
+  PreviewCurlResult,
   PurgeTrashResult,
   PurgeTreeResult,
   ReportLabels,
@@ -489,6 +491,19 @@ export const requests = {
    */
   cancel: (runId: string): Promise<boolean> => call("cancel_request", { runId }),
 
+  /**
+   * 按**当前编辑内容**推演出一条 curl，不发送。
+   *
+   * 用在「这条请求还没跑过」或「历史里那条太老」的时候。
+   *
+   * ⚠️ 它不是纯只读的：解析过程里 token 若已过期会**顺带刷新一次**
+   * （不然生成出来的是一串已经过期的 token，粘出去跑还是 401，
+   * 「核对」这件事就没意义了）。但它**不会**写历史 ——
+   * 历史只记录真实发送过的东西。
+   */
+  previewCurl: (spec: RequestSpec): Promise<PreviewCurlResult> =>
+    call("preview_curl", { spec }, { parse: (v) => previewCurlResultSchema.parse(v) }),
+
   create: (workspaceId: number, folderId: number | null, name: string): Promise<ApiRequest> =>
     call("create_request", { workspaceId, folderId, name }, { parse: (v) => apiRequestSchema.parse(v) }),
 
@@ -544,6 +559,19 @@ export const history = {
 
   get: (id: number): Promise<HistoryEntry> =>
     call("get_history", { id }, { parse: (v) => historyEntrySchema.parse(v) }),
+
+  /**
+   * 某条请求**最近一次带 curl 的**执行。
+   *
+   * 返回 `null` 是正常情况（这条请求还没跑过，或跑过但都在本版之前）——
+   * 调用方据此退化成「按当前内容生成」，不要当成错误。
+   */
+  latestCurl: (requestId: number): Promise<HistoryEntry | null> =>
+    call(
+      "latest_history_curl",
+      { requestId },
+      { parse: (v) => (v === null ? null : historyEntrySchema.parse(v)) },
+    ),
 
   /**
    * 写一条历史（发送结束后调用）。

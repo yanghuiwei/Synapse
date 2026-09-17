@@ -13,7 +13,8 @@ use crate::storage::now_iso;
 use crate::storage::repo::{opt_text, parse_json_column, to_json_column};
 
 const COLUMNS: &str = "id, workspace_id, request_id, request_name, snapshot, status, \
-     duration_ms, resp_size, error, environment, executed_at, deleted_at";
+     duration_ms, resp_size, error, environment, executed_at, deleted_at, \
+     curl, curl_masked";
 
 fn map_row(row: &Row<'_>) -> AppResult<HistoryEntry> {
     let snapshot_raw: String = row.get("snapshot")?;
@@ -30,6 +31,8 @@ fn map_row(row: &Row<'_>) -> AppResult<HistoryEntry> {
         environment: opt_text(row, "environment")?,
         executed_at: row.get("executed_at")?,
         deleted_at: opt_text(row, "deleted_at")?,
+        curl: opt_text(row, "curl")?,
+        curl_masked: opt_text(row, "curl_masked")?,
     })
 }
 
@@ -53,8 +56,9 @@ pub fn insert(conn: &Connection, entry: &NewHistoryEntry) -> AppResult<HistoryEn
     conn.execute(
         "INSERT INTO history
            (workspace_id, request_id, request_name, snapshot, status,
-            duration_ms, resp_size, error, environment, executed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            duration_ms, resp_size, error, environment, executed_at,
+            curl, curl_masked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         rusqlite::params![
             entry.workspace_id,
             entry.request_id,
@@ -66,9 +70,26 @@ pub fn insert(conn: &Connection, entry: &NewHistoryEntry) -> AppResult<HistoryEn
             entry.error,
             entry.environment,
             now_iso(),
+            entry.curl,
+            entry.curl_masked,
         ],
     )?;
     get(conn, conn.last_insert_rowid())
+}
+
+/// 某条请求最近一次**带 curl 的**执行。
+///
+/// `curl IS NOT NULL` 这个条件不能省：升级上来的库里，最新那条可能是 006 之前的
+/// 记录（没有 curl）。若只按时间取最新一条，用户会看到「上次没有记录」——
+/// 而其实再往前一条就有，表现是「这功能时灵时不灵」。
+pub fn latest_with_curl(conn: &Connection, request_id: i64) -> AppResult<Option<HistoryEntry>> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM history
+         WHERE request_id = ?1 AND deleted_at IS NULL AND curl IS NOT NULL
+         ORDER BY executed_at DESC, id DESC
+         LIMIT 1"
+    );
+    Ok(collect(conn, &sql, &[&request_id])?.into_iter().next())
 }
 
 /// 存活历史，时间倒序。
@@ -255,6 +276,8 @@ mod tests {
             resp_size: Some(128),
             error: None,
             environment: Some("dev".into()),
+            curl: None,
+            curl_masked: None,
         }
     }
 
@@ -281,6 +304,82 @@ mod tests {
         assert_eq!(h.environment.as_deref(), Some("dev"));
         assert!(h.deleted_at.is_none());
         assert!(h.executed_at.ends_with('Z'));
+    }
+
+    /// 带 request_id 与 curl 的历史行。curl 的 `None` 是**有意义**的取值
+    /// （那条历史发生在本版之前或写入方没给），所以这里显式区分两种输入。
+    fn entry_with_curl(id: i64, name: &str, curl: Option<&str>) -> NewHistoryEntry {
+        let mut e = entry(name);
+        e.request_id = Some(id);
+        e.curl = curl.map(str::to_string);
+        e.curl_masked = curl.map(|c| format!("[masked]{c}"));
+        e
+    }
+
+    #[test]
+    fn curl_columns_round_trip_and_stay_null_when_absent() {
+        let conn = db();
+
+        let saved = insert(
+            &conn,
+            &entry_with_curl(7, "带 curl", Some("curl -X GET 'https://x/y'")),
+        )
+        .unwrap();
+        assert_eq!(saved.curl.as_deref(), Some("curl -X GET 'https://x/y'"));
+        assert_eq!(
+            saved.curl_masked.as_deref(),
+            Some("[masked]curl -X GET 'https://x/y'")
+        );
+
+        let without = insert(&conn, &entry("没有 curl")).unwrap();
+        assert_eq!(without.curl, None, "没给过 curl 的行必须读回 None");
+        assert_eq!(without.curl_masked, None);
+    }
+
+    /// 「上次跑的是什么」要跳过没有 curl 的行：升级上来的库里，
+    /// 最新那条常常正是 006 之前的记录，直接按时间取最新一条会让用户看到空面板。
+    #[test]
+    fn latest_with_curl_skips_rows_that_do_not_have_one() {
+        let conn = db();
+
+        let older = insert(
+            &conn,
+            &entry_with_curl(7, "旧的有 curl", Some("curl -X GET 'https://x/old'")),
+        )
+        .unwrap();
+        insert(&conn, &entry_with_curl(7, "新的没有", None)).unwrap();
+
+        let found = latest_with_curl(&conn, 7)
+            .unwrap()
+            .expect("应当找回旧的那条");
+        assert_eq!(found.id, older.id);
+        assert_eq!(found.curl.as_deref(), Some("curl -X GET 'https://x/old'"));
+    }
+
+    #[test]
+    fn latest_with_curl_ignores_other_requests_and_trash() {
+        let conn = db();
+        insert(
+            &conn,
+            &entry_with_curl(8, "别人的", Some("curl 'https://other'")),
+        )
+        .unwrap();
+
+        assert!(
+            latest_with_curl(&conn, 7).unwrap().is_none(),
+            "别的请求的 curl 不该被捞过来"
+        );
+
+        let mine = insert(
+            &conn,
+            &entry_with_curl(7, "我的", Some("curl 'https://mine'")),
+        )
+        .unwrap();
+        soft_delete(&conn, mine.id).unwrap();
+        assert!(
+            latest_with_curl(&conn, 7).unwrap().is_none(),
+            "进了回收站的记录不该再被当成「上次跑的」"
+        );
     }
 
     #[test]

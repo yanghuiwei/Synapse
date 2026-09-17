@@ -50,6 +50,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "form_fields",
         sql: include_str!("../../migrations/005_form_fields.sql"),
     },
+    Migration {
+        version: 6,
+        name: "history_curl",
+        sql: include_str!("../../migrations/006_history_curl.sql"),
+    },
 ];
 
 /// 代码里定义的最高版本号
@@ -156,10 +161,16 @@ mod tests {
     fn applies_all_migrations_on_empty_db() {
         let mut conn = open_memory();
         let applied = run(&mut conn).expect("migrate");
+
+        // 期望值从 `MIGRATIONS` 推导，不写死一串数字：写死的话，每次加迁移都要
+        // 记得来这里改一处，而「改的时候顺手把它的意思也改掉」是迟早的事。
+        // 版本号本身的正确性由下面那条连续性断言看住。
+        let expected: Vec<i64> = MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(applied, expected, "fresh db should apply every migration");
         assert_eq!(
-            applied,
-            vec![1, 2, 3, 4, 5],
-            "fresh db should apply every migration"
+            expected,
+            (1..=latest_version()).collect::<Vec<_>>(),
+            "version 必须从 1 开始连续递增 —— 跳号会让升级路径上少跑一段"
         );
         assert_eq!(current_version(&conn).unwrap(), latest_version());
     }
@@ -177,7 +188,11 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 5, "version table must have one row per migration");
+        assert_eq!(
+            rows,
+            MIGRATIONS.len() as i64,
+            "version table must have one row per migration"
+        );
     }
 
     /// schema 完整性：design.md §3.2 的表一张都不能少。

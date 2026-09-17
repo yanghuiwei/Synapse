@@ -1,10 +1,15 @@
-import { ChevronDown, Globe, KeyRound, ShieldQuestion } from "lucide-react";
+import {
+  ChevronDown,
+  Globe,
+  KeyRound,
+  ShieldQuestion,
+  TriangleAlert,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
-import * as ipc from "@/lib/ipc";
 import type { AuthConfig, Folder, TokenSource, TokenStatus } from "@/lib/types";
 import { useRequestStore } from "@/store/request";
 import { useTokenStore } from "@/store/token";
@@ -17,6 +22,7 @@ import {
   type TokenSourceDraft,
 } from "@/features/token/TokenSourceForm";
 import { TokenStatusBadge } from "@/features/token/TokenStatusBadge";
+import { useResolvedTokenSource } from "@/features/token/useTokenState";
 import { PlaceholderInput } from "./PlaceholderInput";
 
 type AuthKind = AuthConfig["type"];
@@ -29,11 +35,23 @@ const KIND_LABELS: Record<AuthKind, MessageKey> = {
   apiKey: "auth.apiKey",
 };
 
-/** 切换类型时给新变体的初值。字符串一律给空串 —— 猜出来的默认值比空着更难改 */
-function emptyAuth(kind: AuthKind): AuthConfig {
+/**
+ * 切换类型时给新变体的初值。字符串一律给空串 —— 猜出来的默认值比空着更难改。
+ *
+ * **唯一的例外是 Bearer**，而它恰恰是最需要例外的那一个：值为空串时请求会
+ * 带着一条空凭据出去（`reqwest` 的 `bearer_auth` 不判空，生成的是值为
+ * `"Bearer "` 的合法头），服务端必然回 401，而界面上一点痕迹都没有。
+ * 既然工作区里已经配好了 Token 源，「把类型选成 Bearer」这个动作本身就
+ * 表达了「我要带那个 Token」—— 所以直接替他填上引用，而不是让他去猜
+ * 还有一步没做。想改成写死的 Token，删掉这一行再粘就行。
+ *
+ * `tokenRef` 为 `null`（工作区里还没有 Token 源）时退回空串：填一个解析不了
+ * 的占位符只会把「还没配 Token 源」这个真问题盖成「占位符没解析」。
+ */
+function emptyAuth(kind: AuthKind, tokenRef: string | null): AuthConfig {
   switch (kind) {
     case "bearer":
-      return { type: "bearer", token: "" };
+      return { type: "bearer", token: tokenRef ?? "" };
     case "basic":
       return { type: "basic", username: "", password: "" };
     case "apiKey":
@@ -89,6 +107,14 @@ export function AuthTab() {
 
   const { source: resolvedSource } = useResolvedTokenSource(draft.folderId, configVersion);
 
+  /**
+   * 有 Token 源时 Bearer 值的默认形态（`{{token.access}}`）。
+   *
+   * 从 i18n 取而不是写死字面量：`auth.tokenPlaceholder` 这个 key 本来就是
+   * 为它准备的（输入框的 placeholder 也用它）。两处各写一份，改语法时会漏一处。
+   */
+  const tokenRef = resolvedSource === null ? null : t("auth.tokenPlaceholder");
+
   const statuses = useTokenStore((s) => s.statuses);
   const refreshingId = useTokenStore((s) => s.refreshingId);
   const refresh = useTokenStore((s) => s.refresh);
@@ -107,7 +133,7 @@ export function AuthTab() {
   return (
     <div className="space-y-2 p-2.5">
       <Row label={t("request.tab.auth")}>
-        <KindSelect value={auth.type} onChange={(kind) => setAuth(emptyAuth(kind))} />
+        <KindSelect value={auth.type} onChange={(kind) => setAuth(emptyAuth(kind, tokenRef))} />
       </Row>
 
       {auth.type === "inherit" ? (
@@ -117,12 +143,13 @@ export function AuthTab() {
             <FolderAuthBlock
               folderId={draft.folderId}
               folders={folders}
+              tokenRef={tokenRef}
               onSave={(next) => void setFolderAuth(draft.folderId as number, next)}
             />
           ) : null}
         </>
       ) : (
-        <AuthFields value={auth} onChange={setAuth} />
+        <AuthFields value={auth} onChange={setAuth} tokenRef={tokenRef} warnOnEmpty />
       )}
 
       <TokenSourcePanel
@@ -248,9 +275,15 @@ function KindSelect({
 function AuthFields({
   value,
   onChange,
+  tokenRef,
+  warnOnEmpty = false,
 }: {
   value: Exclude<AuthConfig, { type: "inherit" }>;
   onChange: (next: AuthConfig) => void;
+  /** 有 Token 源时可用的引用形态；`null` = 工作区里还没有 Token 源 */
+  tokenRef: string | null;
+  /** Bearer 值为空时是否给出警告。见 `EmptyBearerHint` 的注释 */
+  warnOnEmpty?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -260,14 +293,22 @@ function AuthFields({
 
     case "bearer":
       return (
-        <Row label={t("auth.bearer")}>
-          <HighlightedField
-            value={value.token}
-            onChange={(token) => onChange({ type: "bearer", token })}
-            label={t("auth.bearer")}
-            placeholder={t("auth.bearerPlaceholder")}
-          />
-        </Row>
+        <>
+          <Row label={t("auth.bearer")}>
+            <HighlightedField
+              value={value.token}
+              onChange={(token) => onChange({ type: "bearer", token })}
+              label={t("auth.bearer")}
+              placeholder={t("auth.bearerPlaceholder")}
+            />
+          </Row>
+          {warnOnEmpty && value.token.trim() === "" ? (
+            <EmptyBearerHint
+              tokenRef={tokenRef}
+              onUse={() => onChange({ type: "bearer", token: tokenRef ?? "" })}
+            />
+          ) : null}
+        </>
       );
 
     case "basic":
@@ -334,6 +375,51 @@ function AuthFields({
 }
 
 // ---------------------------------------------------------------
+// 空 Bearer 的警告
+// ---------------------------------------------------------------
+
+/**
+ * 「Bearer 值为空」的警告。
+ *
+ * ## 为什么这条提示是必须的
+ *
+ * 空 Bearer 不会让请求失败，也不会让界面变红 —— 它让服务端回一个 401，
+ * 而 401 能被太多别的原因解释（Token 过期、权限不够、接口换了鉴权方式）。
+ * 于是用户去查 Token 源、去看缓存里那个 Token 还在不在、去点「立即刷新」，
+ * 而真相是这条请求从来没引用过它。**这几行是那个失败唯一能自己说清自己的地方。**
+ *
+ * ## 有 Token 源时给一键填入，没有时只报告
+ *
+ * 按钮只在真有源的时候出现：没有源却点一下就填进一个解析不了的占位符，
+ * 会把「还没配 Token 源」这个真问题盖成「占位符没解析」，
+ * 而这两个提示指向的动作完全不同（一个去配置，一个去改写法）。
+ */
+function EmptyBearerHint({ tokenRef, onUse }: { tokenRef: string | null; onUse: () => void }) {
+  const { t } = useI18n();
+
+  return (
+    <p className="flex items-start gap-1.5 pl-[100px] text-[11px] leading-relaxed text-warn">
+      <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
+      <span className="min-w-0">
+        {tokenRef === null ? t("auth.emptyBearerNoSource") : t("auth.emptyBearerWarn")}
+        {tokenRef === null ? null : (
+          <button
+            type="button"
+            onClick={onUse}
+            className={cn(
+              "ml-1.5 rounded-sm border border-warn/40 px-1.5 py-px",
+              "transition-colors duration-100 hover:bg-warn/12",
+            )}
+          >
+            {t("auth.useTokenSource")}
+          </button>
+        )}
+      </span>
+    </p>
+  );
+}
+
+// ---------------------------------------------------------------
 // 继承
 // ---------------------------------------------------------------
 
@@ -397,10 +483,13 @@ function findInheritedAuth(folders: readonly Folder[], folderId: number | null):
 function FolderAuthBlock({
   folderId,
   folders,
+  tokenRef,
   onSave,
 }: {
   folderId: number;
   folders: readonly Folder[];
+  /** 有 Token 源时可用的引用形态；`null` = 工作区里还没有 Token 源 */
+  tokenRef: string | null;
   onSave: (auth: AuthConfig) => void;
 }) {
   const { t } = useI18n();
@@ -416,13 +505,20 @@ function FolderAuthBlock({
       </p>
 
       <Row label={t("request.tab.auth")}>
-        <KindSelect value={current.type} onChange={(kind) => onSave(emptyAuth(kind))} />
+        <KindSelect
+          value={current.type}
+          onChange={(kind) => onSave(emptyAuth(kind, tokenRef))}
+        />
       </Row>
 
+      {/* 分类上的空 Bearer 同样要警告：它本身 401 不了，但凡继承它的请求
+          全都裸奔，而这一层比逐个请求去改更该先被发现 */}
       {current.type !== "inherit" ? (
         <AuthFields
           value={current}
           onChange={(next) => onSave(next)}
+          tokenRef={tokenRef}
+          warnOnEmpty
         />
       ) : null}
 
@@ -434,42 +530,6 @@ function FolderAuthBlock({
 // ---------------------------------------------------------------
 // Token 来源
 // ---------------------------------------------------------------
-
-/**
- * 这条请求实际会用到哪个 Token 来源。
- *
- * 前端**自己不做推导**（不像授权那样在本地走一遍链）：判定规则是
- * 「先沿分类链找最近的，再兜底到系统分类那个」，而这条规则连同它的 SQL
- * （`first_in_chain` / `system_source`）都已经在后端了。再写一遍就多一处
- * 会漂移的东西 —— 而漂移的后果是「界面说生效的是 A，发送时用的是 B」。
- *
- * ⚠️ `folderId` 为 `null`（请求还没归档）时**同样要解析**：Token 来源固定配在
- * 系统分类下，那恰恰是最常见的情形。早先这里直接置 `null`，于是所有没归档的
- * 请求一律显示「还没有配置」。
- */
-function useResolvedTokenSource(folderId: number | null, version: number) {
-  const [source, setSource] = useState<TokenSource | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void ipc.tokens
-      .resolve(folderId)
-      .then((next) => {
-        if (!cancelled) setSource(next);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        console.warn("[reqly] 解析 Token 来源失败：", ipc.toIpcError(e).debug);
-        setSource(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [folderId, version]);
-
-  return { source };
-}
 
 /**
  * Token 来源。

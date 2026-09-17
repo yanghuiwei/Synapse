@@ -30,14 +30,14 @@
 
 use std::collections::HashMap;
 
-use chrono::Local;
+use chrono::{Local, Utc};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::AppResult;
 use crate::http::client::ClientCache;
 use crate::http::execute::RequestSpec;
-use crate::http::token::{TokenDeps, TokenRefresher};
+use crate::http::token::{remaining_seconds, TokenDeps, TokenRefresher, TokenUsage};
 use crate::storage::models::{AuthConfig, TokenSource};
 use crate::storage::pool::SqlitePool;
 use crate::storage::{repo, with_conn};
@@ -53,11 +53,27 @@ pub struct Pipeline<'a> {
     pub tokens: &'a TokenRefresher,
 }
 
-/// 一份可以发出去的请求 + 本次的占位符报告。
+/// 本次发送的 Token 上下文：解析要用的值 + 给用户看的使用报告。
+///
+/// 合成一个结构而不是让 `token_context` 返回元组：两半一个进模板、一个进响应，
+/// 元组解构时写反了编译器不拦（都是 `Option<...>` 起的名字），
+/// 症状是「响应里报的 Token 来源和实际用的不是一个」。
+struct TokenContext {
+    /// 解析 `{{token.*}}` 用的值（含 access / refresh / expiresAt）
+    values: TokenValues,
+    /// 回给界面的那份报告
+    usage: TokenUsage,
+}
+
+/// 一份可以发出去的请求 + 本次的占位符报告 + Token 使用报告。
 #[derive(Debug)]
 pub struct Prepared {
     pub spec: RequestSpec,
     pub unresolved: Vec<UnresolvedPlaceholder>,
+    /// 本次发送的 Token 使用情况。`None` 有两种含义，对使用者是同一件事：
+    /// ① 这条请求压根没写 `{{token.*}}`；② 写了但文件夹链上没有 Token 源
+    /// （后者会同时报一条 `noTokenSource` 的未解析项，用户看得见该去配）。
+    pub token: Option<TokenUsage>,
 }
 
 impl<'a> Pipeline<'a> {
@@ -89,11 +105,11 @@ impl<'a> Pipeline<'a> {
             ..spec.clone()
         };
 
-        let token_values = self.token_values(&working, &chain, &env, cancel).await?;
+        let token_ctx = self.token_context(&working, &chain, &env, cancel).await?;
 
         let mut ctx = TemplateContext {
             env: &env,
-            token: token_values.as_ref(),
+            token: token_ctx.as_ref().map(|t| &t.values),
             resp,
             now: Local::now(),
             entropy: Entropy::from_system(),
@@ -103,6 +119,7 @@ impl<'a> Pipeline<'a> {
         Ok(Prepared {
             spec: resolved.spec,
             unresolved: resolved.unresolved,
+            token: token_ctx.map(|t| t.usage),
         })
     }
 
@@ -139,13 +156,13 @@ impl<'a> Pipeline<'a> {
     ///
     /// **用不上时不碰 Token 源**：仅仅因为「这个文件夹里有 Token 源」就去打一次
     /// 刷新请求，会让每个不相关的请求都背上一次网络往返。
-    async fn token_values(
+    async fn token_context(
         &self,
         spec: &RequestSpec,
         chain: &[crate::storage::models::Folder],
         env: &HashMap<String, String>,
         cancel: Option<&CancellationToken>,
-    ) -> AppResult<Option<TokenValues>> {
+    ) -> AppResult<Option<TokenContext>> {
         let wants_token = scan_spec(spec)
             .iter()
             .any(|hit| hit.namespace == Namespace::Token);
@@ -170,7 +187,43 @@ impl<'a> Pipeline<'a> {
         };
         // ★ 刷新失败在这里冒泡上去 → 中止整条请求（plan.md §4 验收第 5 条）。
         // 错误里带着 sourceId / sourceName，前端据此把卡片指回 Token 源配置。
-        Ok(Some(self.tokens.ensure(&deps, false).await?))
+        let outcome = self.tokens.ensure(&deps, false).await?;
+
+        // 生效的取 Token 接口：与 `fetch` 的选法**必须一致**
+        // （`refresh_request_id` 优先，见 `http::token::fetch`）——
+        // 这里是「界面上说刷的是哪个」，那边是「实际刷的是哪个」，
+        // 两处算错一个就会让用户照着界面去改错误的那个接口。
+        let endpoint_request_id = source.refresh_request_id.unwrap_or(source.fetch_request_id);
+
+        let usage = TokenUsage {
+            source_id: source.id,
+            source_name: source.name.clone(),
+            refreshed: outcome.refreshed,
+            endpoint_request_id,
+            endpoint_name: self.endpoint_name(endpoint_request_id).await,
+            remaining_seconds: remaining_seconds(outcome.values.expires_at.as_deref(), Utc::now()),
+            expires_at: outcome.values.expires_at.clone(),
+            auto_refresh: source.auto_refresh,
+        };
+
+        Ok(Some(TokenContext {
+            values: outcome.values,
+            usage,
+        }))
+    }
+
+    /// 那个取 Token 的接口叫什么名字。**读不出来就是 `None`**。
+    ///
+    /// 为什么不冒泡错误：它只服务于界面上的一行说明。为了多显示一个接口名，
+    /// 把一次本来能成功的业务请求打回去，代价完全不成比例 ——
+    /// 「这个源配得好好的、就因为它引用的接口刚被删掉，所有请求都发不出去了」
+    /// 是最糟的一类连带失败。
+    async fn endpoint_name(&self, request_id: i64) -> Option<String> {
+        let pool = self.pool;
+        with_conn(pool, move |conn| repo::request::get(conn, request_id))
+            .await
+            .ok()
+            .map(|request| request.name)
     }
 
     /// 这次发送用哪个 Token 源：**先沿分类链找最近的，找不到再用全局那一个**。

@@ -6,13 +6,15 @@ import { HTTP_METHODS, methodTextClass } from "@/lib/http";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { KeyValueItem, RequestSettings } from "@/lib/types";
-import { useRequestStore } from "@/store/request";
+import { useRequestStore, type RequestDraft } from "@/store/request";
 import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
 import { LoadTestPanel } from "@/features/loadtest/LoadTestPanel";
+import { parsePlaceholders } from "@/lib/placeholder";
+import { TokenGate } from "./TokenGate";
 import { AuthTab } from "./AuthTab";
 import { BodyEditor } from "./BodyEditor";
 import { KeyValueTable } from "./KeyValueTable";
@@ -44,18 +46,24 @@ const TAB_ICON: Record<RequestTab, typeof ListTree> = {
 /**
  * 页签顺序。
  *
+ * 「请求体」排在最前：粘一份 JSON 就发是这个工具最高频的用法，而它默认要落在
+ * 第一个页签上（`DEFAULT_TAB`），否则每次打开请求都得先点一下才能开始打字。
+ *
  * 「压测」排在最后，因为它**不是**在编辑请求 —— 它是拿当前草稿去打一轮。
  * 插在 body/auth 中间会让人以为它也是请求定义的一部分。
  */
 const TAB_ORDER: readonly RequestTab[] = [
+  "body",
   "params",
   "headers",
-  "body",
   "auth",
   "scripts",
   "settings",
   "loadtest",
 ];
+
+/** 打开一份内容时先展示哪个页签 —— 见 `TAB_ORDER` 上的理由 */
+const DEFAULT_TAB: RequestTab = "body";
 
 /** 标签角标只数「真的会发出去」的行：勾选着的、并且有键名 */
 function activeCount(rows: readonly KeyValueItem[]): number {
@@ -215,7 +223,7 @@ export function RequestPane() {
   const send = useRequestStore((s) => s.send);
   const cancel = useRequestStore((s) => s.cancel);
 
-  const [tab, setTab] = useState<RequestTab>("params");
+  const [tab, setTab] = useState<RequestTab>(DEFAULT_TAB);
 
   const tabs = useMemo<readonly TabItem<RequestTab>[]>(
     () =>
@@ -239,6 +247,10 @@ export function RequestPane() {
   const saved = sourceId !== null;
   const headerLabel = openedName ?? t("common.unsaved");
 
+  // 这条草稿到底用不用得上 Token。在这里算而不丢给 `TokenGate`：
+  // 「整块要不要出现」是排版决定（它同时决定了地址栏里还剩多少宽度给 URL）
+  const wantsToken = useMemo(() => draftWantsToken(draft), [draft]);
+
   const BodyIcon = TAB_ICON[tab];
 
   return (
@@ -255,6 +267,11 @@ export function RequestPane() {
           }}
           placeholder={t("request.urlPlaceholder")}
         />
+
+        {/* Token 状态条就摆在发送键旁边 —— 在这之前它只存在于「授权」页里，
+            而发送前没人会去翻那儿，于是「这次带的是不是新 token」只能靠发完
+            看 401 来发现。没写 `{{token.*}}` 时它整块不出现，不制造噪音 */}
+        <TokenGate folderId={draft.folderId} wantsToken={wantsToken} />
 
         {running ? (
           <Button
@@ -362,5 +379,41 @@ export function RequestPane() {
           而且切页签（比如切去授权页看那句话）不会把它卸掉 */}
       <SaveDraftDialog />
     </section>
+  );
+}
+
+/**
+ * 这份草稿里有没有写 `{{token.*}}` —— 决定发送区要不要出现 Token 状态条。
+ *
+ * ## 这是一份**镜像**，不是权威
+ *
+ * 权威在 Rust 的 `template::resolver::scan_spec`：真正「这次要不要 token」
+ * 由它决定（`http::pipeline::token_context` 用它判断该不该去取 Token）。
+ * 这里只服务于「要不要显示那个徽标」，所以两边不一致的代价被限制在
+ * **显示层**：漏判 = 少一个入口（用户还能去授权页看），
+ * 误判 = 多一个入口（点开发现没有来源，正好说明问题）。
+ *
+ * ⚠️ 但**字段清单必须跟着 `scan_spec` 一起改**。它扫的是 url / params /
+ * headers / body / auth —— 这里同样一条不落。少扫一处（比如以为
+ * 「授权里不会写 token」）就会在一整类请求上静默地不显示这个入口。
+ *
+ * 宁可多扫：未勾选的行、文件路径都一起看。**多显示一个入口**只是多一次点击，
+ * **漏显示**才是那个「上次改了 token 配置，发出去还是旧 token」的场景。
+ */
+function draftWantsToken(draft: RequestDraft): boolean {
+  const texts: string[] = [
+    draft.url,
+    draft.body,
+    // 逐个字段列举授权会在加新授权类型时漏掉，而它是 `{{token.access}}`
+    // 最常见的落点（Bearer）。直接序列化，代价只是可能扫到字段名本身
+    JSON.stringify(draft.auth),
+    ...draft.params.flatMap((row) => [row.key, row.value]),
+    ...draft.headers.flatMap((row) => [row.key, row.value]),
+    ...draft.bodyRows.flatMap((row) => [row.key, row.value]),
+    ...draft.formFields.flatMap((row) => [row.key, row.value, row.file ?? ""]),
+  ];
+
+  return texts.some((text) =>
+    parsePlaceholders(text).some((hit) => hit.namespace === "token"),
   );
 }

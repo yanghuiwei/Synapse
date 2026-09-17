@@ -156,6 +156,12 @@ export const zhCN = {
   "auth.addToQuery": "查询参数",
   "auth.bearerPlaceholder": "{{token.access}} 或直接粘贴一段 Token",
   "auth.typeHint": "改动会立刻生效，无需保存 —— 发送时读取的就是这里的内容",
+  // 空 Bearer 是「静默 401」的头号来源：请求照发、界面不红，而 401 能被太多
+  // 别的原因解释。文案要把**真相**说出来（带出去的是一条空凭据），
+  // 而不是只说「请填写」—— 后者会被读成「可选项」，然后被忽略
+  "auth.emptyBearerWarn": "值为空 —— 请求带着一条空凭据出去，服务端只会回 401",
+  "auth.emptyBearerNoSource": "值为空 —— 请求带着一条空凭据出去。工作区里还没有 Token 源，先在下面配一个",
+  "auth.useTokenSource": "用 Token 源",
 
   // ---- 响应 ----
   "response.title": "响应",
@@ -163,6 +169,7 @@ export const zhCN = {
   "response.tab.headers": "响应头",
   "response.tab.cookies": "Cookie",
   "response.tab.timeline": "时间线",
+  "response.tab.curl": "cURL",
   "response.placeholder": "响应会显示在这里",
   "response.status": "状态",
   "response.time": "耗时",
@@ -181,6 +188,29 @@ export const zhCN = {
   "response.timeline.tls": "TLS",
   "response.timeline.ttfb": "首字节",
   "response.timeline.download": "下载",
+
+  // ---- 查看 curl ----
+  // 这一组文案的核心任务是**区分「事实」与「推演」**：用户是拿它去解释
+  // 一个已经发生的 401 的，看到一份按今天的环境算出来的命令会被误导。
+  "curl.sourceSent": "本次真实发出",
+  "curl.sourceSentHint": "发送那一刻的形态：占位符已展开、Token 已注入、授权继承已解开",
+  // 「Token 已注入」在没用上 Token 源的那次是**假话**，而它恰好出现在用户
+  // 最需要准确信息的时候（核对一个 401）。所以按 `tokenUsage` 有没有分化成两条：
+  // 说实话比说漂亮话重要 —— 一句无条件成立的断言会把人送去找不存在的 bug
+  "curl.sourceSentHintNoToken": "发送那一刻的形态：占位符已展开、授权继承已解开 —— 这次没有用到 Token 源",
+  "curl.sourceHistory": "上次执行 · {time}",
+  "curl.sourceHistoryHint": "这一份就是当时发出去的东西，不是按现在的内容重算的",
+  "curl.sourcePreview": "按当前编辑内容推演",
+  "curl.sourcePreviewHint": "这条请求还没发过，下面这份是按现在的定义算出来的",
+  "curl.empty": "还没有可以看的 curl",
+  "curl.emptyHint": "发送一次，或者现在就按当前编辑内容推演一条",
+  "curl.generate": "按当前内容生成",
+  "curl.regenerate": "重新生成",
+  "curl.copy": "复制 curl",
+  "curl.mask": "凭据打码",
+  "curl.unresolved": "{count} 处占位符没能解析，原文被原样带进了命令",
+  "curl.failed": "生成失败",
+  "curl.refreshHint": "生成时 Token 已过期，已顺带刷新一次",
 
   // ---- 历史 ----
   "history.title": "历史记录",
@@ -300,7 +330,10 @@ export const zhCN = {
   "token.effectiveName": "「{name}」",
   "token.none": "这条请求没有可用的 Token 来源",
   "token.noneHint": "还没有配置 —— 配好之后 {{token.access}} 才有值",
-  "token.globalHint": "配在「token刷新」分类下，对所有请求生效",
+  // 「对所有请求生效」是**错的**，而且错得很贵：判据在 `pipeline::token_context`
+  // ——只有请求里出现 `{{token.*}}` 才去取 Token 源。照原样读，用户会以为
+  // 「配了源 + 选了 Bearer」就等于带上了 Token，而实际带出去的是空凭据
+  "token.globalHint": "配在「token刷新」分类下 —— 凡是用到 {{token.access}} 的请求都从这里取",
   "token.scopedHint": "这份配置只对它所在分类的子树生效",
   "token.manage": "管理",
   "token.configure": "配置 Token 来源",
@@ -308,7 +341,7 @@ export const zhCN = {
   "token.deleteDesc": "「{name}」的配置与已缓存的 Token 会被永久删除，无法恢复。",
   "token.deleteConfirm": "彻底删除",
   "token.neverFetched": "还没有取过",
-  "token.expiresIn": "{time} 后过期",
+  "token.expiresIn": "{time}后过期",
   "token.expiredAgo": "已过期 {time}",
   "token.noExpiry": "永不过期",
   "token.refresh": "立即刷新",
@@ -318,6 +351,55 @@ export const zhCN = {
   "token.pathMustStartWithDollar": "路径要以 $ 开头，例如 $.data.access_token",
   "token.loadFailed": "Token 来源加载失败",
   "token.saveFailed": "保存失败",
+
+  // ---- 发送区的 Token 状态条（P8） ----
+  //
+  // 这一组服务的是「点发送**之前**」：用户要能看出这次会不会用 Token、
+  // 什么时候该刷新、并且能提前按住刷新键 —— 而不是等发出去才发现 401。
+  // 文案刻意短：它住在地址栏里，宽度是硬约束。
+  "token.gate.open": "查看 Token 详情",
+  "token.gate.unknown": "…",
+  "token.gate.noSource": "未配置来源",
+  "token.gate.neverFetched": "未取过",
+  "token.gate.noExpiry": "不过期",
+  // 「提前量」窗口内（还没真过期，但下一次发送就会触发刷新）与真过期，
+  // 是**两句不同的话** —— 都写成「过期」会让用户以为 token 已经不能用了
+  "token.gate.expiring": "即将刷新 {time}",
+  "token.gate.expired": "过期 {time}",
+  "token.gate.title": "Token 状态",
+  "token.gate.source": "来源",
+  // 徽标上方的行标签。刻意短：「取 Token 的接口」这类完整说法在 320px 的浮层里
+  // 会折成两行，而标签折行吃掉的是**地址列**的宽度 —— 地址才是需要空间的那个。
+  // 「取 / 刷新」的区别由这一行的值（方法 + 地址）和浮层尾部的说明交代。
+  "token.gate.endpoint": "Token 接口",
+  "token.gate.endpointGone": "「{name}」（已被删除）",
+  "token.gate.endpointUnknown": "（读不到，它可能已经被删掉）",
+  "token.gate.endpointHint": "Token 过期时打它换一个新的",
+  // 「获取」与「刷新」是两条接口时才出现（表单配不出来，只有 MCP / 直写库能造）。
+  // 两句都要说全：只提刷新那条等于把上面「Token 接口」那行重说一遍，
+  // 而用户真正会误解的是「初次获取也走同一条」。
+  "token.gate.splitEndpoints": "获取走「{fetch}」，刷新走「{refresh}」",
+  "token.gate.fetchedAt": "上次取回",
+  "token.gate.expiresAt": "过期时间",
+  "token.gate.autoRefresh": "自动重新获取",
+  "token.gate.skew": "提前量",
+  "token.gate.on": "开",
+  "token.gate.off": "关",
+  "token.gate.autoRefreshOff": "已关掉自动重新获取：过期后发送会直接报错，不会拿旧 Token 硬发",
+  "token.gate.noSourceHint":
+    "这条请求引用了 {{token.*}}，但它的分类链上没有 Token 来源 —— 发送时那些占位符会原样带出去。",
+  "token.gate.manageHint": "去「授权」页配置 Token 来源",
+
+  // ---- 响应区的「本次发送用了什么 Token」结果条 ----
+  "token.usage.refreshed": "本次已刷新 Token",
+  "token.usage.cached": "本次复用了缓存的 Token",
+  "token.usage.via": "走「{name}」",
+  "token.usage.left": "{time}后过期",
+  "token.usage.expired": "已过期 {time}",
+  "token.usage.noExpiry": "永不过期",
+  "token.usage.refreshedHint": "发送前打了一次取 Token 的接口，下面用的是刚换回来的那个",
+  "token.usage.cachedHint": "发送时缓存还有效，这次没有额外的取 Token 请求",
+  "token.usage.autoRefreshOff": "已关掉自动重新获取",
 
   // ---- 占位符（P4） ----
   "placeholder.title": "占位符",

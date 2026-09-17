@@ -537,6 +537,11 @@ mod tests {
             total_ms: 2,
             body_file: None,
             unresolved_placeholders: Vec::new(),
+            // 压测不关心 Token 使用报告（它自己就是「拿一份现成 spec 打 N 次」）
+            token_usage: None,
+            // 也不需要 curl 回显（那是桌面端「看一眼上次发了什么」的入口）
+            curl: None,
+            curl_plain: None,
         }
     }
 

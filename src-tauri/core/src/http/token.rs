@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Local, SecondsFormat, Utc};
+use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +69,25 @@ pub struct TokenDeps<'a> {
     pub cancel: Option<&'a CancellationToken>,
 }
 
+/// 一次「确保就绪」的结果：拿到的值 + 本次到底刷没刷。
+///
+/// ## 为什么要把这件事显式带出来
+///
+/// 缓存命中与真刷新在**结果**上完全一样 —— 都是一个能用的 token，
+/// 所以在此之前没有任何地方能区分它们。但用户排查问题时这两者天差地别：
+/// 「我以为它刷了，其实一直在用一小时前那个」是最典型的误判，而且从界面上
+/// 完全看不出来（请求成功、token 也是对的，只是旧的）。
+///
+/// 这个标记由**执行期**产生，一路回传到响应的 `token_usage` 里。
+/// 不让前端拿 `updatedAt` 前后比对：那种推断在并发（或 MCP/CLI 也在刷）
+/// 时会把别人的刷新算到这一次头上，结论看着自洽却是错的。
+#[derive(Debug)]
+pub struct TokenOutcome {
+    pub values: TokenValues,
+    /// `true` = 本次真的打了一次取 Token 请求；`false` = 命中缓存（零网络）
+    pub refreshed: bool,
+}
+
 /// 每个 Token 源的「航班锁」。
 #[derive(Default)]
 pub struct TokenRefresher {
@@ -80,11 +100,14 @@ impl TokenRefresher {
     }
 
     /// 取某个 Token 源本次可用的值。`force = true` 时忽略缓存（「立即刷新」）。
-    pub async fn ensure(&self, deps: &TokenDeps<'_>, force: bool) -> AppResult<TokenValues> {
+    pub async fn ensure(&self, deps: &TokenDeps<'_>, force: bool) -> AppResult<TokenOutcome> {
         // ── 检查一：不持锁。缓存有效时（绝大多数请求）在这里就返回了 ──
         if !force {
             if let Some(values) = read_fresh(deps).await? {
-                return Ok(values);
+                return Ok(TokenOutcome {
+                    values,
+                    refreshed: false,
+                });
             }
         }
 
@@ -94,7 +117,13 @@ impl TokenRefresher {
         // ── 检查二：持锁。★ 这一步让「并发只打一次刷新」成立 ──
         if !force {
             if let Some(values) = read_fresh(deps).await? {
-                return Ok(values);
+                // 后到者在这里醒来，`refreshed = false`：它拿到的是**第一个人**
+                // 刷出来的值，自己一个请求都没发。界面要说的是「本次没刷」——
+                // 说「刷了」会把并发时的请求数报成 5 次，而服务端只收到 1 次。
+                return Ok(TokenOutcome {
+                    values,
+                    refreshed: false,
+                });
             }
         }
 
@@ -111,11 +140,16 @@ impl TokenRefresher {
             ));
         }
 
-        fetch(deps).await
+        Ok(TokenOutcome {
+            values: fetch(deps).await?,
+            refreshed: true,
+        })
     }
 
     /// 「立即刷新」：忽略缓存，强制打一次（design.md §4.3 的最后一行）。
-    pub async fn refresh_now(&self, deps: &TokenDeps<'_>) -> AppResult<TokenValues> {
+    ///
+    /// `force = true` 会跳过两次缓存检查，所以结果里 `refreshed` 必然是 `true`。
+    pub async fn refresh_now(&self, deps: &TokenDeps<'_>) -> AppResult<TokenOutcome> {
         self.ensure(deps, true).await
     }
 
@@ -171,10 +205,57 @@ pub fn is_expired(cache: &TokenCache, skew_seconds: i64, now: DateTime<Utc>) -> 
         return false;
     };
 
-    match DateTime::parse_from_rfc3339(raw) {
-        Ok(at) => now + Duration::seconds(skew_seconds.max(0)) >= at.with_timezone(&Utc),
-        Err(_) => true,
+    match parse_expiry(raw) {
+        Some(at) => now + Duration::seconds(skew_seconds.max(0)) >= at,
+        None => true,
     }
+}
+
+/// 距离过期还剩多少秒。负数 = 已经过去多久；`None` = 永不过期或时间戳读不懂。
+///
+/// ⚠️ **只用于显示**，别拿它判「算不算过期」——「提前量」(`skew_seconds`)
+/// 不在这个数字里，判定走 [`is_expired`]。签名收 `Option<&str>` 而不是
+/// `&TokenCache`：响应里带出去的那份只是一段 ISO 字符串，没有整行缓存。
+///
+/// 与 `is_expired` 共用同一份解析（[`parse_expiry`]），否则会出现
+/// 「剩余秒数说明明还有 30 秒、判定却说已过期」这种自相矛盾的展示。
+pub fn remaining_seconds(expires_at: Option<&str>, now: DateTime<Utc>) -> Option<i64> {
+    let at = parse_expiry(expires_at?)?;
+    Some((at - now).num_seconds())
+}
+
+/// RFC3339 → UTC。读不懂就是 `None`，由调用方决定偏保守的那一侧。
+fn parse_expiry(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// 一次业务请求里 Token 的**实际使用情况**（由流水线填进响应回给前端）。
+///
+/// 这是「发送前能看见」与「发送后知道到底用没用」两件事的共同数据源：
+/// 前者要来源名与倒计时，后者要 `refreshed`（本次刷没刷）与 `endpointName`
+/// （刷的是哪个接口）。由后端一次算清，前端只负责翻译成文案。
+///
+/// 字段刻意不含任何给人读的句子 —— 文案归前端查表（契约同错误码）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub source_id: i64,
+    pub source_name: String,
+    /// ★ 本次真的打了一次取 Token 请求（`false` = 命中缓存、零网络）
+    pub refreshed: bool,
+    /// 生效的取 Token 接口 id。选法与 `fetch` 一致：`refresh_request_id` 优先
+    pub endpoint_request_id: i64,
+    /// 那个接口的名字。**可能为 `None`** —— 它刚被删掉、或名字读不出来时
+    /// 宁可少显示一截，也不该让整条响应因为一个展示字段而失败
+    pub endpoint_name: Option<String>,
+    /// 缓存里的过期时间（ISO8601）；`None` = 永不过期
+    pub expires_at: Option<String>,
+    /// 还剩多少秒（负数 = 已经过去多久）。**不含** `skew_seconds`，只看显示
+    pub remaining_seconds: Option<i64>,
+    /// 该来源是否开着自动刷新 —— 关掉时「过期了也不刷」是预期行为，不是故障
+    pub auto_refresh: bool,
 }
 
 /// 真正打一次取 token 请求、按路径提取、写缓存。
@@ -601,10 +682,14 @@ mod tests {
             refresher.ensure(&deps, false),
         );
 
-        for (index, result) in [a, b, c, d, e].into_iter().enumerate() {
+        let outcomes: Vec<TokenOutcome> = [a, b, c, d, e]
+            .into_iter()
+            .map(|result| result.expect("每次调用都该成功"))
+            .collect();
+
+        for (index, outcome) in outcomes.iter().enumerate() {
             assert_eq!(
-                result.expect("每次调用都该成功").access_token,
-                "fresh",
+                outcome.values.access_token, "fresh",
                 "第 {index} 个并发请求拿到的 token 不对"
             );
         }
@@ -612,6 +697,15 @@ mod tests {
             server.hits(),
             1,
             "并发 5 个请求只该触发 1 次刷新 —— 多了说明单飞锁没生效"
+        );
+        // ★ 只有一个人真的刷了：其余四个在检查二醒来时命中了它写下的缓存。
+        // 这是「服务端只收到 1 次请求」在**结果**上的体现，也是界面敢说
+        // 「本次命中缓存」的依据 —— 把五个人都报成「刷新过」会在
+        // 并发场景下凭空多报四次网络往返。
+        assert_eq!(
+            outcomes.iter().filter(|o| o.refreshed).count(),
+            1,
+            "五个并发请求里只该有一个标记为「真刷新」"
         );
         assert_eq!(refresher.flight_count(), 1, "同一 Token 源只该有一把航班锁");
     }
@@ -636,8 +730,12 @@ mod tests {
             cancel: None,
         };
 
-        let values = refresher.ensure(&deps, false).await.expect("hit cache");
-        assert_eq!(values.access_token, "cached-token");
+        let outcome = refresher.ensure(&deps, false).await.expect("hit cache");
+        assert_eq!(outcome.values.access_token, "cached-token");
+        assert!(
+            !outcome.refreshed,
+            "命中缓存必须报「没刷」—— 报「刷了」等于在界面上编造一次网络往返"
+        );
         assert_eq!(server.hits(), 0, "缓存有效时不该发任何请求");
         assert_eq!(refresher.flight_count(), 0, "连航班锁都不该建");
     }
@@ -662,8 +760,9 @@ mod tests {
             cancel: None,
         };
 
-        let values = refresher.refresh_now(&deps).await.expect("force");
-        assert_eq!(values.access_token, "forced");
+        let outcome = refresher.refresh_now(&deps).await.expect("force");
+        assert_eq!(outcome.values.access_token, "forced");
+        assert!(outcome.refreshed, "「立即刷新」必须报「刷了」");
         assert_eq!(server.hits(), 1);
     }
 
@@ -689,9 +788,10 @@ mod tests {
         };
 
         let first = refresher.ensure(&deps, false).await.expect("refresh");
-        assert_eq!(first.access_token, "n1");
-        assert_eq!(first.refresh_token.as_deref(), Some("r1"));
-        assert!(first.expires_at.is_some(), "过期时间必须被算出来");
+        assert_eq!(first.values.access_token, "n1");
+        assert_eq!(first.values.refresh_token.as_deref(), Some("r1"));
+        assert!(first.values.expires_at.is_some(), "过期时间必须被算出来");
+        assert!(first.refreshed, "缓存已过期 → 这次一定是真刷新");
 
         let rows: i64 = db
             .pool
@@ -703,7 +803,8 @@ mod tests {
 
         // 第二次走缓存，不再打请求
         let second = refresher.ensure(&deps, false).await.expect("cached");
-        assert_eq!(second.access_token, "n1");
+        assert_eq!(second.values.access_token, "n1");
+        assert!(!second.refreshed);
         assert_eq!(server.hits(), 1);
     }
 
@@ -874,13 +975,13 @@ mod tests {
             cancel: None,
         };
 
-        let values = refresher.ensure(&deps, false).await.expect("refresh");
-        assert_eq!(values.access_token, "eternal");
-        assert_eq!(values.expires_at, None);
+        let outcome = refresher.ensure(&deps, false).await.expect("refresh");
+        assert_eq!(outcome.values.access_token, "eternal");
+        assert_eq!(outcome.values.expires_at, None);
 
         // 再取一次走缓存（expires_at = None → is_expired 恒 false）
         let again = refresher.ensure(&deps, false).await.expect("cached");
-        assert_eq!(again.access_token, "eternal");
+        assert_eq!(again.values.access_token, "eternal");
         assert_eq!(server.hits(), 1, "永不过期的缓存不该触发第二次请求");
     }
 
@@ -904,8 +1005,8 @@ mod tests {
             cancel: None,
         };
 
-        let values = refresher.ensure(&deps, false).await.expect("refresh");
-        assert_eq!(values.access_token, "from-env");
+        let outcome = refresher.ensure(&deps, false).await.expect("refresh");
+        assert_eq!(outcome.values.access_token, "from-env");
         assert_eq!(server.hits(), 1);
     }
 
@@ -929,6 +1030,31 @@ mod tests {
         DateTime::parse_from_rfc3339(iso)
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    /// 剩余秒数与 `is_expired` **同源解析**，读不懂就是 `None`。
+    ///
+    /// 这条钉的是「界面上的倒计时」：给它 `0` 会让倒计时显示成「马上刷新」，
+    /// 而真实原因只是那个 ISO 串读不出来 —— 用户会一直等一个永远不会发生的刷新。
+    #[test]
+    fn remaining_seconds_is_derived_from_the_same_parse_as_expiry() {
+        let now = at("2026-09-11T10:00:00Z");
+
+        assert_eq!(
+            remaining_seconds(Some("2026-09-11T10:05:00Z"), now),
+            Some(300)
+        );
+        assert_eq!(
+            remaining_seconds(Some("2026-09-11T09:59:00Z"), now),
+            Some(-60),
+            "已经过期给负数 —— 界面靠它说「已过期 1 分钟」"
+        );
+        assert_eq!(remaining_seconds(None, now), None, "永不过期没有倒计时");
+        assert_eq!(
+            remaining_seconds(Some("not-a-time"), now),
+            None,
+            "读不懂的时间戳不给数字，别报成「马上刷新」"
+        );
     }
 
     #[test]

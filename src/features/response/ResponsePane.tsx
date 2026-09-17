@@ -18,7 +18,9 @@ import { useRequestStore } from "@/store/request";
 import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
+import { CurlPanel } from "./CurlPanel";
 import { ResponseViewer, type ResponseTab } from "./ResponseViewer";
+import { TokenUsageBanner } from "./TokenUsageBanner";
 import { UnresolvedBanner } from "./UnresolvedBanner";
 
 const TABS: readonly TabItem<ResponseTab>[] = [
@@ -26,6 +28,7 @@ const TABS: readonly TabItem<ResponseTab>[] = [
   { key: "headers", labelKey: "response.tab.headers" },
   { key: "cookies", labelKey: "response.tab.cookies" },
   { key: "timeline", labelKey: "response.tab.timeline" },
+  { key: "curl", labelKey: "response.tab.curl" },
 ];
 
 /** 一枚指标胶囊：状态 / 耗时 / 大小 */
@@ -123,7 +126,11 @@ export function ResponsePane() {
       : "—";
 
   let content: ReactNode;
-  if (response) {
+  // 「cURL」排在最前面判：它**不看有没有响应** —— 恰恰是「这条请求还没跑过、
+  // 我想知道它打出去会是什么样」时最需要它。其余分支都要求有响应。
+  if (tab === "curl") {
+    content = <CurlPanel className="h-full" />;
+  } else if (response) {
     content = <ResponseViewer response={response} tab={tab} className="h-full" />;
   } else if (error) {
     content = <ErrorPanel error={error} />;
@@ -189,8 +196,24 @@ export function ResponsePane() {
       </div>
 
       {/* 未解析的占位符挂在**响应上**（它就是这一次发送的属性），
-          所以横幅也画在响应区里 —— 而不是飘在请求区或弹一个 toast */}
-      <UnresolvedBanner placeholders={response?.unresolvedPlaceholders ?? []} />
+          所以横幅也画在响应区里 —— 而不是飘在请求区或弹一个 toast。
+          排在最上面：它说的是「你发出去的东西可能不是你想要的」，
+          优先级高于下面那条「这次用了什么 Token」的信息。
+
+          `cURL` 页签下不画这两条：它们讲的是「上一次响应」的元信息，
+          而那个页签里显示的可能是**另一份**命令（历史的、或按当前内容推演的）——
+          两件事并排放会让人把它们当成同一份东西的属性。那页面板自己会说出
+          更要紧的（没解析的占位符、顺带刷了 Token）。 */}
+      {tab === "curl" ? null : (
+        <>
+          <UnresolvedBanner placeholders={response?.unresolvedPlaceholders ?? []} />
+
+          {/* 「这一次到底刷没刷 Token」只有执行期知道（缓存命中与真刷新在结果上
+              一模一样，事后从库里读不出来），所以它随响应一起回来，也画在这里。
+              没有它的话，用户改完 Token 配置只能靠「发出去看 401」来验证 */}
+          <TokenUsageBanner usage={response?.tokenUsage} />
+        </>
+      )}
 
       <div className="min-h-0 flex-1 overflow-hidden">{content}</div>
     </section>

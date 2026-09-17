@@ -826,5 +826,10 @@ function recordHistory(input: {
     // P4 起记录了：历史列表里能看出「这条是用哪个环境跑的」。
     // 环境没激活时是 null —— 「不使用环境」是一个真实的、需要被记录的状态。
     environment: useEnvStore.getState().active?.name ?? null,
+    // 失败时也要记：网络层失败恰恰是用户最想回看的那几条。
+    // 拿不到（响应没带）就是 undefined，历史里那一列为 NULL，
+    // 回看时退化成「按当前内容推演」并标出来源。
+    curl: input.response?.curlPlain,
+    curlMasked: input.response?.curl,
   });
 }

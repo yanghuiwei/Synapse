@@ -233,6 +233,15 @@ export interface HistoryEntry {
   executedAt: string;
   /** 非空 = 在回收站 */
   deletedAt: string | null;
+  /**
+   * 这次执行**真实发出**的请求对应的 curl（凭据明文）。
+   *
+   * `null` = 这条历史发生在落库这个字段之前（或写入方没给），
+   * 那时只能拿当前内容重新推演，界面上必须把来源说清楚。
+   */
+  curl: string | null;
+  /** 同上，凭据打码。给「要截图 / 要贴出去」的场合。 */
+  curlMasked: string | null;
 }
 
 export interface LoadtestRun {
@@ -450,6 +459,40 @@ export interface HttpResponsePayload {
    * 99% 的情况是用户想要的接口根本没被调到（打到 `https://api.x/{{env.path}}`）。
    */
   unresolvedPlaceholders: UnresolvedPlaceholder[];
+  /**
+   * 本次发送里 Token 的**实际使用情况**。
+   *
+   * ⚠️ 字段**不存在**（而不是 `null`）= 本次没用上 Token：请求里没写
+   * `{{token.*}}`，或者这条请求的分类链上没有 Token 来源。
+   * 与 `bodyFile` 同一个约定 ——「没有」只有一种表示。
+   */
+  tokenUsage?: TokenUsage;
+  /**
+   * 本次**真实发出**的请求对应的 curl，凭据已打码。
+   *
+   * 字段不存在 = 这条路径不生成 curl（MCP / CLI 的输出会进 AI 的上下文，
+   * 凭据不从那里出去）。桌面端一定有。
+   */
+  curl?: string;
+  /** 同上，凭据明文 —— 核对 401 时真正要看的那份。只有桌面端会拿到。 */
+  curlPlain?: string;
+}
+
+/**
+ * `preview_curl` 的返回：**按当前编辑内容推演**出来的一条 curl。
+ *
+ * 与 [`HttpResponsePayload.curl`] 的差别是「推演」与「事实」的差别 ——
+ * 界面上必须把这层区别说清楚，否则用户会把推演当成当时发出去的东西。
+ */
+export interface PreviewCurlResult {
+  /** 凭据已打码 */
+  curl: string;
+  /** 凭据明文 */
+  curlPlain: string;
+  /** 没能解析的占位符（原文被原样留在了命令里） */
+  unresolvedPlaceholders: UnresolvedPlaceholder[];
+  /** 本次解析用到的 Token 情况；不存在 = 这条请求用不上 token */
+  tokenUsage?: TokenUsage;
 }
 
 /**
@@ -472,6 +515,46 @@ export interface TokenStatus {
   /** 当前缓存的 access token。**打码是展示层的事**（见 `env.secretHint` 的同一套约定） */
   accessToken: string | null;
   hasRefreshToken: boolean;
+  autoRefresh: boolean;
+}
+
+/**
+ * 一次发送里 Token 的**实际使用情况**（`send_request` 响应里的 `tokenUsage`）。
+ *
+ * ## 为什么这件事必须由后端给
+ *
+ * 发送**前**界面上能看到的只有「有一个可用的 Token」，而「这一次到底刷没刷」
+ * 是执行期的事实 —— 事后从库里读不出来。前端拿 `updatedAt` 前后比对看着能用，
+ * 实则不成立：并发发送、或者 MCP / CLI 也在刷的时候，别人的刷新会被算到
+ * 这一次头上，结论看着自洽却是错的。
+ *
+ * 所以判定放在编排层（Rust `http::pipeline::token_context`），
+ * 前端只负责把它翻译成文案 —— 与错误码同一套契约（后端不给句子）。
+ */
+export interface TokenUsage {
+  sourceId: number;
+  sourceName: string;
+  /** ★ 本次真的打了一次取 Token 请求；`false` = 命中缓存（零网络） */
+  refreshed: boolean;
+  /**
+   * 生效的取 Token 接口 id。
+   *
+   * 与后端 `fetch` 的选法一致（`refreshRequestId` 优先），所以它就是
+   * 「刷新时会打到哪个接口」—— 界面据此告诉用户去哪儿改。
+   */
+  endpointRequestId: number;
+  /** 那个接口的名字。读不出来（比如它刚被删掉）就是 `null` */
+  endpointName: string | null;
+  /** 缓存里的过期时间（ISO8601）；`null` = 永不过期 */
+  expiresAt: string | null;
+  /**
+   * 还剩多少秒（负数 = 已经过去多久）。`null` = 永不过期。
+   *
+   * ⚠️ **不含** `skewSeconds`：它是「距离过期还有多久」，不是「还算不算有效」。
+   * 判定看 `TokenStatus.expired`。
+   */
+  remainingSeconds: number | null;
+  /** 该来源是否开着自动刷新 —— 关掉时「过期了也不刷」是预期行为，不是故障 */
   autoRefresh: boolean;
 }
 
@@ -536,6 +619,15 @@ export interface NewHistoryEntry {
   /** 错误码字符串（如 `E_DNS`），不是给人读的句子 */
   error: string | null;
   environment: string | null;
+  /**
+   * 本次真实发出的 curl（凭据明文 / 打码各一份）。
+   *
+   * 直接搬运发送结果里的那两份，**不在前端重拼**：拼法只有后端一份，
+   * 两边各写一遍必然会在某个编码细节上分叉，而用户是拿它去核对报错的。
+   * 拿不到（MCP / CLI 路径、或响应没带）时为 `undefined`。
+   */
+  curl?: string;
+  curlMasked?: string;
 }
 
 // ============================================================

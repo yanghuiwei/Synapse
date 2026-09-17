@@ -218,6 +218,28 @@ pub struct HttpResponsePayload {
     /// 由流水线填（见 `http::pipeline`）—— 执行层本身不碰模板。
     #[serde(default)]
     pub unresolved_placeholders: Vec<UnresolvedPlaceholder>,
+    /// 本次发送里 Token 的**实际使用情况**：刷没刷、走的哪个取 Token 接口、还剩多久。
+    ///
+    /// 与 `body_file` 同一个约定：没用到 Token 时字段**不出现**（而不是给一个
+    /// `null`）——「没有」只有一种表示，前端一个 `if` 就够。
+    ///
+    /// 由流水线填（见 `http::pipeline::token_context`）：执行层既不知道模板、
+    /// 也不知道 Token 源，它是**纯粹的执行器**。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<crate::http::token::TokenUsage>,
+    /// 本次**真实发出**的请求对应的 curl，凭据已打码。
+    ///
+    /// 由编排层填（见 `service::request`）而不是执行层：执行到这里时请求已经
+    /// 变成 builder 了，「用户写了什么、被解析成了什么」这层信息只剩编排层知道。
+    ///
+    /// 明文单独占一个字段（[`Self::curl_plain`]）而不是让调用方自己决定要不要打码 ——
+    /// 打码是**谁在看**的问题：桌面端是用户本人在看自己机器上的 token，
+    /// 而 MCP / CLI 的输出会被 AI 读走。那条路径上两个字段都不填（见 `service::ops`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curl: Option<String>,
+    /// 同上，但凭据是明文。**只有桌面端会拿到**。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curl_plain: Option<String>,
 }
 
 /// 执行一个请求。`client` 由 [`crate::http::ClientCache`] 提供（连接池复用）。
@@ -410,8 +432,12 @@ async fn execute_inner(
         download_ms: total.saturating_sub(ttfb).as_millis() as u64,
         total_ms: total.as_millis() as u64,
         body_file,
-        // 占位符报告归流水线填 —— 执行层不知道模板的存在
+        // 占位符报告与 Token 使用报告都归流水线填 —— 执行层不知道它们的存在
         unresolved_placeholders: Vec::new(),
+        token_usage: None,
+        // 同上：curl 要的是「解析后的 spec」，那是编排层手里才有的东西
+        curl: None,
+        curl_plain: None,
     })
 }
 
@@ -429,7 +455,9 @@ fn parse_method(raw: &str) -> AppResult<Method> {
 
 /// 解析 URL。**没有 scheme 时补 `http://`** ——
 /// 直接粘 `127.0.0.1:8080/health` 是极常见的操作，逼用户先去补 `http://` 纯属找麻烦。
-fn parse_url(raw: &str) -> AppResult<Url> {
+/// `pub(crate)` 而不是私有：curl 导出（[`crate::http::curl`]）必须用**同一个**拼法，
+/// 否则那条命令与真实请求在编码上会有出入，而它存在的全部意义就是「一模一样」。
+pub(crate) fn parse_url(raw: &str) -> AppResult<Url> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(AppError::InvalidUrl {
@@ -505,7 +533,7 @@ fn header_auth_pair(auth: &AuthConfig) -> AppResult<Option<(HeaderName, HeaderVa
 }
 
 /// 授权里要放进 query 的那一对（`ApiKey` + `location = query`）。
-fn query_auth_pair(auth: &AuthConfig) -> Option<(&str, &str)> {
+pub(crate) fn query_auth_pair(auth: &AuthConfig) -> Option<(&str, &str)> {
     match auth {
         AuthConfig::ApiKey {
             key,
@@ -516,7 +544,8 @@ fn query_auth_pair(auth: &AuthConfig) -> Option<(&str, &str)> {
     }
 }
 
-fn apply_query_params(url: &mut Url, params: &[KeyValueItem]) {
+/// `pub(crate)`：curl 导出共用同一份拼接（见 [`parse_url`] 同一条理由）。
+pub(crate) fn apply_query_params(url: &mut Url, params: &[KeyValueItem]) {
     let active: Vec<&KeyValueItem> = params
         .iter()
         .filter(|p| p.enabled && !p.key.trim().is_empty())
@@ -686,7 +715,10 @@ fn build_multipart(fields: &[KeyValueItem]) -> AppResult<reqwest::multipart::For
 ///
 /// 与前端 `lib/urlencoded.ts` 的 `PAIR_SEPARATOR_RE` 是**同一个口径**：
 /// 这条路径服务 MCP / CLI / 只看 `body` 的历史快照，只改前端等于只修一半。
-fn form_fields_from_body(body: &str) -> Vec<KeyValueItem> {
+///
+/// `pub(crate)`：curl 导出的 multipart 也要按同一份口径拆行，
+/// 否则「导出 → 导入」会把多行表单并成一个字段。
+pub(crate) fn form_fields_from_body(body: &str) -> Vec<KeyValueItem> {
     let mut fields = Vec::new();
 
     for line in body.split(['\n', '\r']) {

@@ -218,6 +218,9 @@ export const historyEntrySchema = z.looseObject({
   executedAt: z.string(),
   /** 非空 = 在回收站 */
   deletedAt: z.string().nullable(),
+  /** 当时真实发出的 curl；null = 这条历史发生在本版之前 */
+  curl: z.string().nullable(),
+  curlMasked: z.string().nullable(),
 });
 
 export const loadtestRunSchema = z.looseObject({
@@ -350,6 +353,24 @@ export const unresolvedPlaceholderSchema = z.looseObject({
 });
 
 /**
+ * `send_request` 响应里的 `tokenUsage`。
+ *
+ * 与 `tokenStatusSchema` 是**两个不同的东西**，别合并：
+ * 这个是「**这一次发送**用了什么」（执行期的事实，事后从库里查不到），
+ * 那个是「某个 Token 来源**现在**是什么状态」（随时可查的缓存快照）。
+ */
+export const tokenUsageSchema = z.looseObject({
+  sourceId: z.number(),
+  sourceName: z.string(),
+  refreshed: z.boolean(),
+  endpointRequestId: z.number(),
+  endpointName: z.string().nullable(),
+  expiresAt: z.string().nullable(),
+  remainingSeconds: z.number().nullable(),
+  autoRefresh: z.boolean(),
+});
+
+/**
  * `send_request` 的返回。
  *
  * 这一层校验的价值在这条链路上最高：Rust 侧字段多、又是手写两份定义，
@@ -376,9 +397,22 @@ export const responsePayloadSchema = z.looseObject({
   // 缺省空数组而不是必填：P2/P3 的后端没有这个字段，
   // 而「没有未解析项」本来就是这个字段的绝大多数取值
   unresolvedPlaceholders: z.array(unresolvedPlaceholderSchema).catch([]),
+  // 同上：缺省 `undefined` 而不是 `null` —— 它就是「本次没用上 Token」，
+  // 与 `bodyFile` 一个约定
+  tokenUsage: tokenUsageSchema.optional(),
+  // 本次真实发出的 curl。缺省 `undefined` = 这条路径不生成它（MCP / CLI 的输出
+  // 会进 AI 的上下文，凭据不从那里出去）
+  curl: z.string().optional(),
+  curlPlain: z.string().optional(),
 });
 
-
+/** `preview_curl` 的返回：按当前编辑内容**推演**出来的一条命令 */
+export const previewCurlResultSchema = z.looseObject({
+  curl: z.string(),
+  curlPlain: z.string(),
+  unresolvedPlaceholders: z.array(unresolvedPlaceholderSchema).catch([]),
+  tokenUsage: tokenUsageSchema.optional(),
+});
 
 /** `get_token_status` / `refresh_token` 的返回 */
 export const tokenStatusSchema = z.looseObject({

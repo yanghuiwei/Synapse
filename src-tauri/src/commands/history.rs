@@ -69,6 +69,22 @@ pub async fn get_history(state: State<'_, AppState>, id: i64) -> AppResult<Histo
     with_conn(&state.pool, move |conn| repo::history::get(conn, id)).await
 }
 
+/// 某条请求**最近一次带 curl 的**执行 —— 响应区的「cURL」面板打开时用它带出
+/// 「上次跑的是什么」。
+///
+/// 返回 `None` 是正常情况（这条请求还没跑过，或者跑过但都在本版之前），
+/// 前端据此退化成「按当前编辑内容生成」，而不是给一个空面板。
+#[tauri::command]
+pub async fn latest_history_curl(
+    state: State<'_, AppState>,
+    request_id: i64,
+) -> AppResult<Option<HistoryEntry>> {
+    with_conn(&state.pool, move |conn| {
+        repo::history::latest_with_curl(conn, request_id)
+    })
+    .await
+}
+
 /// 写一条历史（发送结束后调用）。
 ///
 /// **成功与失败都要写**：`status = None` + `error` 有值代表网络层失败，

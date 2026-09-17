@@ -17,7 +17,16 @@ import {
 import type { BodyFile, HttpResponsePayload, SavedFile } from "@/lib/types";
 import { Button, IconButton } from "@/features/ui/Button";
 
-export type ResponseTab = "body" | "headers" | "cookies" | "timeline";
+export type ResponseTab = "body" | "headers" | "cookies" | "timeline" | "curl";
+
+/**
+ * [`ResponseViewer`] 负责的那几个页签。
+ *
+ * `curl` 被排除在外：它**不依赖响应**（这条请求还没跑过时照样要看），
+ * 所以由 `CurlPanel` 单独挂在响应区里，而不是塞进这个「读响应」的组件。
+ * 排除之后这里的 `switch` 就是穷尽的，加新页签时漏一处会被编译器挡住。
+ */
+export type ResponseBodyTab = Exclude<ResponseTab, "curl">;
 
 /** 复制按钮 —— 带 1.5 秒的「已复制」反馈 */
 function CopyButton({ text }: { text: string }) {
@@ -544,7 +553,7 @@ function TimelineView({
 
 export interface ResponseViewerProps {
   response: HttpResponsePayload;
-  tab: ResponseTab;
+  tab: ResponseBodyTab;
   className?: string;
 }
 

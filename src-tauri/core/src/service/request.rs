@@ -26,10 +26,15 @@ use crate::AppState;
 /// 非 Tauri 进程（`reqly-mcp` / `reqly-cli`）造不出来。桌面端、MCP、CLI
 /// 三条路径共用这一份编排，而不是各写一遍：一旦分叉，症状是
 /// 「桌面端点得对、AI 那边悄悄不对」，那种 bug 不会有人去查。
+///
+/// `emit_curl` 决定要不要在结果里附上「本次真实发出的请求」对应的 curl。
+/// **只有桌面端传 `true`**：那份东西里带着展开后的 token，而 MCP / CLI 的输出
+/// 会进 AI 的上下文 —— 凭据不该从那条路出去（判定名单见 `crate::redact`）。
 pub async fn send_request_with(
     state: &AppState,
     run_id: &str,
     spec: &RequestSpec,
+    emit_curl: bool,
 ) -> AppResult<HttpResponsePayload> {
     if run_id.trim().is_empty() {
         return Err(AppError::InvalidInput {
@@ -72,6 +77,21 @@ pub async fn send_request_with(
     // 未解析的占位符随响应回给调用方：它们没被替换掉，原文已经原样发出去了，
     // 用户需要知道「你发出去的不是你以为的那串 URL」。
     payload.unresolved_placeholders = prepared.unresolved;
+
+    // Token 使用报告同理：它是**这一次执行**的事实（刷了没、走的哪个接口），
+    // 只有编排层知道（执行期才有答案，事后从库里读不出来）。
+    payload.token_usage = prepared.token;
+
+    // curl 取的是 `prepared.spec` 而不是调用方传来的 `spec`：前者占位符已展开、
+    // token 已注入、授权继承已解开。拿原始草稿拼出来的会是 `{{token.access}}`
+    // 这种原文 —— 而用户打开这个面板要核对的恰恰是「那一刻真实发出去的是什么」。
+    //
+    // 两份都给：打码那份用于截图/分享，明文那份是核对 401 时真正要看的。
+    // 桌面端是本机用户在看自己的凭据，与 `token_cache` 一直明文存着同一个口径。
+    if emit_curl {
+        payload.curl = Some(crate::http::to_curl(&prepared.spec, true));
+        payload.curl_plain = Some(crate::http::to_curl(&prepared.spec, false));
+    }
 
     record_last_response(state, &payload);
     Ok(payload)
