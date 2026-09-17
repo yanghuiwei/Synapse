@@ -81,7 +81,29 @@ export function serializeUrlencoded(rows: readonly KeyValueItem[]): string {
 }
 
 /**
+ * 键值对的分隔符：`&` 或换行。
+ *
+ * 连续的分隔符（`&&`、`&\n`、`\r\n`）并成一个，省掉一次过滤。
+ *
+ * 与 Rust 侧 `http::execute::form_fields_from_body` 是**同一个口径** ——
+ * 那边服务「只写 `body` 的调用方」（MCP / CLI / 历史快照），只改这里
+ * 会让同一个 body 在两条路径上长出不同的表格。
+ */
+const PAIR_SEPARATOR_RE = /[&\r\n]+/;
+
+/**
  * `a=1&b=2` → 键值行。
+ *
+ * ## 为什么换行也算分隔符
+ *
+ * 只看 `&` 的话，「一行一个 `k=v`」的 body 会被整个压成**一个**字段：
+ * 键是第一个 `=` 左边那截，值是剩下全部（含中间的换行）。这种形态很常见 ——
+ * curl 的多行 `--data`、`.http` 文件、从接口文档里整段复制下来的表单内容。
+ * 压成一行之后界面看着像「某一行里带换行」，实际发出去服务端只会收到一个
+ * 字段，剩下几个（`client_secret`、`grant_type`）仿佛凭空消失。
+ *
+ * 未编码的换行本来就不该出现在值里（该编成 `%0A`，`serializeUrlencoded`
+ * 就是这么写的），所以把它当分隔符不会误伤合法的键值对。
  *
  * 只在**加载**时用（见 `store/request` 的 `rowsFrom`）：库里没有行、但
  * `body` 里有内容的老数据 / curl 导入 / MCP 写入，都靠它还原成表格。
@@ -101,7 +123,7 @@ export function parseUrlencoded(
   if (text === "") return [];
 
   return text
-    .split("&")
+    .split(PAIR_SEPARATOR_RE)
     .filter((pair) => pair !== "")
     .map((pair) => {
       const eq = pair.indexOf("=");
@@ -121,6 +143,39 @@ export function parseUrlencoded(
     });
 }
 
+/** 值里有没有裸换行。单行控件敲不出来，出现即说明这一行是被解析坏的 */
+const NEWLINE_RE = /[\r\n]/;
+
+/**
+ * 把「一个字段的值里裹着换行」拆成多个字段。
+ *
+ * 这类行是**旧解析器留下的伤**：换行还不算分隔符的时候，一段「一行一个 `k=v`」
+ * 的 body 会被压成**一个**字段 —— 键取第一行 `=` 左边那截，值是其后的全部
+ * （换行原样带着）。库里存下来的就是这个坏形状，所以光把 `parseUrlencoded`
+ * 改对是不够的：已经落库的行得在**读出来的时候**顺一遍，否则那张表永远是
+ * 「一行、里面挤着四行」，用户只能手抄一遍。
+ *
+ * 单行控件本来就敲不出换行（`<input>` 会 strip newlines），值里出现裸换行
+ * 只可能是被解析坏的 —— 拿它当分隔符重拆不会误伤正常数据。
+ *
+ * 形状没问题的行**原样返回**（同一个对象引用）：它们带着「未勾选」这类只存在于
+ * 界面上的状态，白白拷一遍没有好处。
+ */
+function splitRowsAtNewlines(rows: KeyValueItem[], files: boolean): KeyValueItem[] {
+  if (!rows.some((row) => NEWLINE_RE.test(row.value))) return rows;
+
+  const out: KeyValueItem[] = [];
+  for (const row of rows) {
+    if (!NEWLINE_RE.test(row.value)) {
+      out.push(row);
+      continue;
+    }
+    // 整行拼回 `键=值` 再走一遍解析 —— 换行就在那一层被当分隔符拆开了
+    out.push(...parseUrlencoded(`${row.key}=${row.value}`, { files }));
+  }
+  return out;
+}
+
 /**
  * **urlencoded 的**键值行：库里有就用库里的，没有才去解析 `body`。
  *
@@ -136,7 +191,7 @@ export function rowsFrom(
   body: string,
 ): KeyValueItem[] {
   const copy = rows.map((row) => ({ ...row }));
-  if (copy.length > 0) return copy;
+  if (copy.length > 0) return splitRowsAtNewlines(copy, false);
   if (bodyType === "urlencoded") return parseUrlencoded(body);
   return [];
 }
@@ -153,5 +208,5 @@ export function formFieldsFrom(
   body: string,
 ): KeyValueItem[] {
   const copy = rows.map((row) => ({ ...row }));
-  return copy.length > 0 ? copy : parseUrlencoded(body, { files: true });
+  return copy.length > 0 ? splitRowsAtNewlines(copy, true) : parseUrlencoded(body, { files: true });
 }

@@ -105,6 +105,55 @@ function bodySnapshot(
 }
 
 /**
+ * 是不是「键值型」请求体。
+ *
+ * 只有 `urlencoded` 与 `form` 这两者之间互切才有「把字段带过去」这回事 ——
+ * 它们本来就是同一份键值对的两种编码，切类型的人要的正是换个编码重发。
+ * `json` / `raw` / `none` 之间没有可搬的东西（一个是自由文本，一个什么都没有）。
+ */
+function isKeyValueType(type: BodyType): boolean {
+  return type === "urlencoded" || type === "form";
+}
+
+/** 该类型对应的「行」存在草稿的哪一格 */
+function rowsOf(draft: RequestDraft, type: BodyType): KeyValueItem[] {
+  return type === "form" ? draft.formFields : draft.bodyRows;
+}
+
+/**
+ * 把行写回它自己那一格，并同步 `body` 镜像串。
+ *
+ * 与 `setBodyRows` / `setFormFields` 是同一件事，抽出来只是因为切类型那条路
+ * 也要用 —— 镜像串在那里漏写过的表现是「切过去表格是对的，但保存下来
+ * `body` 还是空的」，下次打开又变回空表。
+ */
+function withRows(draft: RequestDraft, type: BodyType, rows: KeyValueItem[]): RequestDraft {
+  const body = serializeUrlencoded(rows);
+  if (type === "form") {
+    return { ...draft, formFields: rows, body, bodyByType: bodySnapshot(type, body, draft.bodyByType) };
+  }
+  return { ...draft, bodyRows: rows, body, bodyByType: bodySnapshot(type, body, draft.bodyByType) };
+}
+
+/**
+ * 切到表达不了文件的编码时，带 `file` 的行降级成普通文本值。
+ *
+ * **不能整行丢掉** —— 用户看到的是「切一下类型少了一行」，界面上不留任何痕迹
+ * （与「宁可报错也不静默兜底」是同一条纪律）。路径留在值里，他看得见也改得动。
+ */
+function demoteFileRows(rows: readonly KeyValueItem[]): KeyValueItem[] {
+  return rows.map((row) => {
+    if (row.file === undefined) return row;
+    // 显式构造而不是 `{ ...row, file: undefined }`：后者会在对象上留一个
+    // 值为 undefined 的 `file` 键，JSON 一过就消失，但在这之前任何
+    // `"file" in row` 式的判断都会得到 true
+    const next: KeyValueItem = { key: row.key, value: row.file.trim(), enabled: row.enabled };
+    if (row.desc !== undefined) next.desc = row.desc;
+    return next;
+  });
+}
+
+/**
  * 从已保存的请求灌一份草稿。
  *
  * 这里**必须深拷贝** `params` / `headers`：它们是数组对象，
@@ -587,14 +636,27 @@ export const useRequestStore = create<RequestState>((set, get) => ({
       const d = s.draft;
       // 先把当前这份写回它自己的格子，再取新那格 —— 顺序反过来等于没存
       const bodyByType = bodySnapshot(d.bodyType, d.body, d.bodyByType);
+      const incoming = bodyByType[bodyType] ?? "";
+
       // `bodyRows` / `formFields` 刻意**不动**：它们各自只服务一种类型
       // （urlencoded / form），切到别处再切回来时那几行得原样还在
       // （包括「未勾选」这种只存在于界面上的状态）。
       // 若在这里从 body 重新解析，未勾选的行就悄悄没了。
-      return {
-        draft: { ...d, bodyType, bodyByType, body: bodyByType[bodyType] ?? "" },
-        dirty: true,
-      };
+      let draft: RequestDraft = { ...d, bodyType, bodyByType, body: incoming };
+
+      // 唯一的例外：两个**键值型**之间互切、而目标那格从来没写过 —— 把行带过去。
+      // 不带的表现是「切到 x-www-form-urlencoded，表格一片空白」，而内容明明还在
+      // 隔壁那格，用户只能重填一遍。这两者本来就是同一份键值对的两种编码，
+      // 切类型的人要的正是换个编码把同一份内容发出去。
+      // 目标那格已有内容就不碰：那多半是他自己填的，覆盖掉比空着更糟。
+      if (incoming === "" && isKeyValueType(bodyType) && isKeyValueType(d.bodyType)) {
+        const rows = rowsOf(d, d.bodyType);
+        if (rows.length > 0) {
+          draft = withRows(draft, bodyType, bodyType === "form" ? rows : demoteFileRows(rows));
+        }
+      }
+
+      return { draft, dirty: true };
     });
     scheduleAutosave();
   },

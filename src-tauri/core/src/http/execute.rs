@@ -676,16 +676,26 @@ fn build_multipart(fields: &[KeyValueItem]) -> AppResult<reqwest::multipart::For
 ///
 /// **只服务 multipart**：urlencoded 那边值里的 `@` 很常见（`email=@qq.com`），
 /// 按文件解释会让那行在发送时被当成路径去读盘。
+///
+/// ## 换行也算分隔符
+///
+/// 先按行切开，每行再走 `form_urlencoded::parse`。只认 `&` 的话，「一行一个
+/// `k=v`」的 body（curl 的多行 `--data`、`.http` 文件、从接口文档整段复制下来的
+/// 表单内容）会变成**一个**字段，键是第一个 `=` 左边那截，值是剩下全部 ——
+/// 表现是服务端回「没有 grant_type」，而送出去的表单看着并不空。
+///
+/// 与前端 `lib/urlencoded.ts` 的 `PAIR_SEPARATOR_RE` 是**同一个口径**：
+/// 这条路径服务 MCP / CLI / 只看 `body` 的历史快照，只改前端等于只修一半。
 fn form_fields_from_body(body: &str) -> Vec<KeyValueItem> {
-    let text = body.trim();
-    if text.is_empty() {
-        return Vec::new();
-    }
+    let mut fields = Vec::new();
 
-    url::form_urlencoded::parse(text.as_bytes())
-        .map(|(key, value)| {
+    for line in body.split(['\n', '\r']) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        for (key, value) in url::form_urlencoded::parse(line.as_bytes()) {
             let (key, value) = (key.into_owned(), value.into_owned());
-            match value.strip_prefix('@') {
+            fields.push(match value.strip_prefix('@') {
                 Some(path) if !path.trim().is_empty() => KeyValueItem {
                     key,
                     value: String::new(),
@@ -694,9 +704,11 @@ fn form_fields_from_body(body: &str) -> Vec<KeyValueItem> {
                     file: Some(path.to_string()),
                 },
                 _ => KeyValueItem::new(key, value),
-            }
-        })
-        .collect()
+            });
+        }
+    }
+
+    fields
 }
 
 /// 按扩展名给个 Content-Type。认不出的一律 `application/octet-stream` ——
@@ -1941,6 +1953,38 @@ mod tests {
         assert!(body.contains("reqly"), "实际：{body}");
         // 百分号编码在解析这一步解回来 —— 服务端要看到的是原文
         assert!(body.contains("hello there"), "实际：{body}");
+    }
+
+    /// 「一行一个 `k=v`」的 body 也得拆成多个字段。
+    ///
+    /// 只认 `&` 的话整段会变成一个字段（键是第一行 `=` 左边那截，值是剩下全部），
+    /// 症状是服务端回「没有 grant_type」，而请求看着并不空 —— 这条形态来自
+    /// curl 的多行 `--data`、`.http` 文件，以及从接口文档整段复制下来的表单内容。
+    #[tokio::test]
+    async fn a_newline_separated_form_body_becomes_one_field_per_line() {
+        let server = serve_once("200 OK", "text/plain", "ok");
+        let client = client();
+
+        let mut s = spec("POST", server.url("/token"));
+        s.body_type = BodyType::Form;
+        // 末尾留一个换行：不能因此多出一个空字段
+        s.body = "client_id=abc\ngrant_type=client_credentials\nscope=TimeSheetApi RMSApi\n".into();
+
+        execute(&client, &s).await.expect("应当发出 multipart");
+
+        let body = body_of(&server.request()).to_string();
+        assert_eq!(
+            body.matches("Content-Disposition").count(),
+            3,
+            "换行分隔的三行应当是三个字段，实际：{body}"
+        );
+        assert!(body.contains("name=\"grant_type\""), "实际：{body}");
+        assert!(body.contains("client_credentials"), "实际：{body}");
+        // 值里不该再留着别的行 —— 这一串粘连文本是「没拆开」的特征
+        assert!(
+            !body.contains("client_id=abc\ngrant_type"),
+            "值里还裹着下一行，说明没按换行拆：{body}"
+        );
     }
 
     #[tokio::test]

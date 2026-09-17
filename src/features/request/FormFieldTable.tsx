@@ -116,7 +116,10 @@ export function FormFieldTable({ rows, onChange, className }: FormFieldTableProp
         </p>
       ) : null}
 
-      <table className="w-full border-collapse">
+      {/* `table-fixed`：理由与 `KeyValueTable` 那份相同（列宽只认 `<colgroup>`），
+          这里还多一条 —— 「值」列右侧挂着「选择文件」按钮，
+          被内容撑宽的话按钮会被顶出可视区 */}
+      <table className="w-full table-fixed border-collapse">
         <colgroup>
           <col style={{ width: 30 }} />
           <col style={{ width: "30%" }} />
@@ -207,6 +210,7 @@ export function FormFieldTable({ rows, onChange, className }: FormFieldTableProp
                   ) : (
                     <PlaceholderInput
                       dense
+                      multiline
                       value={row.value}
                       onChange={(value) => patchRow(index, { value })}
                       placeholder={t("kv.value")}

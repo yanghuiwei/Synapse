@@ -57,7 +57,13 @@ export function Button({
       {...rest}
     >
       {icon}
-      {!iconOnly && children}
+      {/* ⚠️ 这里**不能**用 `iconOnly` 去 gate children。
+          `IconButton` 的图标正是当 children 传进来的（见文件末尾），
+          而它又必然把 `iconOnly` 置真 —— 于是图标被这个条件整个吃掉：
+          按钮壳在、尺寸对、`aria-label` 也对，就是里面什么都没有，
+          连报错都没有。`iconOnly` 只该决定**尺寸**（`w-7 px-0` 那条），
+          不该决定渲染什么；「只有图标」这件事由调用方保证。 */}
+      {children}
       {/* 排在 children 之后 = 按钮最右侧。
           ⚠️ 这一行原先漏了：prop 声明了、参数也解构了，就是没画出来 ——
           传 `trailingIcon` 的地方会静默什么都看不到，且不报任何错。

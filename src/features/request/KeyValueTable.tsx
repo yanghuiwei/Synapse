@@ -82,7 +82,12 @@ export function KeyValueTable({
 
   return (
     <div className={cn("min-h-0", className)}>
-      <table className="w-full border-collapse">
+      {/* `table-fixed`：列宽只认 `<colgroup>`，**不再由内容反推**。
+          少了它，一个 64 字符的 `scope` 值就能把「值」列撑到一千多像素宽，
+          把「键」列挤到只剩两三个字符（实测：`client_id` 显示成 `cl`），
+          同时整张表横向溢出、值列反而永远不需要折行 ——
+          那一格再窄也折不出第二行。 */}
+      <table className="w-full table-fixed border-collapse">
         <colgroup>
           <col style={{ width: 30 }} />
           <col style={{ width: showDesc ? "30%" : "42%" }} />
@@ -137,6 +142,7 @@ export function KeyValueTable({
                       **键那一列不接** —— 键名从来不是模板。 */}
                   <PlaceholderInput
                     dense
+                    multiline
                     value={row.value}
                     onChange={(value) => patchRow(index, { value })}
                     placeholder={valuePlaceholder}
