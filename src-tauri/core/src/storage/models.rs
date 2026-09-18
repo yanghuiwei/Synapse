@@ -337,6 +337,55 @@ pub struct TokenSource {
     pub updated_at: String,
 }
 
+impl TokenSource {
+    /// 「**这份 token 是由哪套配置取的**」的指纹。
+    ///
+    /// 它只有两个用途，而且必须**只有这一处**定义：
+    /// * `storage::repo::token::cache_owner` —— 同指纹的来源共用一行 `token_cache`
+    /// * `http::token::TokenRefresher::flight_for` —— 同指纹的来源共用一把单飞锁
+    ///
+    /// 于是「配置相同就共用同一个 token、同一个倒计时；配置不同就各自独立」
+    /// 这条规则在后端只有一个来源，不会出现「缓存说共享、锁说独立」这种半拉子状态。
+    ///
+    /// ## 进指纹的：决定「发出什么请求 + 从响应里取什么」的字段
+    ///
+    /// 取 token 的请求、三条提取路径、过期字段的单位、刷新时实际会打的那个请求。
+    ///
+    /// 刷新请求取的是**有效值**（`refresh_request_id.unwrap_or(fetch_request_id)`）
+    /// 而不是原字段：`None` 的语义就是「刷新时复用取 token 那个请求」，
+    /// 所以「显式填成同一个」与「不填」在行为上完全一样，
+    /// 拿原字段拼指纹会让这两条等价配置变成两份独立缓存。
+    ///
+    /// ## 刻意不进指纹的
+    ///
+    /// * `name` / `folder_id` —— 它们说的是「这条配置叫什么、放在哪」，
+    ///   与拿到的 token 无关。算进去，则「同一个取 token 接口按业务拆成两条来源」
+    ///   又会各打一次网络、各走一个倒计时 —— 那正是这套指纹要消灭的情形。
+    /// * `auto_refresh` / `skew_seconds` —— 它们是**使用策略**（什么时候该刷、
+    ///   提前多久算过期），不是「token 是什么」。两条来源共用同一个 token 时，
+    ///   「这次该不该自动刷」仍各自按自己那份配置判定，这样反而更准。
+    ///
+    /// `workspace_id` 进指纹：两个工作区里同名同路径的配置是两份互不相干的东西，
+    /// 而 `token_cache` 表**没有工作区列**（它挂在来源行上），不隔开就会串。
+    ///
+    /// 用 `\u{1f}`（单元分隔符）拼接而不是 `:` 或 `-`：JSONPath 与 URL 里
+    /// 都满是冒号，拿它当分隔符会让 `a:b`+`c` 与 `a`+`b:c` 撞成同一个键 ——
+    /// 那种碰撞的后果是「两条配置不同的来源共用了一个 token」。
+    pub fn share_key(&self) -> String {
+        let refresh = self.refresh_request_id.unwrap_or(self.fetch_request_id);
+        [
+            self.workspace_id.to_string(),
+            self.fetch_request_id.to_string(),
+            self.access_path.clone(),
+            self.refresh_path.clone(),
+            self.expires_in_path.clone(),
+            self.expires_in_unit.as_db_str().to_string(),
+            refresh.to_string(),
+        ]
+        .join("\u{1f}")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenCache {

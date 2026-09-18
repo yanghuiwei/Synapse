@@ -355,6 +355,11 @@ export const zhCN = {
   // 「配了源 + 选了 Bearer」就等于带上了 Token，而实际带出去的是空凭据
   "token.globalHint": "配在「token刷新」分类下 —— 凡是用到 {{token.access}} 的请求都从这里取",
   "token.scopedHint": "这份配置只对它所在分类的子树生效",
+  // 「配置相同的来源共用一份 token」不是 bug 而是设计：两条来源只要取的接口、
+  // 提取路径、过期单位、刷新接口逐字段一致，后端就归到同一行缓存
+  // （`repo::token::cache_owner`）。不写这一句，用户配完第二条看到同一个倒计时，
+  // 会以为「我配的没生效」并且去乱改配置
+  "token.sharedWith": "与「{names}」配置相同，共用同一个 Token 与倒计时",
   "token.manage": "管理",
   "token.configure": "配置 Token 来源",
   "token.deleteTitle": "删除 Token 来源",

@@ -395,6 +395,17 @@ export const tokenStatusSchema = z.looseObject({
   accessToken: z.string().nullable(),
   hasRefreshToken: z.boolean(),
   autoRefresh: z.boolean(),
+  /**
+   * 这一份 token 落在哪条**代表行**上（配置相同的来源会给同一个值）。
+   *
+   * 界面靠它把「同一个 token、同一个倒计时」体现出来：刷新其一之后要把同组的
+   * 条目一起更新，计数也不能把一份 token 数成两份。
+   *
+   * 用 `.catch(-1)` 而不是必填：老版本后端（或别的前端调用点）不带这个字段时，
+   * 退化成「每条来源各算一组」—— 也就是这套共享机制出现之前的行为，
+   * 界面对得上、不会炸。`-1` 是「不知道归属」，不是一个真实的行 id。
+   */
+  cacheOwnerId: z.number().catch(-1),
 });
 
 // ---------------------------------------------------------------

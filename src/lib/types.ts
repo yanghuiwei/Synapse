@@ -503,6 +503,22 @@ export interface TokenStatus {
   accessToken: string | null;
   hasRefreshToken: boolean;
   autoRefresh: boolean;
+  /**
+   * 这一份 token 落在哪条**代表行**上（后端 `repo::token::cache_owner`）。
+   *
+   * ## 为什么界面需要它
+   *
+   * 「配置相同的来源共用一份 token 与一个倒计时」这件事是在**数据库那一层**
+   * 成立的（同指纹 ⇒ 同一个代表行）。界面要跟上的只有两件：
+   *
+   * * 刷新其一之后，把**同组**的条目一起更新 —— 否则刚刷完的那条显示新倒计时、
+   *   另一条还挂着旧数字，看起来像两份不一样的 token（恰好是要避免的观感）；
+   * * 计数（`tokenCounts`）按组去重，别把一份 token 数成两份。
+   *
+   * 没有缓存行时这个值**同样有效** —— 归属与「有没有值」是两件事。
+   * `-1` = 后端没给这个字段（老版本），此时按「每条来源各自一组」处理。
+   */
+  cacheOwnerId: number;
 }
 
 /**

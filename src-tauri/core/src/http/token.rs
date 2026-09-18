@@ -88,10 +88,14 @@ pub struct TokenOutcome {
     pub refreshed: bool,
 }
 
-/// 每个 Token 源的「航班锁」。
+/// 「共享指纹」→ 一把航班锁。
+///
+/// 键是 [`TokenSource::share_key`]，**不是**来源 id：两条来源只要配着同一套取
+/// token 配置，就该排在同一个航班上。按 id 分锁的后果是它们各打一次网络，
+/// 而两次拿回来的是同一个 token —— 多出来的那次既浪费又可能撞上服务端限流。
 #[derive(Default)]
 pub struct TokenRefresher {
-    flights: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl TokenRefresher {
@@ -111,7 +115,7 @@ impl TokenRefresher {
             }
         }
 
-        let gate = self.flight_for(deps.source.id);
+        let gate = self.flight_for(&deps.source.share_key());
         let _guard = gate.lock().await;
 
         // ── 检查二：持锁。★ 这一步让「并发只打一次刷新」成立 ──
@@ -153,18 +157,22 @@ impl TokenRefresher {
         self.ensure(deps, true).await
     }
 
-    /// 当前登记的航班数。测试用 —— 它应当等于**用过的** Token 源个数，不会无限涨。
+    /// 当前登记的航班数。测试用 —— 它应当等于**用过的**共享配置个数
+    /// （配置相同的两条来源只登记一把锁），不会无限涨。
     #[cfg(test)]
     fn flight_count(&self) -> usize {
         lock(&self.flights).len()
     }
 
-    /// 取（或创建）某个 Token 源的航班锁。
+    /// 取（或创建）某套**共享配置**的航班锁。
     ///
     /// `std::sync::Mutex` 的持有时间只有一次哈希查找，不会成为热点 ——
     /// 真正的等待发生在后面那把 `tokio` 的异步锁上。
-    fn flight_for(&self, source_id: i64) -> Arc<tokio::sync::Mutex<()>> {
-        lock(&self.flights).entry(source_id).or_default().clone()
+    fn flight_for(&self, share_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        lock(&self.flights)
+            .entry(share_key.to_string())
+            .or_default()
+            .clone()
     }
 }
 
@@ -175,10 +183,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// 读缓存；有效就返回，不存在或已过期返回 `None`。
+///
+/// ⚠️ 缓存挂在**共享组的代表行**上（`repo::token::cache_owner`），不是来源自己
+/// 那一行。所以「两条配置相同的来源读到同一份 token」是**在数据库这一层**成立的，
+/// 而不是靠界面把两个倒计时对齐 —— 后者一旦有一处忘了同步就会露馅。
 async fn read_fresh(deps: &TokenDeps<'_>) -> AppResult<Option<TokenValues>> {
-    let source_id = deps.source.id;
+    // clone 是为了把来源 move 进闭包（`with_conn` 要求 `'static`）。
+    // 这不是热点：`ensure` 的「检查一」在缓存有效时就返回了，能走到这里说明
+    // 缓存缺失或已过期 —— 后面那次网络往返比这点拷贝贵几个数量级。
+    let source = deps.source.clone();
     let cache = with_conn(deps.pool, move |conn| {
-        repo::token::get_cache(conn, source_id)
+        let owner = repo::token::cache_owner(conn, &source)?;
+        repo::token::get_cache(conn, owner)
     })
     .await?;
 
@@ -316,16 +332,18 @@ async fn fetch(deps: &TokenDeps<'_>) -> AppResult<TokenValues> {
     let expires_at = compute_expires_at_field(&body, source, Utc::now())?;
 
     let cache = {
-        let source_id = source.id;
+        let source = source.clone();
         let access = access_token.clone();
         let refresh = refresh_token.clone();
         let expires = expires_at.clone();
         with_conn(deps.pool, move |conn| {
+            // 写进**共享组的代表行**：组里其它同配置来源下一次读到的就是这一份
+            let owner = repo::token::cache_owner(conn, &source)?;
             // `raw_response` 传 None：原始响应默认**不落盘**（design.md §4.3），
             // 它可能含 refresh_token 之类的长期凭据，留在库里只会扩大暴露面
             repo::token::upsert_cache(
                 conn,
-                source_id,
+                owner,
                 &access,
                 refresh.as_deref(),
                 expires.as_deref(),
@@ -707,7 +725,135 @@ mod tests {
             1,
             "五个并发请求里只该有一个标记为「真刷新」"
         );
-        assert_eq!(refresher.flight_count(), 1, "同一 Token 源只该有一把航班锁");
+        assert_eq!(refresher.flight_count(), 1, "同一套配置只该有一把航班锁");
+    }
+
+    // ============================================================
+    // ★ 「配置相同就共享，配置不同就各自独立」
+    // ============================================================
+
+    /// 再插一条**配置逐字段相同**的来源（`create` 之外的列全落默认值）。
+    ///
+    /// 用它来验「同一个取 token 接口配了两条来源」这个最常见的情形：
+    /// 一条挂在系统分类下给全工作区用，另一条挂到业务分类下。
+    fn add_twin_source(pool: &SqlitePool) -> TokenSource {
+        let conn = pool.get().expect("conn");
+        conn.execute(
+            "INSERT INTO token_source (workspace_id, folder_id, name, fetch_request_id, created_at, updated_at)
+             VALUES (1, 1, 'twin', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            [],
+        )
+        .expect("insert twin");
+        repo::token::get(&conn, conn.last_insert_rowid()).expect("twin")
+    }
+
+    fn deps<'a>(
+        pool: &'a SqlitePool,
+        clients: &'a ClientCache,
+        source: &'a TokenSource,
+        env: &'a HashMap<String, String>,
+    ) -> TokenDeps<'a> {
+        TokenDeps {
+            pool,
+            clients,
+            source,
+            env,
+            cancel: None,
+        }
+    }
+
+    /// ★ 正身：两条来源配着同一套取 token 配置 ⇒ 只打一次网络、共用一份 token。
+    ///
+    /// 这一条是「配置相同，倒计时可以共享」的**执行期**证据。它同时钉住三件事：
+    /// 缓存只有一行、航班锁只有一把、两个来源拿到的是同一个值。
+    #[tokio::test]
+    async fn sources_sharing_one_config_fetch_once_and_share_the_token() {
+        let server = token_server(r#"{"access_token":"fresh","expires_in":3600}"#);
+        let db = db("shared-config");
+        set_fetch_url(&db.pool, &server.url());
+        seed_expired_cache(&db.pool); // 组里那份缓存已经过期
+
+        let a = source(&db.pool); // id = 1
+        let b = add_twin_source(&db.pool); // id = 2，配置逐字段相同
+        assert_eq!(a.share_key(), b.share_key(), "两条来源的配置必须完全一致");
+
+        let env = env();
+        let refresher = TokenRefresher::new();
+        let clients = ClientCache::new();
+
+        let deps_a = deps(&db.pool, &clients, &a, &env);
+        let deps_b = deps(&db.pool, &clients, &b, &env);
+
+        let (first, second) = tokio::join!(
+            refresher.ensure(&deps_a, false),
+            refresher.ensure(&deps_b, false),
+        );
+        let first = first.expect("a");
+        let second = second.expect("b");
+
+        assert_eq!(first.values.access_token, "fresh");
+        assert_eq!(second.values.access_token, "fresh");
+        assert_eq!(
+            server.hits(),
+            1,
+            "配置相同的两条来源只该打一次取 token 请求 —— 多了说明锁没按配置共享"
+        );
+
+        // 缓存落在**代表行**（组内最小 id）上，b 自己名下没有行，但读得到同一份
+        let conn = db.pool.get().expect("conn");
+        let owner = repo::token::cache_owner(&conn, &b).expect("owner");
+        assert_eq!(owner, a.id, "代表是组内最小的 id");
+        let row = repo::token::get_cache(&conn, owner)
+            .expect("read")
+            .expect("应该有缓存");
+        assert_eq!(row.access_token, "fresh");
+        assert_eq!(row.token_source_id, a.id);
+        assert!(
+            repo::token::get_cache(&conn, b.id).expect("read").is_none(),
+            "b 自己名下不该有缓存行"
+        );
+    }
+
+    /// 反向控制：配置不同 ⇒ 各自打一次、各拿各的 token。
+    ///
+    /// 少了这一条，「两条来源只打一次网络」也可能被一个**永远只打一次**的
+    /// 实现蒙对 —— 而这种实现会让配置不同的两条来源互相串用 token。
+    #[tokio::test]
+    async fn sources_with_different_configs_fetch_independently() {
+        let server = token_server(r#"{"access_token":"fresh","tok2":"other","expires_in":3600}"#);
+        let db = db("split-config");
+        set_fetch_url(&db.pool, &server.url());
+
+        let a = source(&db.pool); // 用默认的 $.access_token
+        let mut b = add_twin_source(&db.pool);
+        b.access_path = "$.tok2".into(); // 换一个字段 ⇒ 换一套配置
+        b = {
+            let conn = db.pool.get().expect("conn");
+            repo::token::save(&conn, &b).expect("save")
+        };
+        assert_ne!(a.share_key(), b.share_key());
+
+        let env = env();
+        let refresher = TokenRefresher::new();
+        let clients = ClientCache::new();
+
+        let first = refresher
+            .ensure(&deps(&db.pool, &clients, &a, &env), false)
+            .await
+            .expect("a");
+        let second = refresher
+            .ensure(&deps(&db.pool, &clients, &b, &env), false)
+            .await
+            .expect("b");
+
+        assert_eq!(first.values.access_token, "fresh", "a 走 $.access_token");
+        assert_eq!(second.values.access_token, "other", "b 走 $.tok2");
+        assert_eq!(
+            server.hits(),
+            2,
+            "配置不同的两条来源必须各取一次 —— 共用一份就是把对的 token 用错了地方"
+        );
+        assert_eq!(refresher.flight_count(), 2, "两套配置 = 两把航班锁");
     }
 
     /// 缓存有效 → 一次请求都不发（design.md §4.3 第一行）

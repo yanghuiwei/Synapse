@@ -19,7 +19,7 @@ use tauri::State;
 use crate::commands::validate::clean_name;
 use crate::error::{AppError, AppResult};
 use crate::http::token::{is_expired, remaining_seconds, TokenDeps};
-use crate::storage::models::TokenSource;
+use crate::storage::models::{TokenCache, TokenSource};
 use crate::storage::{repo, with_conn};
 use crate::AppState;
 
@@ -43,6 +43,12 @@ pub struct TokenStatus {
     pub has_refresh_token: bool,
     /// 该 Token 源是否开启自动刷新
     pub auto_refresh: bool,
+    /// 这一份 token **落在哪条代表行上**（`repo::token::cache_owner`）。
+    ///
+    /// 配置逐字段相同的来源会返回同一个值 —— 界面据此知道「这两个来源共用一份
+    /// token、一个倒计时」，于是刷新其一就能同步更新另一个，计数也不会把
+    /// 一份 token 数成两份。**没有缓存行时这个值同样有效**（归属和有没有值是两件事）。
+    pub cache_owner_id: i64,
 }
 
 // ============================================================
@@ -137,13 +143,9 @@ pub async fn resolve_token_source(
 #[tauri::command]
 pub async fn get_token_status(state: State<'_, AppState>, id: i64) -> AppResult<TokenStatus> {
     let source = source_of(&state, id).await?;
+    let (owner, cache) = cache_of(&state, &source).await?;
 
-    let cache = {
-        let pool = state.pool.clone();
-        with_conn(&pool, move |conn| repo::token::get_cache(conn, id)).await?
-    };
-
-    Ok(status_of(&source, cache.as_ref()))
+    Ok(status_of(&source, owner, cache.as_ref()))
 }
 
 /// 强制刷新，忽略缓存（design.md §4.3 的「立即刷新」）。
@@ -166,11 +168,8 @@ pub async fn refresh_token(state: State<'_, AppState>, id: i64) -> AppResult<Tok
 
     // 刷完再把库里的那一行读回来作状态 —— 不直接拿刷新返回值拼，
     // 免得「显示的状态」与「真的落库了什么」有第二条路径
-    let cache = {
-        let pool = state.pool.clone();
-        with_conn(&pool, move |conn| repo::token::get_cache(conn, id)).await?
-    };
-    Ok(status_of(&source, cache.as_ref()))
+    let (owner, cache) = cache_of(&state, &source).await?;
+    Ok(status_of(&source, owner, cache.as_ref()))
 }
 
 // ============================================================
@@ -180,6 +179,28 @@ pub async fn refresh_token(state: State<'_, AppState>, id: i64) -> AppResult<Tok
 async fn source_of(state: &State<'_, AppState>, id: i64) -> AppResult<TokenSource> {
     let pool = state.pool.clone();
     with_conn(&pool, move |conn| repo::token::get(conn, id)).await
+}
+
+/// 这份来源的**缓存归属**（落在哪条代表行上）与那一行里的内容。
+///
+/// 两件事一起返回，不是图省事：分开两次查，两趟之间配置可能被改过，
+/// 于是会出现「归属按新配置算、内容读的是旧那一行」这种半拉子状态。
+///
+/// 归属算法只有 `repo::token::cache_owner` 一处 —— 这里不自己拼 SQL，
+/// 也不拿 `source.id` 顶替（那样就把「配置相同的来源共用一份 token」悄悄废掉了，
+/// 而且症状只是「明明有 token 却显示没取过」，看不出根因）。
+async fn cache_of(
+    state: &State<'_, AppState>,
+    source: &TokenSource,
+) -> AppResult<(i64, Option<TokenCache>)> {
+    let pool = state.pool.clone();
+    let source = source.clone();
+    with_conn(&pool, move |conn| {
+        let owner = repo::token::cache_owner(conn, &source)?;
+        let cache = repo::token::get_cache(conn, owner)?;
+        Ok((owner, cache))
+    })
+    .await
 }
 
 /// 激活环境的变量。取 token 的那个请求自己也可能写 `{{env.clientId}}`。
@@ -194,10 +215,7 @@ async fn active_env(state: &State<'_, AppState>) -> AppResult<HashMap<String, St
     .await
 }
 
-fn status_of(
-    source: &TokenSource,
-    cache: Option<&crate::storage::models::TokenCache>,
-) -> TokenStatus {
+fn status_of(source: &TokenSource, cache_owner_id: i64, cache: Option<&TokenCache>) -> TokenStatus {
     let Some(cache) = cache else {
         return TokenStatus {
             has_cache: false,
@@ -208,6 +226,7 @@ fn status_of(
             access_token: None,
             has_refresh_token: false,
             auto_refresh: source.auto_refresh,
+            cache_owner_id,
         };
     };
 
@@ -228,6 +247,7 @@ fn status_of(
         access_token: Some(cache.access_token.clone()),
         has_refresh_token: cache.refresh_token.is_some(),
         auto_refresh: source.auto_refresh,
+        cache_owner_id,
     }
 }
 
@@ -269,7 +289,7 @@ mod tests {
 
     #[test]
     fn no_cache_is_reported_as_expired() {
-        let status = status_of(&source(true), None);
+        let status = status_of(&source(true), 7, None);
         assert!(!status.has_cache);
         assert!(status.expired, "从没取过就必须算过期，否则徽标会显示成有效");
         assert_eq!(status.remaining_seconds, None);
@@ -280,7 +300,7 @@ mod tests {
     fn remaining_seconds_is_computed_from_expires_at() {
         let at = (chrono::Utc::now() + chrono::Duration::seconds(100))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let status = status_of(&source(true), Some(&cache(Some(&at))));
+        let status = status_of(&source(true), 7, Some(&cache(Some(&at))));
 
         let remaining = status.remaining_seconds.expect("算得出剩余秒数");
         assert!((96..=100).contains(&remaining), "剩余秒数不对: {remaining}");
@@ -291,7 +311,7 @@ mod tests {
     /// 永不过期的缓存：`remaining` 为 `None` 且不算过期
     #[test]
     fn cache_without_expiry_is_valid_forever() {
-        let status = status_of(&source(true), Some(&cache(None)));
+        let status = status_of(&source(true), 7, Some(&cache(None)));
         assert!(status.has_cache);
         assert!(!status.expired);
         assert_eq!(status.remaining_seconds, None);
@@ -303,14 +323,28 @@ mod tests {
     fn past_expiry_shows_negative_remaining() {
         let at = (chrono::Utc::now() - chrono::Duration::seconds(60))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let status = status_of(&source(true), Some(&cache(Some(&at))));
+        let status = status_of(&source(true), 7, Some(&cache(Some(&at))));
         assert!(status.expired);
         assert!(status.remaining_seconds.unwrap() < 0);
     }
 
     #[test]
     fn status_mirrors_auto_refresh_flag() {
-        assert!(status_of(&source(true), None).auto_refresh);
-        assert!(!status_of(&source(false), None).auto_refresh);
+        assert!(status_of(&source(true), 7, None).auto_refresh);
+        assert!(!status_of(&source(false), 7, None).auto_refresh);
+    }
+
+    /// 归属要**原样**回给前端，而且在「没有缓存」时同样有效 ——
+    /// 界面靠它判断哪些来源共用一份 token（刷新其一要同步更新另一个、
+    /// 计数也不能把一份 token 数成两份）。没有值时把它填成 `0` 或来源自己的 id，
+    /// 都会让界面把同组的两条来源看成两套。
+    #[test]
+    fn cache_owner_id_is_reported_even_without_a_cache_row() {
+        let owner = 3; // 组内的代表行，未必是这一条来源自己
+        assert_eq!(status_of(&source(true), owner, None).cache_owner_id, owner);
+        assert_eq!(
+            status_of(&source(true), owner, Some(&cache(None))).cache_owner_id,
+            owner
+        );
     }
 }

@@ -18,7 +18,7 @@ import {
   type TokenSourceDraft,
 } from "@/features/token/TokenSourceForm";
 import { TokenStatusBadge } from "@/features/token/TokenStatusBadge";
-import { useResolvedTokenSource } from "@/features/token/useTokenState";
+import { useResolvedTokenSource, useSharedTokenSources } from "@/features/token/useTokenState";
 import { HeaderInsertPanel } from "./HeaderInsertPanel";
 import { KeyValueTable } from "./KeyValueTable";
 
@@ -439,6 +439,11 @@ function TokenSourcePanel({
     [requests, folder],
   );
 
+  // 与它共用同一份 token 的**其它**来源。配置逐字段相同时后端会归到同一行缓存，
+  // 所以两条来源的倒计时本来就该一样 —— 不解释的话，用户看到「我配的第二条
+  // 倒计时跟第一条一模一样」，会以为自己的配置没生效。
+  const sharedWith = useSharedTokenSources(source?.id ?? null, status?.cacheOwnerId ?? null);
+
   if (!folder) return null;
 
   const beginCreate = () =>
@@ -530,6 +535,13 @@ function TokenSourcePanel({
               ? t("token.globalHint")
               : t("token.scopedHint")}
           </p>
+          {/* 「为什么第二条来源的倒计时和第一条一样」——答案在这一行。
+              共用是**按取 token 的配置**判定的，不是按分类或名字 */}
+          {sharedWith.length === 0 ? null : (
+            <p className="text-[11px] leading-relaxed text-ink-faint">
+              {t("token.sharedWith", { names: sharedWith.join("、") })}
+            </p>
+          )}
         </>
       )}
     </div>
