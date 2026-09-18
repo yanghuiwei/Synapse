@@ -1,11 +1,12 @@
 import { ChevronDown, KeyRound, Plus, TriangleAlert } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { ApiRequest, ExpiryUnit, TokenSource } from "@/lib/types";
 import { Button } from "@/features/ui/Button";
+import { RequestPicker } from "@/features/token/RequestPicker";
 import { useUiStore } from "@/store/ui";
 
 /**
@@ -63,11 +64,24 @@ export interface TokenSourceFormProps {
   value: TokenSourceDraft;
   onChange: (next: TokenSourceDraft) => void;
   /**
-   * 可选的 Token 接口。**由调用方决定给哪些** —— 现在是工作区里除了它自己之外
-   * 的全部请求。表单自己不去全局捞：那样「这个接口到底放哪儿」这件事
-   * 又变成用户要猜的东西了。
+   * 可选的 Token 接口。**由调用方决定给哪些** —— 现在是系统分类「token刷新」里的
+   * 请求（除了它自己）。
+   *
+   * 表单自己不去全局捞：全工作区 145 条铺开，没人找得到要的那条 ——
+   * 而「取 Token 的接口放哪儿」本来就有唯一答案（系统分类），
+   * 把它列进候选等于让用户在一个已经定好的问题上再选一次。
    */
   requests: readonly ApiRequest[];
+  /**
+   * 当前值指向的请求。
+   *
+   * 它**可能不在 `requests` 里**：老配置指向分类外的请求。那种配置照常工作
+   * （后端只认 `fetch_request_id`，不看分类），所以必须能显示出来 ——
+   * 真库里 146 条 Token 源有 32 条是这种（播种脚本造的）。
+   */
+  current: ApiRequest | null;
+  /** 新建取 Token 的接口时，建到哪个分类（= 系统分类「token刷新」） */
+  candidateFolderId: number | null;
   className?: string;
 }
 
@@ -93,30 +107,13 @@ export function TokenSourceForm({
   value,
   onChange,
   requests,
+  current,
+  candidateFolderId,
   className,
 }: TokenSourceFormProps) {
   const { t } = useI18n();
 
   const patch = (next: Partial<TokenSourceDraft>) => onChange({ ...value, ...next });
-
-  /**
-   * 下拉选项。
-   *
-   * 当前值可能指向一个**已经被删掉**的请求。这种情况不补一个占位项的话，
-   * `<select>` 找不到匹配的 option 会退回去显示第一项「选择一个请求…」——
-   * 界面在撒谎，而发送时后端读的仍是那个旧 id（`load_fetch_spec` 直接
-   * `NotFound`，请求整个失败）。宁可写「已失效」，让用户自己动手改。
-   */
-  const options = useMemo(() => {
-    const base = [
-      { value: "0", label: t("token.pickRequest") },
-      ...requests.map((r) => ({ value: String(r.id), label: `${r.method} ${r.name}` })),
-    ];
-
-    const current = value.fetchRequestId;
-    if (current === 0 || requests.some((r) => r.id === current)) return base;
-    return [{ value: String(current), label: t("token.fetchRequestGone") }, ...base];
-  }, [requests, value.fetchRequestId, t]);
 
   const accessError = pathError(value.accessPath, true, t);
   const expiresError = pathError(value.expiresInPath, false, t);
@@ -136,29 +133,36 @@ export function TokenSourceForm({
           />
         </Field>
 
-        <Field label={t("token.fetchRequest")} className="min-w-[180px] flex-1">
-          {requests.length === 0 ? (
+        <Field label={t("token.fetchRequest")} className="min-w-[240px] flex-1">
+          {/*
+            空态只在「分类里没有候选 + 当前什么都没选」时出现。
+            选着一个分类外的老配置时那一行仍然要显示出来 —— 看得见才改得动，
+            而它本来就在正常工作。
+          */}
+          {requests.length === 0 && current === null ? (
             <div className="flex items-center gap-2">
               <p className="flex min-w-0 flex-1 items-start gap-1.5 py-1 text-[11px] text-warn">
                 <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
                 {t("token.noRequestAtAll")}
               </p>
               {/* 光说「还没有接口」是个死路：用户会去左栏找「把刚才那个登录接口挪过来」
-                  这个动作，而那里只有拖拽。直接给一个能在该分类下建接口的入口。 */}
+                  这个动作，而那里只有拖拽。直接给一个能在该分类下建接口的入口 ——
+                  落点必须是系统分类，否则建完它还是不在候选里，转一圈回到原地。 */}
               <Button
                 size="sm"
                 variant="secondary"
                 icon={<Plus size={11} strokeWidth={2.2} />}
-                onClick={() => useUiStore.getState().openCreateDialog("request", null)}
+                onClick={() => useUiStore.getState().openCreateDialog("request", candidateFolderId)}
               >
                 {t("token.createFetchRequest")}
               </Button>
             </div>
           ) : (
-            <Select
-              value={String(value.fetchRequestId)}
-              onChange={(raw) => patch({ fetchRequestId: Number(raw) })}
-              options={options}
+            <RequestPicker
+              value={value.fetchRequestId}
+              onChange={(fetchRequestId) => patch({ fetchRequestId })}
+              requests={requests}
+              current={current}
               // 「为什么不用另配刷新接口」压在 title 上：这句话只在第一次配的时候
               // 值得读，而它占的那一行高度每次都要付
               title={t("token.fetchRequestHint")}

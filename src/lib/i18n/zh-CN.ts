@@ -338,9 +338,25 @@ export const zhCN = {
   "token.fetchRequest": "获取 Token 的接口",
   "token.fetchRequestHint": "Token 过期时重新调它换一个，不用另配刷新接口",
   "token.pickRequest": "选择一个接口…",
-  "token.noRequestAtAll": "工作区里还没有别的接口可选",
+  // 候选只有系统分类里的那几条 —— 这句话必须在这里说清，
+  // 否则用户遇到的是「我那个登录接口为什么不在列表里」
+  "token.noRequestAtAll": "「token 刷新」分类里还没有别的接口可选",
   "token.createFetchRequest": "新建一个取 Token 的接口",
-  "token.fetchRequestGone": "（这个接口已经被删除了）",
+  "token.fetchRequestGone": "这个接口已经被删除了",
+
+  // ---- 取 Token 接口的下拉 ----
+  //
+  // 名字、地址、scope 三件事要同时看得见：选错它们的现象都是发送后 401，
+  // 而界面上一切正常（`api.example.com` 与 `api.test.example.com`
+  // 只差四个字母，一个是生产一个是测试）。
+  "token.pickerSearch": "搜接口名、地址、方法或 scope",
+  "token.pickerEmpty": "没有匹配的接口",
+  // scope 为空时必须说话：那条取 Token 请求哪个服务都调不通，
+  // 却在列表里和配好的那些长得一模一样
+  "token.pickerScopeNone": "无 scope",
+  "token.pickerScopeHint":
+    "候选只有「token 刷新」分类里的接口。scope 要包含目标接口地址第 2 段的服务名（/PSA/MasterData2/… 就是 MasterData2），否则取回来的 Token 调不通那个服务。",
+  "token.pickerOutOfFolder": "不在「token 刷新」分类",
   "token.extractTitle": "从响应里取什么",
   "token.accessPath": "access_token 路径",
   "token.expiresInPath": "过期时间路径",
@@ -700,6 +716,33 @@ export const zhCN = {
 
   // ---- 顶部工具栏 ----
   "topbar.openEnv": "打开环境管理",
+
+  // ---- 命令面板（P8） ----
+  //
+  // 命令标题**自带完整语义**（「前往集合」而不是「集合」）：输入关键字后
+  // 结果是统一按分数排的、不显示分组标题，那时「集合」两个字看不出是个动作。
+  "palette.placeholder": "搜索接口或命令…",
+  "palette.groupGo": "跳转",
+  "palette.groupAction": "命令",
+  "palette.groupApp": "应用",
+  "palette.groupRequest": "接口",
+  "palette.goCollections": "前往集合",
+  "palette.goHistory": "前往历史",
+  "palette.goEnvironments": "前往环境",
+  "palette.goLoadtest": "前往压测",
+  "palette.goTrash": "前往回收站",
+  "palette.goSettings": "前往设置",
+  "palette.newRequest": "新建请求",
+  "palette.newFolder": "新建分类",
+  "palette.send": "发送当前请求",
+  "palette.cancel": "取消当前请求",
+  "palette.import": "导入接口",
+  "palette.toggleTheme": "切换主题",
+  "palette.toggleSidebar": "折叠 / 展开侧栏",
+  "palette.empty": "没有匹配的接口或命令",
+  "palette.unfiled": "未归档",
+  "palette.hintMore": "还有 {count} 条，继续输入可缩小范围",
+  "palette.footerHint": "↑↓ 选择 · Enter 执行 · Esc 关闭",
 
   // ---- 设置 ----
   "settings.title": "设置",

@@ -11,6 +11,8 @@ import { useRequestStore } from "@/store/request";
 import { tokenCounts, useTokenStore } from "@/store/token";
 import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
+import { CommandPalette } from "@/features/command/CommandPalette";
+import { goToSection, openCreate } from "@/features/command/registry";
 import { ActivityRail } from "@/features/layout/ActivityRail";
 import { Sidebar } from "@/features/layout/Sidebar";
 import { SplitHandle, SplitPane } from "@/features/layout/SplitPane";
@@ -140,34 +142,28 @@ export function App() {
       }
 
       // Ctrl+1 / 2 / 3：集合 / 历史 / 回收站
+      //
+      // 这三条与命令面板里的「前往 X」是**同一个动作**，所以不在这里重写一遍 ——
+      // 走注册表里的 `goToSection`，行为（含折叠时自动展开）只有一份
       for (const { name, section } of SECTION_SHORTCUTS) {
         if (!matchShortcut(event, name)) continue;
         event.preventDefault();
-        const ui = useUiStore.getState();
-        ui.setSection(section);
-        // 侧栏被折叠时切板块等于什么都没发生 —— 顺手展开，
-        // 否则用户会以为快捷键坏了
-        if (ui.sidebarCollapsed) ui.setSidebarCollapsed(false);
+        goToSection(section);
         return;
       }
 
-      // Ctrl+N 新建请求。先切到「集合」：新建对话框挂在集合树里，
-      // 在历史/回收站板块下弹不出来
+      // Ctrl+N 新建请求。对话框挂在集合树里，所以先切到「集合」——
+      // 这条也是注册表里的命令，同样不重写
       if (matchShortcut(event, "newRequest")) {
         event.preventDefault();
-        const ui = useUiStore.getState();
-        ui.setSection("collections");
-        if (ui.sidebarCollapsed) ui.setSidebarCollapsed(false);
-        ui.openCreateDialog("request", null);
+        openCreate("request");
         return;
       }
 
-      // Ctrl+K 聚焦侧栏搜索框。当前板块没有搜索框时它是空操作
-      if (matchShortcut(event, "focusSearch")) {
+      // Ctrl+K 命令面板（跳转任意请求 / 执行任意命令）
+      if (matchShortcut(event, "commandPalette")) {
         event.preventDefault();
-        document
-          .querySelector<HTMLInputElement>("[data-sidebar-search]")
-          ?.focus();
+        useUiStore.getState().togglePalette();
         return;
       }
 
@@ -249,6 +245,10 @@ export function App() {
         offline={offline}
         appVersion={appVersion}
       />
+
+      {/* 命令面板自己 portal 到 body，挂在哪一层都一样 ——
+          放在最后只是为了「读 JSX 时先看到布局、再看到浮层」 */}
+      <CommandPalette />
     </div>
   );
 }

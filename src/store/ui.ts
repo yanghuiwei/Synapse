@@ -68,6 +68,15 @@ export interface UiState {
   importOpen: boolean;
 
   /**
+   * 命令面板是否打开。
+   *
+   * 放在 store 而不是 `App` 的局部 state：打开它的入口有两处 ——
+   * 全局快捷键（`App` 的 keydown）与命令面板自己执行完命令后的关闭动作，
+   * 而面板本体挂在 `App` 的子树里。放 store 比一路传 props 直接。
+   */
+  paletteOpen: boolean;
+
+  /**
    * 「保存到分类」对话框是否打开。
    *
    * 与 `importOpen` 同一个理由：对话框本体只能挂一处（挂在 `RequestPane`，
@@ -87,6 +96,9 @@ export interface UiState {
   closeEnvDialog: () => void;
   openImport: () => void;
   closeImport: () => void;
+  openPalette: () => void;
+  closePalette: () => void;
+  togglePalette: () => void;
   openSaveDraft: () => void;
   closeSaveDraft: () => void;
 }
@@ -104,6 +116,7 @@ export const useUiStore = create<UiState>((set) => ({
   envDialog: null,
   importOpen: false,
   saveDraftOpen: false,
+  paletteOpen: false,
 
   setSection: (section) => set({ section }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -116,6 +129,9 @@ export const useUiStore = create<UiState>((set) => ({
   closeEnvDialog: () => set({ envDialog: null }),
   openImport: () => set({ importOpen: true }),
   closeImport: () => set({ importOpen: false }),
+  openPalette: () => set({ paletteOpen: true }),
+  closePalette: () => set({ paletteOpen: false }),
+  togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
   openSaveDraft: () => set({ saveDraftOpen: true }),
   closeSaveDraft: () => set({ saveDraftOpen: false }),
 }));

@@ -427,16 +427,38 @@ function TokenSourcePanel({
   const [saving, setSaving] = useState(false);
 
   const requests = useWorkspaceStore((s) => s.requests);
+  const folders = useWorkspaceStore((s) => s.folders);
+
   /**
-   * 能当 Token 接口的候选：工作区里除了它自己之外的全部请求。
+   * 系统分类「token刷新」的 id。
+   *
+   * 取 Token 的接口就放在它下面（后端启动时建好，每个工作区一个），
+   * 于是「候选从哪儿来」这件事有唯一答案 —— 不必让用户在全工作区 145 条里翻。
+   */
+  const systemFolderId = folders.find((f) => f.isSystem)?.id ?? null;
+
+  /**
+   * 能当 Token 接口的候选：系统分类里的请求，除去它自己。
    *
    * 排除自己不是洁癖：让一条请求当它自己的取 token 接口，只会得到一个
    * 「拿自己的 token 去发自己」的循环配置，而它看起来还挺合理。
+   *
+   * ⚠️ 这是**界面上的收敛，不是后端的约束**：后端只认 `fetch_request_id`，
+   * 完全不看那条请求挂在哪个分类。所以既有的「候选之外」的老配置
+   * （真库 146 条里有 32 条，都是播种脚本按域名铺的）照常工作，
+   * 界面必须把它们显示出来，而不是显示成已删除。
    */
   const candidates = useMemo(
-    () => requests.filter((r) => r.id !== requestId),
-    [requests, requestId],
+    () =>
+      systemFolderId === null
+        ? []
+        : requests.filter((r) => r.folderId === systemFolderId && r.id !== requestId),
+    [requests, requestId, systemFolderId],
   );
+
+  /** 当前选中的取 Token 接口。可能在候选之外（老配置），也可能已经不存在 */
+  const currentFetchRequest =
+    draft === null ? null : (requests.find((r) => r.id === draft.fetchRequestId) ?? null);
 
   // 未保存的草稿没有 id，也就没有可挂的源 —— 给一句明白话，
   // 而不是让整块面板默默消失
@@ -520,7 +542,13 @@ function TokenSourcePanel({
       </div>
 
       {editable ? (
-        <TokenSourceForm value={draft} onChange={setDraft} requests={candidates} />
+        <TokenSourceForm
+          value={draft}
+          onChange={setDraft}
+          requests={candidates}
+          current={currentFetchRequest}
+          candidateFolderId={systemFolderId}
+        />
       ) : source === null ? (
         <>
           <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.noneHint")}</p>

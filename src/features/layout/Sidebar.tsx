@@ -180,7 +180,8 @@ function SearchField({
       />
       <input
         type="search"
-        // Ctrl+K 靠它找到这个输入框（见 App.tsx 的全局快捷键）
+        // 这个框只筛**当前板块**（集合树 / 历史各记各的）。
+        // 跨板块找东西走命令面板（Ctrl+K）—— 那边连接口带命令一起搜。
         data-sidebar-search
         value={current}
         onChange={(e) => {
