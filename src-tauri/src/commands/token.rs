@@ -43,12 +43,6 @@ pub struct TokenStatus {
     pub has_refresh_token: bool,
     /// 该 Token 源是否开启自动刷新
     pub auto_refresh: bool,
-    /// 这一份 token **落在哪条代表行上**（`repo::token::cache_owner`）。
-    ///
-    /// 配置逐字段相同的来源会返回同一个值 —— 界面据此知道「这两个来源共用一份
-    /// token、一个倒计时」，于是刷新其一就能同步更新另一个，计数也不会把
-    /// 一份 token 数成两份。**没有缓存行时这个值同样有效**（归属和有没有值是两件事）。
-    pub cache_owner_id: i64,
 }
 
 // ============================================================
@@ -70,13 +64,13 @@ pub async fn list_token_sources(
 pub async fn create_token_source(
     state: State<'_, AppState>,
     workspace_id: i64,
-    folder_id: i64,
+    request_id: i64,
     name: String,
     fetch_request_id: i64,
 ) -> AppResult<TokenSource> {
     let name = clean_name(&name, "name")?;
     with_conn(&state.pool, move |conn| {
-        repo::token::create(conn, workspace_id, folder_id, &name, fetch_request_id)
+        repo::token::create(conn, workspace_id, request_id, &name, fetch_request_id)
     })
     .await
 }
@@ -108,30 +102,26 @@ pub async fn delete_token_source(state: State<'_, AppState>, id: i64) -> AppResu
     with_conn(&state.pool, move |conn| repo::token::delete(conn, id)).await
 }
 
-/// 某条请求实际会用到哪个 Token 源。
+/// 一条请求自己那份 Token 源（没有就 `None`）。
 ///
-/// 两级判定，与 `http::pipeline::find_token_source` 是**同一套规则的两份实现**：
-/// 先沿文件夹链向上找第一个，再兜底到系统分类「token刷新」下的全局那一个。
-/// 两份必须一起改 —— 界面显示的和发送时用的要是两个源，用户就会看到一个
-/// 「明明配好了却不生效」的假象。
+/// 与 `http::pipeline::find_token_source` 必须给出**同一个答案**：界面显示的和
+/// 发送时用的要是两个源，用户就会看到一个「明明配好了却不生效」的假象。
 ///
-/// ⚠️ 请求**没有归属分类**时也要照常解析（`folder_id = None`）：Token 来源
-/// 固定配在系统分类下，这条路径恰恰是最常见的。早先这里直接返回 `None`，
-/// 界面上就永远显示「没有可用 Token 来源」。
+/// 2026-09-18 之前这里是两级判定（先沿文件夹链找最近的，再兜底到系统分类
+/// 「token刷新」下的全局那一个）。008 之后 Token 源逐请求一份，两级都没有了 ——
+/// 这个函数只剩一次 `by_request` 查询，与流水线那侧逐字对应。
 #[tauri::command]
 pub async fn resolve_token_source(
     state: State<'_, AppState>,
-    folder_id: Option<i64>,
+    request_id: Option<i64>,
 ) -> AppResult<Option<TokenSource>> {
+    let Some(request_id) = request_id else {
+        // 未保存的草稿：没有身份 ⇒ 没有源。这与「新建请求还没配源」表现一致，
+        // 不会静默借用别处的 token。
+        return Ok(None);
+    };
     with_conn(&state.pool, move |conn| {
-        if let Some(folder_id) = folder_id {
-            let chain = repo::folder::ancestry(conn, folder_id)?;
-            let ids: Vec<i64> = chain.iter().map(|f| f.id).collect();
-            if let Some(source) = repo::token::first_in_chain(conn, &ids)? {
-                return Ok(Some(source));
-            }
-        }
-        repo::token::system_source(conn)
+        repo::token::by_request(conn, request_id)
     })
     .await
 }
@@ -140,12 +130,59 @@ pub async fn resolve_token_source(
 // 状态与刷新
 // ============================================================
 
+/// 一条 Token 源的运行状态，**带上它是谁**。
+///
+/// 为什么不直接返回 `HashMap<i64, TokenStatus>`：JSON 的对象键只能是
+/// 字符串，前端的 `Record<number, …>` 得靠隐式转换对上。一个显式的 `sourceId`
+/// 字段让两边都不必猜。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenStatusRow {
+    pub source_id: i64,
+    /// `flatten` 而不是 `status: TokenStatus`：前端拿到的形状与
+    /// `get_token_status` 的返回**逐字段相同**，两处不必各写一套解析。
+    #[serde(flatten)]
+    pub status: TokenStatus,
+}
+
+/// 一次拿回某个工作区**全部** Token 源的状态。
+///
+/// ## 为什么不是前端逐条调 `get_token_status`
+///
+/// 008 之后 Token 源是逐请求一份的 —— 这个库里有一百多条。逐条调就是一百多趟
+/// IPC，而每次调用都要过一遍 `with_conn`（异步 → 阻塞的边界）。
+/// 合成一条命令之后仍然是一百多次点查，但那是**同一个连接上的主键查找**，
+/// 快得可以忽略；省掉的是 IPC 与序列化那一百多个来回。
+///
+/// 这里没有单独的测试：它只是 `list_by_workspace` /
+/// `get_cache` / `status_of` 三个已测过的东西拼起来，
+/// 再写一遍只会把它们各自的断言拄一遍。
+#[tauri::command]
+pub async fn list_token_statuses(
+    state: State<'_, AppState>,
+    workspace_id: i64,
+) -> AppResult<Vec<TokenStatusRow>> {
+    with_conn(&state.pool, move |conn| {
+        let sources = repo::token::list_by_workspace(conn, workspace_id)?;
+        let mut rows = Vec::with_capacity(sources.len());
+        for source in sources {
+            let cache = repo::token::get_cache(conn, source.id)?;
+            rows.push(TokenStatusRow {
+                source_id: source.id,
+                status: status_of(&source, cache.as_ref()),
+            });
+        }
+        Ok(rows)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn get_token_status(state: State<'_, AppState>, id: i64) -> AppResult<TokenStatus> {
     let source = source_of(&state, id).await?;
-    let (owner, cache) = cache_of(&state, &source).await?;
+    let cache = cache_of(&state, &source).await?;
 
-    Ok(status_of(&source, owner, cache.as_ref()))
+    Ok(status_of(&source, cache.as_ref()))
 }
 
 /// 强制刷新，忽略缓存（design.md §4.3 的「立即刷新」）。
@@ -168,8 +205,8 @@ pub async fn refresh_token(state: State<'_, AppState>, id: i64) -> AppResult<Tok
 
     // 刷完再把库里的那一行读回来作状态 —— 不直接拿刷新返回值拼，
     // 免得「显示的状态」与「真的落库了什么」有第二条路径
-    let (owner, cache) = cache_of(&state, &source).await?;
-    Ok(status_of(&source, owner, cache.as_ref()))
+    let cache = cache_of(&state, &source).await?;
+    Ok(status_of(&source, cache.as_ref()))
 }
 
 // ============================================================
@@ -181,26 +218,18 @@ async fn source_of(state: &State<'_, AppState>, id: i64) -> AppResult<TokenSourc
     with_conn(&pool, move |conn| repo::token::get(conn, id)).await
 }
 
-/// 这份来源的**缓存归属**（落在哪条代表行上）与那一行里的内容。
+/// 这份来源自己的那行缓存。
 ///
-/// 两件事一起返回，不是图省事：分开两次查，两趟之间配置可能被改过，
-/// 于是会出现「归属按新配置算、内容读的是旧那一行」这种半拉子状态。
-///
-/// 归属算法只有 `repo::token::cache_owner` 一处 —— 这里不自己拼 SQL，
-/// 也不拿 `source.id` 顶替（那样就把「配置相同的来源共用一份 token」悄悄废掉了，
-/// 而且症状只是「明明有 token 却显示没取过」，看不出根因）。
+/// 直接按 `source.id` 读，**没有归属算法**。008 之前这里要先算出「缓存落在哪条
+/// 代表行上」（配置相同的来源共用一份 token），所以还得读一次 `cache_owner`；
+/// 现在一个源一行缓存，`token_cache.token_source_id` 上的唯一索引就是全部规则。
 async fn cache_of(
     state: &State<'_, AppState>,
     source: &TokenSource,
-) -> AppResult<(i64, Option<TokenCache>)> {
+) -> AppResult<Option<TokenCache>> {
     let pool = state.pool.clone();
-    let source = source.clone();
-    with_conn(&pool, move |conn| {
-        let owner = repo::token::cache_owner(conn, &source)?;
-        let cache = repo::token::get_cache(conn, owner)?;
-        Ok((owner, cache))
-    })
-    .await
+    let id = source.id;
+    with_conn(&pool, move |conn| repo::token::get_cache(conn, id)).await
 }
 
 /// 激活环境的变量。取 token 的那个请求自己也可能写 `{{env.clientId}}`。
@@ -215,7 +244,7 @@ async fn active_env(state: &State<'_, AppState>) -> AppResult<HashMap<String, St
     .await
 }
 
-fn status_of(source: &TokenSource, cache_owner_id: i64, cache: Option<&TokenCache>) -> TokenStatus {
+fn status_of(source: &TokenSource, cache: Option<&TokenCache>) -> TokenStatus {
     let Some(cache) = cache else {
         return TokenStatus {
             has_cache: false,
@@ -226,7 +255,6 @@ fn status_of(source: &TokenSource, cache_owner_id: i64, cache: Option<&TokenCach
             access_token: None,
             has_refresh_token: false,
             auto_refresh: source.auto_refresh,
-            cache_owner_id,
         };
     };
 
@@ -247,7 +275,6 @@ fn status_of(source: &TokenSource, cache_owner_id: i64, cache: Option<&TokenCach
         access_token: Some(cache.access_token.clone()),
         has_refresh_token: cache.refresh_token.is_some(),
         auto_refresh: source.auto_refresh,
-        cache_owner_id,
     }
 }
 
@@ -260,7 +287,7 @@ mod tests {
         TokenSource {
             id: 1,
             workspace_id: 1,
-            folder_id: 1,
+            request_id: 2,
             name: "oauth".into(),
             fetch_request_id: 1,
             access_path: "$.a".into(),
@@ -289,7 +316,7 @@ mod tests {
 
     #[test]
     fn no_cache_is_reported_as_expired() {
-        let status = status_of(&source(true), 7, None);
+        let status = status_of(&source(true), None);
         assert!(!status.has_cache);
         assert!(status.expired, "从没取过就必须算过期，否则徽标会显示成有效");
         assert_eq!(status.remaining_seconds, None);
@@ -300,7 +327,7 @@ mod tests {
     fn remaining_seconds_is_computed_from_expires_at() {
         let at = (chrono::Utc::now() + chrono::Duration::seconds(100))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let status = status_of(&source(true), 7, Some(&cache(Some(&at))));
+        let status = status_of(&source(true), Some(&cache(Some(&at))));
 
         let remaining = status.remaining_seconds.expect("算得出剩余秒数");
         assert!((96..=100).contains(&remaining), "剩余秒数不对: {remaining}");
@@ -311,7 +338,7 @@ mod tests {
     /// 永不过期的缓存：`remaining` 为 `None` 且不算过期
     #[test]
     fn cache_without_expiry_is_valid_forever() {
-        let status = status_of(&source(true), 7, Some(&cache(None)));
+        let status = status_of(&source(true), Some(&cache(None)));
         assert!(status.has_cache);
         assert!(!status.expired);
         assert_eq!(status.remaining_seconds, None);
@@ -323,28 +350,14 @@ mod tests {
     fn past_expiry_shows_negative_remaining() {
         let at = (chrono::Utc::now() - chrono::Duration::seconds(60))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let status = status_of(&source(true), 7, Some(&cache(Some(&at))));
+        let status = status_of(&source(true), Some(&cache(Some(&at))));
         assert!(status.expired);
         assert!(status.remaining_seconds.unwrap() < 0);
     }
 
     #[test]
     fn status_mirrors_auto_refresh_flag() {
-        assert!(status_of(&source(true), 7, None).auto_refresh);
-        assert!(!status_of(&source(false), 7, None).auto_refresh);
-    }
-
-    /// 归属要**原样**回给前端，而且在「没有缓存」时同样有效 ——
-    /// 界面靠它判断哪些来源共用一份 token（刷新其一要同步更新另一个、
-    /// 计数也不能把一份 token 数成两份）。没有值时把它填成 `0` 或来源自己的 id，
-    /// 都会让界面把同组的两条来源看成两套。
-    #[test]
-    fn cache_owner_id_is_reported_even_without_a_cache_row() {
-        let owner = 3; // 组内的代表行，未必是这一条来源自己
-        assert_eq!(status_of(&source(true), owner, None).cache_owner_id, owner);
-        assert_eq!(
-            status_of(&source(true), owner, Some(&cache(None))).cache_owner_id,
-            owner
-        );
+        assert!(status_of(&source(true), None).auto_refresh);
+        assert!(!status_of(&source(false), None).auto_refresh);
     }
 }

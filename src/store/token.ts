@@ -43,8 +43,10 @@ export interface TokenState {
  * `expiresAt` 再算一遍，两边迟早在边界上分叉，表现为
  * 「徽标说还有 5 秒，后端说已经过期了」。
  *
- * 来源数量是个位数，逐条 `get_token_status` 都是**纯读缓存、不触发网络**，
- * 所以并发拉一轮的代价可以忽略。
+ * 状态在**一条命令**里全拿回来（`list_token_statuses`）。008 之后 Token 源
+ * 是逐请求一份的，一个工作区动辄一百多条 —— 逐条调 `get_token_status`
+ * 就是一百多趟 IPC，而每一趟都要过一遍 `with_conn` 那个异步 → 阻塞的边界。
+ * 后端仍然是逐条点查缓存，但那是同一个连接上的主键查找，代价可以忽略。
  */
 export const useTokenStore = create<TokenState>((set, get) => ({
   status: "idle",
@@ -60,7 +62,7 @@ export const useTokenStore = create<TokenState>((set, get) => ({
     set({ status: "loading", error: null });
     try {
       const sources = await ipc.tokens.list(workspaceId);
-      const statuses = await ipc.tokens.statuses(sources);
+      const statuses = await ipc.tokens.statuses(workspaceId);
       set({
         status: "ready",
         error: null,
@@ -75,7 +77,7 @@ export const useTokenStore = create<TokenState>((set, get) => ({
   reloadStatus: async (id) => {
     try {
       const next = await ipc.tokens.status(id);
-      set((s) => ({ statuses: patchStatuses(s.statuses, id, next) }));
+      set((s) => ({ statuses: { ...s.statuses, [id]: next } }));
     } catch (e) {
       console.warn("[reqly] 读取 Token 状态失败：", ipc.toIpcError(e).debug);
     }
@@ -89,7 +91,7 @@ export const useTokenStore = create<TokenState>((set, get) => ({
 
     try {
       const next = await ipc.tokens.refresh(id);
-      set((s) => ({ statuses: patchStatuses(s.statuses, id, next) }));
+      set((s) => ({ statuses: { ...s.statuses, [id]: next } }));
       return true;
     } catch (e) {
       const error = ipc.toIpcError(e);
@@ -110,7 +112,7 @@ export const useTokenStore = create<TokenState>((set, get) => ({
     try {
       const created = await ipc.tokens.create(
         workspaceId,
-        draft.folderId,
+        draft.requestId,
         draft.name,
         draft.fetchRequestId,
       );
@@ -159,49 +161,14 @@ export const useTokenStore = create<TokenState>((set, get) => ({
 }));
 
 /**
- * 把一条新状态写回 `statuses`，**连同与它共用同一份 token 的其它来源**。
- *
- * 配置逐字段相同的来源共享同一行缓存（后端 `repo::token::cache_owner`），
- * 所以刷完其一，同组的每一条都该立刻显示同一个倒计时。只更新被点的那一条，
- * 另一条会继续走它自己那个基于旧 `updatedAt` 的秒表 —— 而它俩本来就是
- * 同一个 token、同一个过期时间，界面上却出现两个不一样的数字。
- *
- * 分组依据是 `cacheOwnerId`（后端给的代表行 id）。`-1` = 后端没给这个字段，
- * 退化成「只更新自己」，也就是这套机制出现之前的行为。
- *
- * 为什么不做成「刷新后重新 `load()` 全量拉一遍」：那要为一次刷新打 N 趟 IPC，
- * 而且会把 `status` 置成 `loading` —— 为了同步一份本来就已知的数据，
- * 去动整个 store 的加载态，代价比收益大。
- */
-function patchStatuses(
-  statuses: Record<number, TokenStatus>,
-  sourceId: number,
-  next: TokenStatus,
-): Record<number, TokenStatus> {
-  const out: Record<number, TokenStatus> = { ...statuses };
-
-  if (next.cacheOwnerId >= 0) {
-    for (const key of Object.keys(out)) {
-      const id = Number(key);
-      if (out[id]?.cacheOwnerId === next.cacheOwnerId) out[id] = next;
-    }
-  }
-
-  // 自己那一条最后写：归属为 `-1` 时也要落到正确的位置
-  out[sourceId] = next;
-  return out;
-}
-
-/**
  * 状态栏 / 顶栏要的两个数字。
  *
  * 判据是**后端给的 `expired`**，不是前端自己比时间戳。
  * 从没取过的来源（`hasCache === false`）算**待刷新** —— 它一定会触发一次网络请求；
  * 状态还没查回来的来源**两个数字都不计**（宁可不显示，也别先报一个假数字）。
  *
- * 按**共享组**数，不按来源条数：两条来源配着同一套取 token 配置时共用一份
- * token，报「2 个待刷新」会让人以为要刷两次、要等两趟网络 —— 实际只有一份。
- * 分组依据 `cacheOwnerId`，`-1`（后端没给）时退化成每条来源各算一组。
+ * 008 之后每条来源各自一份 token，所以按**来源条数**数就是对的
+ * —— 原来那套「按共享组去重」随着 token 归属一起消失了。
  *
  * 刻意不做成 store 的派生字段：它是 `sources × statuses` 的函数，
  * 存一份就得在每次刷新后同步更新，而这种同步迟早会漏。
@@ -210,24 +177,19 @@ function patchStatuses(
  * zustand 比的是返回值引用，`(s) => tokenCounts(s)` 每次都新建对象 → 无限重渲染。
  */
 export interface TokenCounts {
-  /** 已判定过期 + 从没取过的**共享组**数 */
+  /** 已判定过期 + 从没取过的来源数 */
   pending: number;
-  /** 已判定还有效的**共享组**数 */
+  /** 已判定还有效的来源数 */
   valid: number;
 }
 
 export function tokenCounts(state: TokenState): TokenCounts {
   let pending = 0;
   let valid = 0;
-  const counted = new Set<number>();
 
   for (const source of state.sources) {
     const status = state.statuses[source.id];
     if (!status) continue;
-
-    const group = status.cacheOwnerId >= 0 ? status.cacheOwnerId : source.id;
-    if (counted.has(group)) continue;
-    counted.add(group);
 
     if (status.expired) pending += 1;
     else valid += 1;

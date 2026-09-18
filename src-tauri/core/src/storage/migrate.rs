@@ -18,6 +18,19 @@ pub struct Migration {
     /// 仅用于日志
     pub name: &'static str,
     pub sql: &'static str,
+    /// 需要 Rust 侧解析、SQL 写不出来的**一次性**数据变动，与本次迁移同事务执行。
+    ///
+    /// 两种用法的区别只在 SQL 里：008 只**播种**（SQL 建表，data 铺数据）；
+    /// 009 的 SQL 是空的，删除判据同样要解析 URL，整件事都在 data 里。
+    ///
+    /// 为什么需要它：008 要把「每个接口一份 Token 源」铺出来，而判据要读取 token
+    /// 请求的 `scope` —— 那东西藏在请求体里、有三种存法，还要按空白切词与
+    /// percent-decode。写进 SQL 要么写不出来（没有 split），要么写出来没人敢改。
+    ///
+    /// 为什么挂在迁移上而不是应用启动时：迁移天然**只跑一次**，所以
+    /// 「用户手工删掉某条 Token 源」不会被下次启动重新长回来。挂在启动路径上就得
+    /// 再加一个 `setting` 标记来达到同样的效果。
+    pub data: Option<fn(&rusqlite::Connection) -> AppResult<usize>>,
 }
 
 /// 全部迁移，**按 version 升序**。
@@ -29,36 +42,62 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 1,
         name: "init",
         sql: include_str!("../../migrations/001_init.sql"),
+        data: None,
     },
     Migration {
         version: 2,
         name: "folder_auth",
         sql: include_str!("../../migrations/002_folder_auth.sql"),
+        data: None,
     },
     Migration {
         version: 3,
         name: "body_by_type",
         sql: include_str!("../../migrations/003_body_by_type.sql"),
+        data: None,
     },
     Migration {
         version: 4,
         name: "system_folder",
         sql: include_str!("../../migrations/004_system_folder.sql"),
+        data: None,
     },
     Migration {
         version: 5,
         name: "form_fields",
         sql: include_str!("../../migrations/005_form_fields.sql"),
+        data: None,
     },
     Migration {
         version: 6,
         name: "history_curl",
         sql: include_str!("../../migrations/006_history_curl.sql"),
+        data: None,
     },
     Migration {
         version: 7,
         name: "flatten_auth",
         sql: include_str!("../../migrations/007_flatten_auth.sql"),
+        data: None,
+    },
+    Migration {
+        version: 8,
+        name: "request_scoped_token_source",
+        sql: include_str!("../../migrations/008_request_scoped_token_source.sql"),
+        // 结构改完立刻铺源：新表是空的，不铺的话 145 个接口会一起显示「还没有配置」
+        data: Some(crate::storage::seed::request_token_sources),
+    },
+    Migration {
+        version: 9,
+        name: "drop_sources_outside_rule_hosts",
+        sql: include_str!("../../migrations/009_drop_sources_outside_rule_hosts.sql"),
+        data: Some(crate::storage::seed::drop_sources_outside_rule_hosts),
+    },
+    Migration {
+        version: 10,
+        name: "history_response",
+        sql: include_str!("../../migrations/010_history_response.sql"),
+        data: None,
     },
 ];
 
@@ -127,6 +166,17 @@ pub fn run(conn: &mut Connection) -> AppResult<Vec<i64>> {
                 version: migration.version,
                 reason: format!("{}: {e}", migration.name),
             })?;
+
+        // 数据变动与它所属的那次迁移**同一个事务**：中途失败则连结构一起回滚，
+        // 版本号也不会被登记 —— 下次启动从头再来一遍，不会留下「结构已改、
+        // 数据只铺了一半」的中间态。
+        if let Some(data) = migration.data {
+            data(&tx).map_err(|e| AppError::Migration {
+                version: migration.version,
+                reason: format!("{}: data step failed: {e}", migration.name),
+            })?;
+        }
+
         tx.execute(
             "INSERT INTO schema_migration (version, applied_at) VALUES (?1, ?2)",
             rusqlite::params![migration.version, now_iso()],
@@ -145,6 +195,19 @@ mod tests {
 
     fn open_memory() -> Connection {
         Connection::open_in_memory().expect("in-memory db")
+    }
+
+    /// 从 `from` 起的所有迁移版本。
+    ///
+    /// 断言「这个老库补跑了哪些」时用它，**不要写字面量数组**：写死的话
+    /// 每加一次迁移都要回来改这里，而漏改的表现是一条一直红的测试 ——
+    /// 加 010 时正是这么被抓出来的（两处红色全在这里）。
+    fn versions_from(from: i64) -> Vec<i64> {
+        MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+            .filter(|version| *version >= from)
+            .collect()
     }
 
     /// 把 WAL 之外的 PRAGMA 也打开，尽量贴近运行时环境
@@ -249,6 +312,9 @@ mod tests {
             "idx_history_time",
             "idx_history_req",
             "idx_sample_run",
+            // 008 建的三个索引，之前一个都没被钉住
+            "idx_token_source_request",
+            "idx_token_source_fetch",
             "idx_token_cache_source",
         ] {
             assert!(names.iter().any(|n| n == idx), "missing index: {idx}");
@@ -285,18 +351,28 @@ mod tests {
     /// `schema_migration` —— 那正是老用户库里这张表的样子），塞进覆盖整张展开对照表的
     /// 请求，然后让 `run()` 只补跑 007，断言末态的 `headers` / `params`。
     ///
-    /// 之所以敢跳过 003~006：007 只碰 `request` / `folder` 的 auth 与 headers / params，
-    /// 那四个迁移加出来的列（body_by_type、is_system、form_fields、curl…）与它无关。
+    /// 🔴 001~006 的 SQL 必须**全跑**，不能只跑与 007 相关的那两个：`run()` 会把
+    /// 007 / 008 / 009 一起补上，而 008 的播种要读 `body_rows` / `form_fields`
+    /// （003 / 005 加出来的列）⇒ 省掉它们，这条升级路径上直接报 `no such column`。
+    /// 也就是说「哪几个迁移可以不跑」不是 007 说了算的。
+    ///
+    /// 版本号仍然只登记到 6：这才是「用户库里那张表」的样子。
     ///
     /// 真库副本上的等价验证见 2026-09-17 工作日志（267 条请求：改动 36 条、
     /// 新增 36 行头、其余 231 条逐字节未变）。这条测试是那个的一次性缩微版。
     #[test]
     fn legacy_auth_is_flattened_into_headers_by_migration_7() {
         let mut conn = open_memory_with_pragmas();
-        conn.execute_batch(include_str!("../../migrations/001_init.sql"))
-            .unwrap();
-        conn.execute_batch(include_str!("../../migrations/002_folder_auth.sql"))
-            .unwrap();
+        for sql in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_folder_auth.sql"),
+            include_str!("../../migrations/003_body_by_type.sql"),
+            include_str!("../../migrations/004_system_folder.sql"),
+            include_str!("../../migrations/005_form_fields.sql"),
+            include_str!("../../migrations/006_history_curl.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
         conn.execute_batch(
             "CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
              INSERT INTO schema_migration (version, applied_at) VALUES
@@ -384,7 +460,7 @@ mod tests {
         }
 
         let applied = run(&mut conn).expect("upgrade");
-        assert_eq!(applied, vec![7], "老库只该补跑 007");
+        assert_eq!(applied, versions_from(7), "老库该补跑 007 起的全部迁移");
 
         let raw_of = |id: i64| -> String {
             conn.query_row("SELECT headers FROM request WHERE id = ?1", [id], |r| {
@@ -577,6 +653,9 @@ mod tests {
 
     /// 删除行为：[补2] 请求被彻底删除时，指向它的 token_source 应级联消失，
     /// 而不是抛外键错误（设计稿漏了 ON DELETE 行为）。
+    ///
+    /// 008 之后 `request_id` 也带 CASCADE：**归属**的那条请求没了，这份配置
+    /// 本身就没有意义了（它描述的正是"这个接口怎么拿 token"）。
     #[test]
     fn token_source_cascades_when_fetch_request_is_purged() {
         let mut conn = open_memory_with_pragmas();
@@ -588,9 +667,11 @@ mod tests {
              INSERT INTO folder (id, workspace_id, name, created_at, updated_at)
                VALUES (1, 1, 'f', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
              INSERT INTO request (id, folder_id, workspace_id, name, created_at, updated_at)
-               VALUES (1, 1, 1, 'login', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-             INSERT INTO token_source (id, workspace_id, folder_id, name, fetch_request_id, created_at, updated_at)
-               VALUES (1, 1, 1, 'oauth', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               VALUES (1, 1, 1, 'login', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                      (2, 1, 1, 'me',    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO token_source (id, workspace_id, request_id, name, fetch_request_id,
+                                       created_at, updated_at)
+               VALUES (1, 1, 2, 'oauth', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
              DELETE FROM request WHERE id = 1;",
         )
         .expect("purge should cascade, not fail on FK");
@@ -599,6 +680,20 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM token_source", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "token_source should have been cascaded away");
+
+        // 反过来：把**归属**那条请求删掉，配置也该跟着走
+        conn.execute_batch(
+            "INSERT INTO token_source (id, workspace_id, request_id, name, fetch_request_id,
+                                       created_at, updated_at)
+               VALUES (2, 1, 2, 'oauth', 2, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             DELETE FROM request WHERE id = 2;",
+        )
+        .expect("purge should cascade, not fail on FK");
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM token_source", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "归属请求被删 ⇒ 配置也该消失");
     }
 
     /// 历史表刻意不加外键：工作区被删后历史仍要能读（design.md §3.2）
@@ -613,5 +708,266 @@ mod tests {
             [],
         )
         .expect("history must accept a workspace_id with no matching row");
+    }
+
+    /// 008 的核心：老的「分类级 / 全工作区一份」Token 源被丢弃，改由 seed 按
+    /// host + scope 给每个接口铺一份。
+    ///
+    /// 这条测试盯三件事，每一件单独看都像"应该没问题"：
+    /// 1. **`token_cache` 被显式清空。** 重建 `token_source` 一定会波及缓存
+    ///    （`foreign_keys=ON`），所以清理必须是写出来的那一步 —— 见 008 的注释 ①。
+    /// 2. **内外网分开**：`localhost` 那条请求没有同 host 的取 token 请求 ⇒ 不建源。
+    /// 3. **scope 决定用哪一条**：#101 的 scope 不覆盖 `psaou` ⇒ 落到 #102；
+    ///    #200 的 scope 不覆盖 `NewContractAPI` ⇒ 落到 #201。
+    #[test]
+    fn folder_scoped_source_is_replaced_by_per_request_sources() {
+        let mut conn = open_memory_with_pragmas();
+        for sql in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_folder_auth.sql"),
+            include_str!("../../migrations/003_body_by_type.sql"),
+            include_str!("../../migrations/004_system_folder.sql"),
+            include_str!("../../migrations/005_form_fields.sql"),
+            include_str!("../../migrations/006_history_curl.sql"),
+            include_str!("../../migrations/007_flatten_auth.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_migration (version, applied_at) VALUES
+               (1,'2026-01-01T00:00:00.000Z'), (2,'2026-01-01T00:00:00.000Z'),
+               (3,'2026-01-01T00:00:00.000Z'), (4,'2026-01-01T00:00:00.000Z'),
+               (5,'2026-01-01T00:00:00.000Z'), (6,'2026-01-01T00:00:00.000Z'),
+               (7,'2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+
+        conn.execute_batch(
+            r#"INSERT INTO workspace (id, name, created_at, updated_at)
+                 VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               INSERT INTO folder (id, workspace_id, name, created_at, updated_at)
+                 VALUES (25, 1, 'token刷新', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+
+               -- 取 token 请求：名称里的「测试」/「生产」是环境默认候选的标记
+               INSERT INTO request (id, workspace_id, name, url, body, created_at, updated_at) VALUES
+                 (100, 1, '测试环境拿token',     'http://api.test.example.com/ids/connect/token',
+                  'client_id=a&scope=A%20B%20C%20D%20E', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (101, 1, '测试环境拿token (2)', 'http://api.test.example.com/ids/connect/token',
+                  'client_id=b' || char(10) || 'scope=A B C', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 -- `psaou` 是给 #2 那类 `/BPM/psaou/…` 用的：没有它，#102 就不是
+                 -- 「覆盖集里的候选」，规则 ⑤ 只能退回默认 #101，那条断言也就测不到东西
+                 (102, 1, '测试环境拿token (3)', 'http://api.test.example.com/ids/connect/token',
+                  'client_id=a&scope=A%20B%20C%20D%20psaou', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (200, 1, '生产拿token',         'http://api.example.com/ids/connect/token',
+                  'client_id=c&scope=A%20B%20C%20D%20E', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (201, 1, '拿合同token',         'http://api.example.com/ids/connect/token',
+                  'client_id=d&scope=NewContractAPI', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 -- 同一个 host 上确实有取 token 请求，但域名不在白名单里
+                 (300, 1, '钉钉获取token',     'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                  'client_id=e&client_secret=f', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+
+               -- 业务请求：默认覆盖 / scope 偏离 / 谁都不覆盖 / 另一个 host / 内网 / 回收站
+               -- `#6` 是补的：钉钉的 host 上有取 token 请求，但域名不在白名单里 ——
+               -- 少了这一条，008 光按「host 相等」配对也能全绿（真库上就是这么漏的）
+               INSERT INTO request (id, workspace_id, name, url, deleted_at, created_at, updated_at) VALUES
+                 (1, 1, '工时查询', 'http://api.test.example.com/PMPFIN/TimeSheetApi/v1/x',
+                  NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (2, 1, '表单查询', 'http://api.test.example.com/BPM/psaou/v1/y',
+                  NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (3, 1, '没人覆盖的服务', 'http://api.test.example.com/PSA/NobodyCovers/v1/z',
+                  NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (4, 1, '获取报价', 'http://api.example.com/PMPFIN/NewContractAPI/v1/get',
+                  NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (5, 1, '本地服务', 'http://localhost:5000/RMS/Api/x',
+                  NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (6, 1, '机器人单聊', 'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                  NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (7, 1, '回收站里的', 'http://api.test.example.com/PMPFIN/TimeSheetApi/v1/x',
+                  '2026-01-02T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+
+               -- 老的分类级 Token 源 + 一份**必须被显式删掉**的缓存
+               INSERT INTO token_source (id, workspace_id, folder_id, name, fetch_request_id,
+                                         created_at, updated_at)
+                 VALUES (9, 1, 25, 'Token 刷新', 200, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               INSERT INTO token_cache (id, token_source_id, access_token, updated_at)
+                 VALUES (1, 9, 'KEEP-ME', '2026-01-01T00:00:00.000Z');"#,
+        )
+        .unwrap();
+
+        let applied = run(&mut conn).expect("upgrade");
+        assert_eq!(applied, versions_from(8), "老库该补跑 008 起的全部迁移");
+
+        // ① 老的分类级行没了；旧缓存也随之有意地清干净
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM token_source ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!ids.contains(&9), "分类级的老行必须被丢弃");
+
+        // 为什么「清空」是对的目标：新表里 source id 从 1 重新长起
+        // （seed 铺 145 行就是 1~145）。旧缓存行留着就会指向另一个接口的新源。
+        let caches: i64 = conn
+            .query_row("SELECT COUNT(*) FROM token_cache", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            caches, 0,
+            "旧缓存必须被显式删掉 —— 留着会张冠李戴，靠级联删则是静默的"
+        );
+
+        // ② 每条命中规则的业务请求各得到一份源，且指向 scope 覆盖它的那条取 token 请求
+        let fetch_of = |req: i64| -> Option<i64> {
+            conn.query_row(
+                "SELECT fetch_request_id FROM token_source WHERE request_id = ?1",
+                [req],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        assert_eq!(fetch_of(1), Some(101), "默认候选覆盖 ⇒ 用默认");
+        assert_eq!(fetch_of(2), Some(102), "默认不含 psaou ⇒ 覆盖集里词最少的");
+        assert_eq!(fetch_of(3), Some(101), "谁都不覆盖 ⇒ 退回默认");
+        assert_eq!(fetch_of(4), Some(201), "生产默认不含 NewContractAPI ⇒ 偏离");
+        assert_eq!(fetch_of(5), None, "localhost 没有同 host 的取 token 请求");
+        assert_eq!(
+            fetch_of(6),
+            None,
+            "钉钉上**有**同 host 的取 token 请求，但那个域名不在白名单里"
+        );
+        assert_eq!(fetch_of(7), None, "回收站里的请求不铺");
+        for fetch in [100, 101, 102, 200, 201, 300] {
+            assert_eq!(
+                fetch_of(fetch),
+                None,
+                "#{fetch} 自己是取 token 请求，不该配源"
+            );
+        }
+
+        // ③ 播种幂等：重复执行不产生第二行
+        let again = crate::storage::seed::request_token_sources(&conn).unwrap();
+        assert_eq!(again, 0, "重复播种应当一条都不新建");
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM token_source", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 4);
+    }
+
+    /// 判据闸门：**同一个 host** 上有取 token 请求，但域名不在白名单里 ⇒ 不铺源。
+    ///
+    /// 这条是补上去的。上面那份 fixture 里没有这种形状 —— 内网 IP / localhost
+    /// 是「host 不在白名单上、同时**也没有**同 host 的取 token 请求」，
+    /// 于是 008 光按「host 相等」配对也能全绿；真库上却因此多铺了 19 条
+    /// （ipsapro 14 + 钉钉 5，见 009 的注释）。
+    #[test]
+    fn non_rule_hosts_get_no_source_even_with_a_same_host_token_request() {
+        let mut conn = open_memory_with_pragmas();
+        run(&mut conn).unwrap();
+
+        conn.execute_batch(
+            r#"INSERT INTO workspace (id, name, created_at, updated_at)
+                 VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               INSERT INTO request (id, workspace_id, name, url, created_at, updated_at) VALUES
+                 (1, 1, 'ipsapro 业务',  'https://app.example.com/RMS/Api/x',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (2, 1, '业务回写',      'https://app.example.com/iCan/bk/getToken',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (3, 1, '钉钉业务',      'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (4, 1, '钉钉获取token', 'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (5, 1, '生产业务',      'http://api.example.com/PMPFIN/TimeSheetApi/v1/x',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (6, 1, '生产拿token',   'http://api.example.com/ids/connect/token',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');"#,
+        )
+        .expect("fixture");
+
+        let created = crate::storage::seed::request_token_sources(&conn).unwrap();
+        assert_eq!(created, 1, "只有规则域名上那条业务请求该得到源");
+
+        let owners: Vec<i64> = conn
+            .prepare("SELECT request_id FROM token_source ORDER BY request_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(owners, vec![5], "ipsapro 与钉钉那些一条都不该有");
+    }
+
+    /// 009 的收尾：把铺到规则域名之外的源收回来。
+    ///
+    /// 直接调那个函数，不重放整套迁移 —— 008 的判据已经修好了，从最新版出发
+    /// **造不出**那种脏数据，能造的只有手工插几条。
+    ///
+    /// 同时钉住「只删该删的」：规则域名上那条源、以及它名下的缓存都不能被误伤。
+    #[test]
+    fn stale_sources_outside_the_rule_hosts_are_dropped() {
+        let mut conn = open_memory_with_pragmas();
+        run(&mut conn).unwrap();
+
+        conn.execute_batch(
+            r#"INSERT INTO workspace (id, name, created_at, updated_at)
+                 VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               INSERT INTO request (id, workspace_id, name, url, created_at, updated_at) VALUES
+                 (1, 1, 'ipsapro 业务',  'https://app.example.com/RMS/Api/x',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (2, 1, '钉钉业务',      'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (3, 1, '生产业务',      'http://api.example.com/PMPFIN/TimeSheetApi/v1/x',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (4, 1, '生产拿token',   'http://api.example.com/ids/connect/token',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (5, 1, '业务回写',      'https://app.example.com/iCan/bk/getToken',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (6, 1, '钉钉获取token', 'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               -- 三行源：前两行是旧判据才会铺出来的（业务与取 token 请求同 host，
+               -- 但域名不在白名单上），第三行是合法的
+               INSERT INTO token_source (id, workspace_id, request_id, name, fetch_request_id,
+                                         created_at, updated_at) VALUES
+                 (1, 1, 1, 'ipsapro 业务', 5, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (2, 1, 2, '钉钉业务',     6, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (3, 1, 3, '生产业务',     4, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               INSERT INTO token_cache (id, token_source_id, access_token, updated_at) VALUES
+                 (1, 1, 'STALE', '2026-01-01T00:00:00.000Z'),
+                 (2, 2, 'STALE', '2026-01-01T00:00:00.000Z'),
+                 (3, 3, 'KEEP',  '2026-01-01T00:00:00.000Z');"#,
+        )
+        .expect("fixture");
+
+        let removed = crate::storage::seed::drop_sources_outside_rule_hosts(&conn).unwrap();
+        assert_eq!(removed, 2, "ipsapro 与钉钉那两条源必须被收回");
+
+        let left: Vec<i64> = conn
+            .prepare("SELECT request_id FROM token_source ORDER BY request_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(left, vec![3], "规则域名上的源必须原样活着");
+
+        let cached: Vec<String> = conn
+            .prepare("SELECT access_token FROM token_cache ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            cached,
+            vec!["KEEP"],
+            "被删那两条源名下的缓存随外键级联走，合法那条的缓存不能被误伤"
+        );
+
+        // 幂等：再跑一次没有可删的了
+        assert_eq!(
+            crate::storage::seed::drop_sources_outside_rule_hosts(&conn).unwrap(),
+            0
+        );
     }
 }

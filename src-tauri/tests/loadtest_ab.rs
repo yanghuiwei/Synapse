@@ -485,7 +485,7 @@ fn run_engine(runtime: &Runtime, url: &str, keep_alive: bool) -> RunOutcome {
         body: String::new(),
         form_fields: Vec::new(),
         settings,
-        folder_id: None,
+        request_id: None,
     };
 
     let outcome = runtime

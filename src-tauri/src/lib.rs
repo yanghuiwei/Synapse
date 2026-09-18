@@ -178,6 +178,7 @@ pub fn run() {
             commands::token::delete_token_source,
             commands::token::resolve_token_source,
             commands::token::get_token_status,
+            commands::token::list_token_statuses,
             commands::token::refresh_token,
             // 压测（P6）
             commands::loadtest::start_loadtest,

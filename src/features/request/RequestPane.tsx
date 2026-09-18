@@ -273,7 +273,7 @@ export function RequestPane() {
         {/* Token 状态条就摆在发送键旁边 —— 在这之前它只在「授权」页里出现过，
             而发送前没人会去翻那儿，于是「这次带的是不是新 token」只能靠发完
             看 401 来发现。没写 `{{token.*}}` 时它整块不出现，不制造噪音 */}
-        <TokenGate folderId={draft.folderId} wantsToken={wantsToken} />
+        <TokenGate requestId={draft.requestId} wantsToken={wantsToken} />
 
         {running ? (
           <Button

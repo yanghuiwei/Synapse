@@ -42,7 +42,7 @@ fn spec(method: &str, url: &str) -> RequestSpec {
         body: String::new(),
         form_fields: Vec::new(),
         settings: settings(),
-        folder_id: None,
+        request_id: None,
     }
 }
 

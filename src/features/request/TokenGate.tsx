@@ -58,8 +58,11 @@ const PANEL_WIDTH = 320;
 const MARGIN = 8;
 
 export interface TokenGateProps {
-  /** 当前草稿挂在哪个分类下 —— 决定沿哪条链找 Token 来源 */
-  folderId: number | null;
+  /**
+   * 当前草稿的请求 id。`null` = 还没保存 ——
+   * Token 源是挂在请求上的，没有请求就没有源。
+   */
+  requestId: number | null;
   /**
    * 这条请求里有没有写 `{{token.*}}`。
    *
@@ -98,10 +101,10 @@ export interface TokenGateProps {
  * 浮层走 `createPortal` + `fixed`（与 `ContextMenu` 同一套做法）：
  * 留在原地会被 `overflow` 裁掉，而地址栏这一层正好在各种裁切容器的交界上。
  */
-export function TokenGate({ folderId, wantsToken, className }: TokenGateProps) {
+export function TokenGate({ requestId, wantsToken, className }: TokenGateProps) {
   const { t } = useI18n();
 
-  const { source } = useResolvedTokenSource(folderId);
+  const { source } = useResolvedTokenSource(requestId);
   const statuses = useTokenStore((s) => s.statuses);
   const refreshingId = useTokenStore((s) => s.refreshingId);
   const refresh = useTokenStore((s) => s.refresh);
@@ -233,7 +236,7 @@ function badgeLabel(
 // ---------------------------------------------------------------
 
 interface TokenGatePanelProps {
-  /** `null` = 请求引用了 Token，但分类链上没有来源（要给出「怎么办」） */
+  /** `null` = 请求引用了 Token，但这条请求自己没配来源（要给出「怎么办」） */
   source: TokenSource | null;
   status: TokenStatus | null;
   countdown: number | null;

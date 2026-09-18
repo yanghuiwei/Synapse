@@ -37,7 +37,11 @@ const MAX_INLINE_BODY: usize = 8 * 1024 * 1024;
 ///
 /// 刻意**不**从数据库读：这样「还没保存的新请求」也能直接发（Postman 的核心体验），
 /// 压测（P6）也能对一份改了一半的草稿发起 —— 保存和发送是两件事。
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` 是为了历史快照：AI 路径（MCP / CLI）没有前端那一步「发完再写历史」，
+/// 由 `Ops` 自己把 spec 序列化进 `history.snapshot`。形状必须与前端写进去的那份
+/// 一模一样（都来自这个结构 + `camelCase`），否则历史回填会一边能解一边解不了。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestSpec {
     pub method: String,
@@ -52,18 +56,20 @@ pub struct RequestSpec {
     pub body: String,
     #[serde(default)]
     pub settings: RequestSettings,
-    /// 这条请求挂在哪个文件夹下。
+    /// 这条请求**在库里的 id**。
     ///
-    /// 用途只剩一个：Token 源分组（§4.3）要**沿文件夹链向上找**。
+    /// 用途只剩一个：Token 源是**逐请求一份**的（008 迁移），所以要知道
+    /// 「这次发的是哪一条请求」才能查到它自己那份取 token 配置。
     /// 所以它不是可有可无的元数据，而是这次发送语义的一部分 ——
     /// 放进 spec 里，历史快照回填之后再发送也能找回同样的上下文。
     ///
-    /// ⚠️ 以前这里还有第二个用途（授权继承 §4.4），007 迁移之后没有了：
-    /// 凭据就在 `headers` 里，不再需要往上找。
+    /// ⚠️ 可空是**语义**上的，不只是兼容旧快照：未保存的草稿没有 id，
+    /// 这时 `{{token.access}}` 会被原样保留并报「没有可用 Token 源」。
+    /// 让 `None` 退化去借用别的请求的 token，正是 008 要消灭的行为。
     ///
-    /// 可空 + `serde(default)`：P2/P3 时期存下来的历史快照里没有这个字段。
+    /// 008 之前这里是 `folder_id`（沿分类链向上找最近的 Token 源）。
     #[serde(default)]
-    pub folder_id: Option<i64>,
+    pub request_id: Option<i64>,
     /// `multipart/form-data` 的字段行。**只有 `body_type = form` 时才被读取**。
     ///
     /// ## 为什么这里要多开一条通道
@@ -104,7 +110,7 @@ impl From<&crate::storage::models::ApiRequest> for RequestSpec {
             body_type: request.body_type,
             body: request.body.clone(),
             settings: request.settings.clone(),
-            folder_id: request.folder_id,
+            request_id: Some(request.id),
             // 无条件带上：`build_body` 只在 `body_type = form` 时读它，
             // 按类型过滤反而多一处可能在「切类型后忘同步」的地方。
             //
@@ -1298,7 +1304,7 @@ mod tests {
             body_type: BodyType::None,
             body: String::new(),
             settings: RequestSettings::default(),
-            folder_id: None,
+            request_id: None,
             form_fields: Vec::new(),
         }
     }

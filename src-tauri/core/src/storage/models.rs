@@ -320,10 +320,16 @@ pub struct EnvVar {
 pub struct TokenSource {
     pub id: i64,
     pub workspace_id: i64,
-    pub folder_id: i64,
-    pub name: String,
+    /// **这份配置属于哪个接口**。
+    ///
+    /// 008 之前这里是 `folder_id`（挂在系统分类「token刷新」下，全工作区共用
+    /// 一份），于是"每个接口单独配自己的取 token 请求"根本表达不出来 ——
+    /// 实际用法里同一个工作区同时躺着 9 条拿 token 请求（生产 / 测试 / 合同 /
+    /// 资源报价 / 数仓 / 钉钉，client_id 与 scope 各不相同）。
+    pub request_id: i64,
     /// 用哪个请求去取 token
     pub fetch_request_id: i64,
+    pub name: String,
     pub access_path: String,
     pub refresh_path: String,
     pub expires_in_path: String,
@@ -338,51 +344,34 @@ pub struct TokenSource {
 }
 
 impl TokenSource {
-    /// 「**这份 token 是由哪套配置取的**」的指纹。
+    /// 「这份 token 是由哪套配置取的」—— 只用于判断**配置改没改**。
     ///
-    /// 它只有两个用途，而且必须**只有这一处**定义：
-    /// * `storage::repo::token::cache_owner` —— 同指纹的来源共用一行 `token_cache`
-    /// * `http::token::TokenRefresher::flight_for` —— 同指纹的来源共用一把单飞锁
+    /// 改了就把自己名下那行缓存作废（`repo::token::save`）：旧 token 是从另一个
+    /// 字段里提的、或由另一个接口发的，接着用等于拿一份对不上配置的凭据去发请求。
     ///
-    /// 于是「配置相同就共用同一个 token、同一个倒计时；配置不同就各自独立」
-    /// 这条规则在后端只有一个来源，不会出现「缓存说共享、锁说独立」这种半拉子状态。
+    /// ## 刻意不含 `name` / `auto_refresh` / `skew_seconds`
     ///
-    /// ## 进指纹的：决定「发出什么请求 + 从响应里取什么」的字段
+    /// 它们说的是"这条配置叫什么"与"什么时候该刷"，不是"token 是什么"。
+    /// 改个名字就丢掉 token，代价是用户莫名其妙多打一次取 token 请求。
     ///
-    /// 取 token 的请求、三条提取路径、过期字段的单位、刷新时实际会打的那个请求。
+    /// ## 为什么抽成一个函数
     ///
-    /// 刷新请求取的是**有效值**（`refresh_request_id.unwrap_or(fetch_request_id)`）
-    /// 而不是原字段：`None` 的语义就是「刷新时复用取 token 那个请求」，
-    /// 所以「显式填成同一个」与「不填」在行为上完全一样，
-    /// 拿原字段拼指纹会让这两条等价配置变成两份独立缓存。
+    /// 字段列表在这里出现两次（改前 / 改后）。抄两遍的话，后端加一个影响取 token
+    /// 语义的字段时，只改一处 —— 症状是"改了配置，缓存却还留着"，
+    /// 而它看起来完全正常（旧的 token 仍然能用，只是用错的那份）。
     ///
-    /// ## 刻意不进指纹的
-    ///
-    /// * `name` / `folder_id` —— 它们说的是「这条配置叫什么、放在哪」，
-    ///   与拿到的 token 无关。算进去，则「同一个取 token 接口按业务拆成两条来源」
-    ///   又会各打一次网络、各走一个倒计时 —— 那正是这套指纹要消灭的情形。
-    /// * `auto_refresh` / `skew_seconds` —— 它们是**使用策略**（什么时候该刷、
-    ///   提前多久算过期），不是「token 是什么」。两条来源共用同一个 token 时，
-    ///   「这次该不该自动刷」仍各自按自己那份配置判定，这样反而更准。
-    ///
-    /// `workspace_id` 进指纹：两个工作区里同名同路径的配置是两份互不相干的东西，
-    /// 而 `token_cache` 表**没有工作区列**（它挂在来源行上），不隔开就会串。
-    ///
-    /// 用 `\u{1f}`（单元分隔符）拼接而不是 `:` 或 `-`：JSONPath 与 URL 里
-    /// 都满是冒号，拿它当分隔符会让 `a:b`+`c` 与 `a`+`b:c` 撞成同一个键 ——
-    /// 那种碰撞的后果是「两条配置不同的来源共用了一个 token」。
-    pub fn share_key(&self) -> String {
-        let refresh = self.refresh_request_id.unwrap_or(self.fetch_request_id);
-        [
-            self.workspace_id.to_string(),
-            self.fetch_request_id.to_string(),
-            self.access_path.clone(),
-            self.refresh_path.clone(),
-            self.expires_in_path.clone(),
-            self.expires_in_unit.as_db_str().to_string(),
-            refresh.to_string(),
-        ]
-        .join("\u{1f}")
+    /// ⚠️ 别再拿它当"共享分组"的键。2026-09-18 之前它叫 `share_key()`，作用是
+    /// 「配置相同的两条来源共用一份 token 与一个倒计时」—— 那套合并已经撤掉：
+    /// 每个接口各自一份 token、各自一个倒计时是明确要求。
+    pub(crate) fn token_shape(&self) -> (i64, &str, &str, &str, ExpiryUnit, Option<i64>) {
+        (
+            self.fetch_request_id,
+            &self.access_path,
+            &self.refresh_path,
+            &self.expires_in_path,
+            self.expires_in_unit,
+            self.refresh_request_id,
+        )
     }
 }
 
@@ -428,6 +417,31 @@ pub struct HistoryEntry {
     pub curl: Option<String>,
     /// 同上，凭据打码。给「要截图 / 要贴出去」的场合用。
     pub curl_masked: Option<String>,
+    /// 当时的响应头，JSON 数组 `[{name, value}]`。
+    ///
+    /// 与 `curl` 同一个理由必须落库：`content-type` 会随服务端发版变、
+    /// `set-cookie` 会过期 —— 拿今天重新发一次的结果去解释昨天那个 200，
+    /// 解释的不是同一件事。
+    ///
+    /// **原样存，不打码。** 打码发生在「回给 AI 的 DTO」那一侧
+    /// （`service::ops::response_dto`）。历史是用户自己回看的快照，存成
+    /// `••••` 会让界面把打码值显示得像服务端真的这么答的。
+    #[serde(default)]
+    pub resp_headers: Option<Value>,
+    /// 当时的响应体，**可能被截断**（上限见 [`HISTORY_RESPONSE_BODY_LIMIT`]）。
+    ///
+    /// `None` 表示这条路径没给响应体，有两种来源：这条历史发生在本版之前，
+    /// 或者网络层就失败了（那种记录只有 `error`）。前端据此区分
+    /// 「当时没有响应」与「当时的响应是空的」。
+    #[serde(default)]
+    pub resp_body: Option<String>,
+    /// `true` = 上面那份 `resp_body` 不是全部，真实字节数看 `resp_size`。
+    ///
+    /// 刻意单独一列而不是拿 `resp_body` 的长度与 `resp_size` 相减去猜：
+    /// 二进制响应（`resp_body` 是空串，内容在临时文件里）两边长度天然对不上，
+    /// 靠反推会把「本来就空」误判成「被截断了」。
+    #[serde(default)]
+    pub resp_body_truncated: Option<bool>,
 }
 
 /// 写历史时的入参。
@@ -461,6 +475,63 @@ pub struct NewHistoryEntry {
     /// 同上，凭据打码那一份。
     #[serde(default)]
     pub curl_masked: Option<String>,
+    /// 当时的响应头（见 [`HistoryEntry::resp_headers`]）。
+    ///
+    /// 写入方**原样传**，不要在这里打码：打码是「回给 AI 的 DTO」那一侧的
+    /// 事情（`service::ops::response_dto`，名单在 `redact.rs`）。两个写入方
+    /// （桌面端 `record_history` 命令 / AI 路径 `Ops::record_history`）必须
+    /// 表现一致，否则同一个字段在同一个界面里会有两种含义。
+    #[serde(default)]
+    pub resp_headers: Option<Value>,
+    /// 当时的响应体（见 [`HistoryEntry::resp_body`]）。
+    ///
+    /// 截断不归写入方管：构造完调一次 [`NewHistoryEntry::clamp_response_body`]
+    /// 即可，上限只有那一处定义。
+    #[serde(default)]
+    pub resp_body: Option<String>,
+    /// 上面那份 `resp_body` 是否被截断（见 [`HistoryEntry::resp_body_truncated`]）。
+    #[serde(default)]
+    pub resp_body_truncated: Option<bool>,
+}
+
+/// 写进历史的那份响应体的上限（256KB）。
+///
+/// 比回给 AI 的那档（`service::ops::DEFAULT_MAX_BODY_BYTES`，64KB）大一档，
+/// 因为约束不同：通道那 64KB 保的是「一条正在对话中的 JSON-RPC 通道别被堵死」，
+/// 而历史是**回看** —— 一个 200 条的 JSON 数组常常就过 64KB 了。
+///
+/// 但也不无限大：执行层自己的上限是 8MB，一次导出接口的响应原样落库，
+/// 发几百次就能把库撑到 GB 级。存前 256KB 并标记截断，真实字节数仍在
+/// `resp_size` 里 —— 要看完整内容就重新发一次，那时还能把响应落成文件。
+pub const HISTORY_RESPONSE_BODY_LIMIT: usize = 256 * 1024;
+
+impl NewHistoryEntry {
+    /// 把响应体裁到 [`HISTORY_RESPONSE_BODY_LIMIT`]，并置上截断标记。
+    ///
+    /// 两个写入方都调它：桌面端经 `record_history` 命令（前端手上是**完整**响应，
+    /// 最大 8MB），AI 路径经 `Ops::record_history`。上限只能有一处定义 ——
+    /// 各截各的话，「桌面端存得下、AI 存不下」这类差异不会以任何形式报出来。
+    ///
+    /// 截断按 **UTF-8 边界**回退：中文响应从半个字符处切开会得到一串替换字符，
+    /// 用户看到的是「响应坏了」，而实际只是「被截断了」—— 两件事不该长得一样。
+    ///
+    /// 已经在写入方截过的（`resp_body_truncated` 已是 `Some(true)`）在这里
+    /// 只是重复确认一次：长度不够就原样留着，标记不会被改回 `false`。
+    pub fn clamp_response_body(&mut self) {
+        let Some(body) = self.resp_body.as_mut() else {
+            return;
+        };
+        if body.len() <= HISTORY_RESPONSE_BODY_LIMIT {
+            return;
+        }
+
+        let mut end = HISTORY_RESPONSE_BODY_LIMIT;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+        self.resp_body_truncated = Some(true);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

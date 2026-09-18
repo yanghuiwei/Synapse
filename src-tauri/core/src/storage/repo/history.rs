@@ -10,11 +10,11 @@ use rusqlite::{Connection, Row};
 use crate::error::{AppError, AppResult};
 use crate::storage::models::{HistoryEntry, NewHistoryEntry};
 use crate::storage::now_iso;
-use crate::storage::repo::{opt_text, parse_json_column, to_json_column};
+use crate::storage::repo::{bool_to_int, opt_flag, opt_text, parse_json_column, to_json_column};
 
 const COLUMNS: &str = "id, workspace_id, request_id, request_name, snapshot, status, \
      duration_ms, resp_size, error, environment, executed_at, deleted_at, \
-     curl, curl_masked";
+     curl, curl_masked, resp_headers, resp_body, resp_body_truncated";
 
 fn map_row(row: &Row<'_>) -> AppResult<HistoryEntry> {
     let snapshot_raw: String = row.get("snapshot")?;
@@ -33,6 +33,13 @@ fn map_row(row: &Row<'_>) -> AppResult<HistoryEntry> {
         deleted_at: opt_text(row, "deleted_at")?,
         curl: opt_text(row, "curl")?,
         curl_masked: opt_text(row, "curl_masked")?,
+        // 头部那列是 JSON 数组。坏了就报错而不是退化成空数组 —— 空数组会被
+        // 界面显示成「这次响应没有任何头」，与「数据坏了」是两回事。
+        resp_headers: opt_text(row, "resp_headers")?
+            .map(|raw| parse_json_column(&raw, "history.resp_headers"))
+            .transpose()?,
+        resp_body: opt_text(row, "resp_body")?,
+        resp_body_truncated: opt_flag(row, "resp_body_truncated")?,
     })
 }
 
@@ -53,12 +60,20 @@ fn collect(
 /// 写一条历史。返回新建的行。
 pub fn insert(conn: &Connection, entry: &NewHistoryEntry) -> AppResult<HistoryEntry> {
     let snapshot = to_json_column(&entry.snapshot, "history.snapshot")?;
+    // 头部的 `None` 与 `Some([])` 是两回事（前者=没拿到响应，后者=响应真没有头），
+    // 所以这里在 Rust 侧序列化而**不是**在 SQL 里 `json(...)` 兜一把。
+    let resp_headers = entry
+        .resp_headers
+        .as_ref()
+        .map(|value| to_json_column(value, "history.resp_headers"))
+        .transpose()?;
+
     conn.execute(
         "INSERT INTO history
            (workspace_id, request_id, request_name, snapshot, status,
             duration_ms, resp_size, error, environment, executed_at,
-            curl, curl_masked)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            curl, curl_masked, resp_headers, resp_body, resp_body_truncated)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             entry.workspace_id,
             entry.request_id,
@@ -72,6 +87,9 @@ pub fn insert(conn: &Connection, entry: &NewHistoryEntry) -> AppResult<HistoryEn
             now_iso(),
             entry.curl,
             entry.curl_masked,
+            resp_headers,
+            entry.resp_body,
+            entry.resp_body_truncated.map(bool_to_int),
         ],
     )?;
     get(conn, conn.last_insert_rowid())
@@ -278,6 +296,9 @@ mod tests {
             environment: Some("dev".into()),
             curl: None,
             curl_masked: None,
+            resp_headers: None,
+            resp_body: None,
+            resp_body_truncated: None,
         }
     }
 
@@ -334,6 +355,41 @@ mod tests {
         let without = insert(&conn, &entry("没有 curl")).unwrap();
         assert_eq!(without.curl, None, "没给过 curl 的行必须读回 None");
         assert_eq!(without.curl_masked, None);
+    }
+
+    /// 响应三列的回归网。**三态**是这里的重点：`None`（这条历史早于 010）
+    /// 与「明确没截断 / 明确没有头」必须读得出来是两回事。
+    #[test]
+    fn response_columns_round_trip_and_keep_their_three_states() {
+        let conn = db();
+
+        let mut with_response = entry("带响应");
+        with_response.resp_size = Some(4096);
+        with_response.resp_headers = Some(json!([
+            { "name": "content-type", "value": "application/json" }
+        ]));
+        with_response.resp_body = Some(r#"{"ok":true}"#.into());
+        with_response.resp_body_truncated = Some(true);
+
+        let saved = insert(&conn, &with_response).unwrap();
+        assert_eq!(
+            saved.resp_headers.as_ref().unwrap()[0]["name"],
+            "content-type"
+        );
+        assert_eq!(saved.resp_body.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(saved.resp_body_truncated, Some(true));
+        assert_eq!(
+            saved.resp_size,
+            Some(4096),
+            "真实大小那列不受截断影响 —— 界面靠它说明「被截掉的是多少」"
+        );
+
+        // 不给就是 None。这里若退化成 `Some(false)` / `Some([])`，
+        // 升级上来的老库会满屏显示「未截断」—— 一个我们并不知道的结论。
+        let without = insert(&conn, &entry("没有响应")).unwrap();
+        assert!(without.resp_headers.is_none());
+        assert!(without.resp_body.is_none());
+        assert!(without.resp_body_truncated.is_none());
     }
 
     /// 「上次跑的是什么」要跳过没有 curl 的行：升级上来的库里，

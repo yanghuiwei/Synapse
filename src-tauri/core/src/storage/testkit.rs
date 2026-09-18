@@ -78,9 +78,14 @@ impl TestDb {
     }
 }
 
-/// 一个工作区 + 一个文件夹 + 一个请求（url 由调用方给）+ 一个 Token 源。
+/// 一个工作区 + 一个文件夹 + 三个请求 + 一份 Token 源。
 ///
-/// 全部固定 id=1，让测试里的断言可以直接写死 —— 播种代码本身不该成为被测对象。
+/// 固定 id：request 1 = 取 token 的那个（`fetch_url` 由调用方给），
+/// request 2 / 3 = 两个业务接口；`token_source` id=1 归属 **request 2**。
+/// 「一个接口一份」是 008 之后的硬约束，所以第二个业务接口（request 3）
+/// 留给"另一条来源"的测试自己去建。
+///
+/// 全部固定 id，让测试里的断言可以直接写死 —— 播种代码本身不该成为被测对象。
 pub fn seed_token_workspace(db: &TestDb, fetch_url: &str) {
     db.exec(&format!(
         "INSERT INTO workspace (id, name, created_at, updated_at)
@@ -89,11 +94,15 @@ pub fn seed_token_workspace(db: &TestDb, fetch_url: &str) {
            VALUES (1, 1, 'auth', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
          INSERT INTO request (id, folder_id, workspace_id, name, method, url, created_at, updated_at)
            VALUES (1, 1, 1, 'login', 'POST', '{fetch_url}',
+                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                  (2, 1, 1, 'biz-1', 'GET', 'http://127.0.0.1:1/biz-1',
+                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                  (3, 1, 1, 'biz-2', 'GET', 'http://127.0.0.1:1/biz-2',
                    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
          INSERT INTO token_source
-           (id, workspace_id, folder_id, name, fetch_request_id, access_path, refresh_path,
+           (id, workspace_id, request_id, name, fetch_request_id, access_path, refresh_path,
             expires_in_path, expires_in_unit, auto_refresh, skew_seconds, created_at, updated_at)
-           VALUES (1, 1, 1, 'oauth', 1, '$.access_token', '$.refresh_token',
+           VALUES (1, 1, 2, 'oauth', 1, '$.access_token', '$.refresh_token',
                    '$.expires_in', 'seconds', 1, 30,
                    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');"
     ));

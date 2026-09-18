@@ -259,7 +259,7 @@ mod tests {
                 timeout_ms: 30_000,
                 ..RequestSettings::default()
             },
-            folder_id: None,
+            request_id: None,
             form_fields: Vec::new(),
         }
     }
@@ -547,7 +547,7 @@ mod tests {
             body_type: BodyType::parse(&draft.body_type),
             body: draft.body,
             settings: draft.settings,
-            folder_id: None,
+            request_id: None,
             form_fields: Vec::new(),
         }
     }

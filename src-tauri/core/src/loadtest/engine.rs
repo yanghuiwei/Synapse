@@ -514,7 +514,7 @@ mod tests {
             body_type: Default::default(),
             body: String::new(),
             settings: RequestSettings::default(),
-            folder_id: None,
+            request_id: None,
             form_fields: Vec::new(),
         }
     }

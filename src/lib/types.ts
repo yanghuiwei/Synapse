@@ -174,7 +174,15 @@ export interface EnvVar {
 export interface TokenSource {
   id: number;
   workspaceId: number;
-  folderId: number;
+  /**
+   * 这份配置**属于哪一条请求**。
+   *
+   * 008 之前这里是 `folderId`：一份配置挂在系统分类「token刷新」下，
+   * 全工作区共用，靠「沿分类链向上找」决定谁生效。
+   * 那条规则已经整个删掉了 —— 每个接口各配各的 Token，
+   * 不再互相借用（见 `migrations/008`）。
+   */
+  requestId: number;
   name: string;
   fetchRequestId: number;
   accessPath: string;
@@ -223,6 +231,24 @@ export interface HistoryEntry {
   curl: string | null;
   /** 同上，凭据打码。给「要截图 / 要贴出去」的场合。 */
   curlMasked: string | null;
+  /**
+   * 当时的响应头。`null` = 这条历史早于落库这个字段（010 之前），
+   * 或者网络层就失败了 —— 两种情况下界面都不该说成「这次响应没有头」。
+   *
+   * 凭据类响应头（`set-cookie` / `authorization` / `*-key` / `*-token`）在
+   * **写库之前**就已打码，判定名单只有 Rust 侧 `redact.rs` 一份 ——
+   * 前端不需要也不该再打一遍。
+   */
+  respHeaders: HttpHeader[] | null;
+  /** 当时的响应体，可能被截断（看 `respBodyTruncated`）。 */
+  respBody: string | null;
+  /**
+   * `true` = 上面的 `respBody` 不是全部，真实字节数看 `respSize`。
+   *
+   * `null` = **不知道**（这条历史早于落库这个字段）—— 与 `false` 不是一回事，
+   * 界面不能把它当成「当时没被截断」来说。
+   */
+  respBodyTruncated: boolean | null;
 }
 
 export interface LoadtestRun {
@@ -325,13 +351,15 @@ export interface RequestSpec {
   formFields: KeyValueItem[];
   settings: RequestSettings;
   /**
-   * 这条请求挂在哪个分类下。
+   * 这条请求**在库里的 id**，或 `null`（还没保存的草稿）。
    *
-   * 不是可有可无的元数据：Token 源分组（§4.3）要**沿分类链向上找**，
-   * 所以它是这次发送语义的一部分。
-   * P2/P3 存下来的历史快照里没有这个字段 —— 缺失时按「无分类」处理。
+   * 不是可有可无的元数据：Token 源是**逐请求一份**的（见 `migrations/008`），
+   * 后端得知道这次发的是哪一条才能查到它自己那份取 token 配置。
+   * 缺失 / `null` 时 `{{token.access}}` 会原样带出去并报「没有可用 Token 源」。
+   *
+   * P2/P3 存下来的历史快照里没有这个字段（那时叫 `folderId`）。
    */
-  folderId?: number | null;
+  requestId?: number | null;
 }
 
 export interface HttpHeader {
@@ -503,22 +531,6 @@ export interface TokenStatus {
   accessToken: string | null;
   hasRefreshToken: boolean;
   autoRefresh: boolean;
-  /**
-   * 这一份 token 落在哪条**代表行**上（后端 `repo::token::cache_owner`）。
-   *
-   * ## 为什么界面需要它
-   *
-   * 「配置相同的来源共用一份 token 与一个倒计时」这件事是在**数据库那一层**
-   * 成立的（同指纹 ⇒ 同一个代表行）。界面要跟上的只有两件：
-   *
-   * * 刷新其一之后，把**同组**的条目一起更新 —— 否则刚刷完的那条显示新倒计时、
-   *   另一条还挂着旧数字，看起来像两份不一样的 token（恰好是要避免的观感）；
-   * * 计数（`tokenCounts`）按组去重，别把一份 token 数成两份。
-   *
-   * 没有缓存行时这个值**同样有效** —— 归属与「有没有值」是两件事。
-   * `-1` = 后端没给这个字段（老版本），此时按「每条来源各自一组」处理。
-   */
-  cacheOwnerId: number;
 }
 
 /**
@@ -631,6 +643,17 @@ export interface NewHistoryEntry {
    */
   curl?: string;
   curlMasked?: string;
+  /**
+   * 当时的响应头与响应体（见 `HistoryEntry.respHeaders` / `respBody`）。
+   *
+   * 桌面端这里传的是**完整**响应（最大 8MB）—— 上限由后端统一裁
+   * （`NewHistoryEntry::clamp_response_body`），前端不该知道那个数字。
+   * 拿不到（网络层失败）时三者为 `undefined`。
+   */
+  respHeaders?: HttpHeader[];
+  respBody?: string;
+  /** 上面那份 `respBody` 是否已被截断。桌面端传执行层那边的 `truncated` 即可。 */
+  respBodyTruncated?: boolean;
 }
 
 // ============================================================

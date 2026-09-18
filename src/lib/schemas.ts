@@ -150,7 +150,7 @@ export const envVarSchema = z.looseObject({
 export const tokenSourceSchema = z.looseObject({
   id: z.number(),
   workspaceId: z.number(),
-  folderId: z.number(),
+  requestId: z.number(),
   name: z.string(),
   fetchRequestId: z.number(),
   accessPath: z.string(),
@@ -175,6 +175,17 @@ export const tokenCacheSchema = z.looseObject({
   updatedAt: z.string(),
 });
 
+/**
+ * 一行 HTTP 头 —— 请求头与响应头共用这一个形状。
+ *
+ * 定义在这里而不是「请求执行（P2）」那一段：历史条目也要校验响应头
+ * （010 起），而 `const` 没有提升，放在后面会让上面那份引用撞 TDZ。
+ */
+export const httpHeaderSchema = z.looseObject({
+  name: z.string(),
+  value: z.string(),
+});
+
 export const historyEntrySchema = z.looseObject({
   id: z.number(),
   workspaceId: z.number(),
@@ -193,6 +204,17 @@ export const historyEntrySchema = z.looseObject({
   /** 当时真实发出的 curl；null = 这条历史发生在本版之前 */
   curl: z.string().nullable(),
   curlMasked: z.string().nullable(),
+  /**
+   * 当时的响应头，**原文**（打码只发生在回给 AI 的那条通道上，历史不打码）。
+   *
+   * null = 这条历史早于落库这个字段，或网络层就失败了 —— 两种情况下
+   * 界面都不该显示成「这次响应没有任何头」。
+   */
+  respHeaders: z.array(httpHeaderSchema).nullable(),
+  /** 当时的响应体，可能被截断（看 `respBodyTruncated`） */
+  respBody: z.string().nullable(),
+  /** `true` = 上面的 `respBody` 不是全部；null = 不知道（早于这个字段） */
+  respBodyTruncated: z.boolean().nullable(),
 });
 
 export const loadtestRunSchema = z.looseObject({
@@ -240,11 +262,6 @@ export const mcpSetupSchema = z.looseObject({
 // ---------------------------------------------------------------
 // 请求执行（P2）
 // ---------------------------------------------------------------
-
-export const httpHeaderSchema = z.looseObject({
-  name: z.string(),
-  value: z.string(),
-});
 
 /**
  * `BodyFile` —— 「文件型」响应在后端临时区的位置。
@@ -395,18 +412,15 @@ export const tokenStatusSchema = z.looseObject({
   accessToken: z.string().nullable(),
   hasRefreshToken: z.boolean(),
   autoRefresh: z.boolean(),
-  /**
-   * 这一份 token 落在哪条**代表行**上（配置相同的来源会给同一个值）。
-   *
-   * 界面靠它把「同一个 token、同一个倒计时」体现出来：刷新其一之后要把同组的
-   * 条目一起更新，计数也不能把一份 token 数成两份。
-   *
-   * 用 `.catch(-1)` 而不是必填：老版本后端（或别的前端调用点）不带这个字段时，
-   * 退化成「每条来源各算一组」—— 也就是这套共享机制出现之前的行为，
-   * 界面对得上、不会炸。`-1` 是「不知道归属」，不是一个真实的行 id。
-   */
-  cacheOwnerId: z.number().catch(-1),
 });
+
+/**
+ * `list_token_statuses` 的一行：状态本身 + **它是谁的**。
+ *
+ * 用 `.extend` 而不是把字段抄一遍：两边一旦对不上，前端就会在
+ * “刷完一条、刷新一个不存在的来源”这种地方静默地隔层。
+ */
+export const tokenStatusRowSchema = tokenStatusSchema.extend({ sourceId: z.number() });
 
 // ---------------------------------------------------------------
 // 集合管理 / 历史 / 回收站（P3）

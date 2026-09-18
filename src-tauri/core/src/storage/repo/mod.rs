@@ -28,6 +28,15 @@ pub(crate) fn opt_text(row: &Row<'_>, idx: &str) -> rusqlite::Result<Option<Stri
     row.get::<_, Option<String>>(idx)
 }
 
+/// 读一列可空的 `0/1` 布尔标记，NULL 映射成 `None`。
+///
+/// 三态而不是 `bool`：NULL 的意思是「这条记录早于加这一列的那次迁移」，
+/// 与「明确是 false」不是一回事。合成 `false` 会让升级上来的老库里
+/// 每一行都显示成一个确定的结论，而那个结论我们其实并不知道。
+pub(crate) fn opt_flag(row: &Row<'_>, idx: &str) -> rusqlite::Result<Option<bool>> {
+    Ok(row.get::<_, Option<i64>>(idx)?.map(|v| v != 0))
+}
+
 /// `ORDER BY sort_order, id` 的复用片段 —— 保证同 sort_order 时顺序稳定，
 /// 否则列表在两次查询间可能交换位置，前端会出现「莫名重排」。
 pub(crate) const ORDER_BY_SORT: &str = " ORDER BY sort_order ASC, id ASC";

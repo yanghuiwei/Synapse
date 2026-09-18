@@ -90,10 +90,14 @@ pub async fn latest_history_curl(
 /// **成功与失败都要写**：`status = None` + `error` 有值代表网络层失败，
 /// 这恰恰是用户最想回看的那几条 —— 只记成功的历史等于把排查线索删掉了。
 /// 用户主动取消不写（那是「没发生过」）。
+///
+/// 响应头/响应体也走这里（010 起）：前端手上是**完整**的响应，最大 8MB。
+/// 上限卡在下面那一行而不是交给前端 —— 前端不该知道那个数字，
+/// 而 AI 路径（`Ops::record_history`）用的是同一处定义。
 #[tauri::command]
 pub async fn record_history(
     state: State<'_, AppState>,
-    entry: NewHistoryEntry,
+    mut entry: NewHistoryEntry,
 ) -> AppResult<HistoryEntry> {
     if entry.request_name.trim().is_empty() {
         return Err(AppError::InvalidInput {
@@ -107,6 +111,8 @@ pub async fn record_history(
             reason: "workspace id must be positive".into(),
         });
     }
+
+    entry.clamp_response_body();
 
     with_conn(&state.pool, move |conn| repo::history::insert(conn, &entry)).await
 }

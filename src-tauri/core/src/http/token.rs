@@ -88,14 +88,17 @@ pub struct TokenOutcome {
     pub refreshed: bool,
 }
 
-/// 「共享指纹」→ 一把航班锁。
+/// 「Token 源 id」→ 一把航班锁。
 ///
-/// 键是 [`TokenSource::share_key`]，**不是**来源 id：两条来源只要配着同一套取
-/// token 配置，就该排在同一个航班上。按 id 分锁的后果是它们各打一次网络，
-/// 而两次拿回来的是同一个 token —— 多出来的那次既浪费又可能撞上服务端限流。
+/// 键就是来源自己的 id：**一个接口一份配置、一份 token、一个倒计时**，
+/// 所以"谁和谁该排同一队"不需要任何推导 —— 两条来源要么是同一条，
+/// 要么互不相干。
+///
+/// （2026-09-18 之前这里的键是配置指纹，为的是让"配着同一套取 token 配置的
+/// 两条来源只打一次网络"。那套合并已撤掉：同配置的两个接口也要各刷各的。）
 #[derive(Default)]
 pub struct TokenRefresher {
-    flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    flights: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl TokenRefresher {
@@ -115,7 +118,7 @@ impl TokenRefresher {
             }
         }
 
-        let gate = self.flight_for(&deps.source.share_key());
+        let gate = self.flight_for(deps.source.id);
         let _guard = gate.lock().await;
 
         // ── 检查二：持锁。★ 这一步让「并发只打一次刷新」成立 ──
@@ -157,22 +160,19 @@ impl TokenRefresher {
         self.ensure(deps, true).await
     }
 
-    /// 当前登记的航班数。测试用 —— 它应当等于**用过的**共享配置个数
-    /// （配置相同的两条来源只登记一把锁），不会无限涨。
+    /// 当前登记的航班数。测试用 —— 它应当等于**用过的** Token 源个数，
+    /// 且不会因为两条来源配置相同就少登记一把锁。
     #[cfg(test)]
     fn flight_count(&self) -> usize {
         lock(&self.flights).len()
     }
 
-    /// 取（或创建）某套**共享配置**的航班锁。
+    /// 取（或创建）某个 Token 源的航班锁。
     ///
     /// `std::sync::Mutex` 的持有时间只有一次哈希查找，不会成为热点 ——
     /// 真正的等待发生在后面那把 `tokio` 的异步锁上。
-    fn flight_for(&self, share_key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        lock(&self.flights)
-            .entry(share_key.to_string())
-            .or_default()
-            .clone()
+    fn flight_for(&self, source_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+        lock(&self.flights).entry(source_id).or_default().clone()
     }
 }
 
@@ -184,17 +184,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// 读缓存；有效就返回，不存在或已过期返回 `None`。
 ///
-/// ⚠️ 缓存挂在**共享组的代表行**上（`repo::token::cache_owner`），不是来源自己
-/// 那一行。所以「两条配置相同的来源读到同一份 token」是**在数据库这一层**成立的，
-/// 而不是靠界面把两个倒计时对齐 —— 后者一旦有一处忘了同步就会露馅。
+/// 缓存挂在**这条来源自己**名下（`token_source.id` ↔ `token_cache.token_source_id`
+/// 一一对应），中间没有任何归属推导。
 async fn read_fresh(deps: &TokenDeps<'_>) -> AppResult<Option<TokenValues>> {
-    // clone 是为了把来源 move 进闭包（`with_conn` 要求 `'static`）。
-    // 这不是热点：`ensure` 的「检查一」在缓存有效时就返回了，能走到这里说明
-    // 缓存缺失或已过期 —— 后面那次网络往返比这点拷贝贵几个数量级。
-    let source = deps.source.clone();
+    let source_id = deps.source.id;
     let cache = with_conn(deps.pool, move |conn| {
-        let owner = repo::token::cache_owner(conn, &source)?;
-        repo::token::get_cache(conn, owner)
+        repo::token::get_cache(conn, source_id)
     })
     .await?;
 
@@ -332,18 +327,16 @@ async fn fetch(deps: &TokenDeps<'_>) -> AppResult<TokenValues> {
     let expires_at = compute_expires_at_field(&body, source, Utc::now())?;
 
     let cache = {
-        let source = source.clone();
+        let source_id = source.id;
         let access = access_token.clone();
         let refresh = refresh_token.clone();
         let expires = expires_at.clone();
         with_conn(deps.pool, move |conn| {
-            // 写进**共享组的代表行**：组里其它同配置来源下一次读到的就是这一份
-            let owner = repo::token::cache_owner(conn, &source)?;
             // `raw_response` 传 None：原始响应默认**不落盘**（design.md §4.3），
             // 它可能含 refresh_token 之类的长期凭据，留在库里只会扩大暴露面
             repo::token::upsert_cache(
                 conn,
-                owner,
+                source_id,
                 &access,
                 refresh.as_deref(),
                 expires.as_deref(),
@@ -729,18 +722,19 @@ mod tests {
     }
 
     // ============================================================
-    // ★ 「配置相同就共享，配置不同就各自独立」
+    // ★ 一个接口一份：配置相同也各刷各的
     // ============================================================
 
-    /// 再插一条**配置逐字段相同**的来源（`create` 之外的列全落默认值）。
+    /// 再插一条来源给**另一个接口**（`create` 之外的列全落默认值）。
     ///
-    /// 用它来验「同一个取 token 接口配了两条来源」这个最常见的情形：
-    /// 一条挂在系统分类下给全工作区用，另一条挂到业务分类下。
-    fn add_twin_source(pool: &SqlitePool) -> TokenSource {
+    /// 于是它与 id=1 那条**逐字段相同**，只有归属不同 —— 这正是
+    /// 「两个接口配着同一条取 token 接口」这个最常见的形状。
+    fn add_source_for_request_3(pool: &SqlitePool) -> TokenSource {
         let conn = pool.get().expect("conn");
         conn.execute(
-            "INSERT INTO token_source (workspace_id, folder_id, name, fetch_request_id, created_at, updated_at)
-             VALUES (1, 1, 'twin', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+            "INSERT INTO token_source (workspace_id, request_id, name, fetch_request_id,
+                                       created_at, updated_at)
+             VALUES (1, 3, 'twin', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
             [],
         )
         .expect("insert twin");
@@ -762,28 +756,39 @@ mod tests {
         }
     }
 
-    /// ★ 正身：两条来源配着同一套取 token 配置 ⇒ 只打一次网络、共用一份 token。
+    /// 🔴 **两条逐字段相同、只是归属不同**的来源，各打一次网络、各存一份 token。
     ///
-    /// 这一条是「配置相同，倒计时可以共享」的**执行期**证据。它同时钉住三件事：
-    /// 缓存只有一行、航班锁只有一把、两个来源拿到的是同一个值。
+    /// 这条测试的语义在 2026-09-18 反过来了：原来它叫
+    /// `sources_sharing_one_config_fetch_once_and_share_the_token`，钉的是
+    /// 「配置相同就合并成一组」。现在的规则是**每个接口各自一份** ——
+    /// 所以同样两行数据，期望值从「1 次网络 + 1 行缓存」变成
+    /// 「2 次网络 + 2 行缓存」，且两个倒计时互不影响。
+    ///
+    /// 少了这一条，"各刷各的"可能被一个**永远只打一次**的实现蒙对 ——
+    /// 而这种实现会让一个接口的刷新结果静默盖到另一个接口的头上。
     #[tokio::test]
-    async fn sources_sharing_one_config_fetch_once_and_share_the_token() {
+    async fn requests_with_identical_configs_fetch_separately() {
         let server = token_server(r#"{"access_token":"fresh","expires_in":3600}"#);
-        let db = db("shared-config");
+        let db = db("same-config-two-requests");
         set_fetch_url(&db.pool, &server.url());
-        seed_expired_cache(&db.pool); // 组里那份缓存已经过期
+        seed_expired_cache(&db.pool); // id=1 那份缓存已经过期
 
-        let a = source(&db.pool); // id = 1
-        let b = add_twin_source(&db.pool); // id = 2，配置逐字段相同
-        assert_eq!(a.share_key(), b.share_key(), "两条来源的配置必须完全一致");
+        let a = source(&db.pool); // 归属 request 2
+        let b = add_source_for_request_3(&db.pool); // 归属 request 3，配置逐字段相同
+        assert_eq!(
+            a.token_shape(),
+            b.token_shape(),
+            "两条来源的取 token 配置必须完全一致 —— 这是这条测试的前提"
+        );
 
         let env = env();
         let refresher = TokenRefresher::new();
         let clients = ClientCache::new();
 
+        // deps 必须先绑成变量：`tokio::join!` 里直接写 `&deps(...)` 的话，
+        // 那个临时值在语句结束时就析构了，而 join 产生的 future 还借着它。
         let deps_a = deps(&db.pool, &clients, &a, &env);
         let deps_b = deps(&db.pool, &clients, &b, &env);
-
         let (first, second) = tokio::join!(
             refresher.ensure(&deps_a, false),
             refresher.ensure(&deps_b, false),
@@ -795,43 +800,41 @@ mod tests {
         assert_eq!(second.values.access_token, "fresh");
         assert_eq!(
             server.hits(),
-            1,
-            "配置相同的两条来源只该打一次取 token 请求 —— 多了说明锁没按配置共享"
+            2,
+            "两个接口各有一份 token —— 只打一次说明被合并了，而合并是不要的行为"
         );
+        assert_eq!(refresher.flight_count(), 2, "两条来源 = 两把航班锁");
 
-        // 缓存落在**代表行**（组内最小 id）上，b 自己名下没有行，但读得到同一份
+        // 缓存各落各的行，谁也不读谁的
         let conn = db.pool.get().expect("conn");
-        let owner = repo::token::cache_owner(&conn, &b).expect("owner");
-        assert_eq!(owner, a.id, "代表是组内最小的 id");
-        let row = repo::token::get_cache(&conn, owner)
+        let row_a = repo::token::get_cache(&conn, a.id)
             .expect("read")
-            .expect("应该有缓存");
-        assert_eq!(row.access_token, "fresh");
-        assert_eq!(row.token_source_id, a.id);
-        assert!(
-            repo::token::get_cache(&conn, b.id).expect("read").is_none(),
-            "b 自己名下不该有缓存行"
-        );
+            .expect("a 名下该有缓存");
+        let row_b = repo::token::get_cache(&conn, b.id)
+            .expect("read")
+            .expect("b 名下该有缓存");
+        assert_eq!(row_a.token_source_id, a.id);
+        assert_eq!(row_b.token_source_id, b.id);
     }
 
-    /// 反向控制：配置不同 ⇒ 各自打一次、各拿各的 token。
+    /// 配置不同 ⇒ 走不同的提取路径，各自拿到自己那份值。
     ///
-    /// 少了这一条，「两条来源只打一次网络」也可能被一个**永远只打一次**的
-    /// 实现蒙对 —— 而这种实现会让配置不同的两条来源互相串用 token。
+    /// 与上一条的区别在**断言的对象**：那条看"各打几次网络"，这条看
+    /// "两条来源真的读到了不同的字段" —— 一个共用缓存的实现能让上一条
+    /// 也看起来合理，但绕不过相邻两条来源拿到不同 token 这一关。
     #[tokio::test]
-    async fn sources_with_different_configs_fetch_independently() {
+    async fn different_configs_read_different_paths() {
         let server = token_server(r#"{"access_token":"fresh","tok2":"other","expires_in":3600}"#);
-        let db = db("split-config");
+        let db = db("two-paths");
         set_fetch_url(&db.pool, &server.url());
 
         let a = source(&db.pool); // 用默认的 $.access_token
-        let mut b = add_twin_source(&db.pool);
+        let mut b = add_source_for_request_3(&db.pool);
         b.access_path = "$.tok2".into(); // 换一个字段 ⇒ 换一套配置
         b = {
             let conn = db.pool.get().expect("conn");
             repo::token::save(&conn, &b).expect("save")
         };
-        assert_ne!(a.share_key(), b.share_key());
 
         let env = env();
         let refresher = TokenRefresher::new();
@@ -848,12 +851,8 @@ mod tests {
 
         assert_eq!(first.values.access_token, "fresh", "a 走 $.access_token");
         assert_eq!(second.values.access_token, "other", "b 走 $.tok2");
-        assert_eq!(
-            server.hits(),
-            2,
-            "配置不同的两条来源必须各取一次 —— 共用一份就是把对的 token 用错了地方"
-        );
-        assert_eq!(refresher.flight_count(), 2, "两套配置 = 两把航班锁");
+        assert_eq!(server.hits(), 2, "各取一次");
+        assert_eq!(refresher.flight_count(), 2, "两条来源 = 两把航班锁");
     }
 
     /// 缓存有效 → 一次请求都不发（design.md §4.3 第一行）

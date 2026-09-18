@@ -266,10 +266,6 @@ struct SendArgs {
     /// 已保存请求的 id。给了它，下面的内联字段会**覆盖**其上的对应字段；
     /// 不给就必须同时给 --method 与 --url
     request_id: Option<i64>,
-    /// 内联定义挂到哪个文件夹。不是可有可无的元数据 ——
-    /// Token 源与授权继承都要沿文件夹链向上找，不写它就解析不到 `{{token.access}}`
-    #[arg(long)]
-    folder: Option<i64>,
     /// 指定环境名；当前只支持「就是那个激活的环境」，传别的会返回 E_NOT_IMPLEMENTED
     #[arg(long)]
     environment: Option<String>,
@@ -549,7 +545,6 @@ async fn run(cli: &Cli, db: PathBuf) -> AppResult<String> {
                     headers: parse_key_values(&args.fields.key_values.headers, ':', "header")?,
                     body_type: args.fields.body.body_type.clone(),
                     body: resolve_body(&args.fields.body)?,
-                    folder_id: args.folder,
                     environment: args.environment.clone(),
                 })
                 .await?;

@@ -3,6 +3,13 @@
 //! 注意 `token_source` / `token_cache` 两张表都**没有 `deleted_at`**：
 //! Token 配置属于「机器用的配置」而不是「用户的内容」，
 //! 进回收站只会让 P4 的刷新逻辑要处理一堆边界情况。删除即硬删。
+//!
+//! ## 归属：一个接口一份（008 起）
+//!
+//! `token_source.request_id` 就是归属列，`UNIQUE` 索引保证一个接口至多一份。
+//! 缓存行、单飞锁、界面上的倒计时全都按**这一行的 id** 独立 —— 没有"共享组"
+//! 这回事。（曾经有过：按配置指纹把多条来源并成一组共用 token 与倒计时，
+//! 2026-09-18 撤掉。理由见 `models.rs` 的 `token_shape`。）
 
 use rusqlite::{Connection, Row};
 
@@ -11,7 +18,7 @@ use crate::storage::models::{ExpiryUnit, TokenCache, TokenSource};
 use crate::storage::now_iso;
 use crate::storage::repo::{bool_to_int, opt_text, ORDER_BY_NAME};
 
-const SOURCE_COLUMNS: &str = "id, workspace_id, folder_id, name, fetch_request_id, \
+const SOURCE_COLUMNS: &str = "id, workspace_id, request_id, name, fetch_request_id, \
      access_path, refresh_path, expires_in_path, expires_in_unit, refresh_request_id, \
      auto_refresh, skew_seconds, created_at, updated_at";
 
@@ -23,7 +30,7 @@ fn map_source(row: &Row<'_>) -> rusqlite::Result<TokenSource> {
     Ok(TokenSource {
         id: row.get("id")?,
         workspace_id: row.get("workspace_id")?,
-        folder_id: row.get("folder_id")?,
+        request_id: row.get("request_id")?,
         name: row.get("name")?,
         fetch_request_id: row.get("fetch_request_id")?,
         access_path: row.get("access_path")?,
@@ -50,62 +57,29 @@ fn map_cache(row: &Row<'_>) -> rusqlite::Result<TokenCache> {
     })
 }
 
-fn collect_sources(
-    conn: &Connection,
-    sql: &str,
-    params: &[&dyn rusqlite::ToSql],
-) -> AppResult<Vec<TokenSource>> {
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params, map_source)?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
+/// **某个接口**的 Token 源。`None` = 这个接口没配（大多数接口就是这样）。
+///
+/// 这是运行时的唯一入口：发送时拿的就是这条请求自己的配置，
+/// 不再沿分类链向上找、也没有工作区级的兜底。
+pub fn by_request(conn: &Connection, request_id: i64) -> AppResult<Option<TokenSource>> {
+    let sql = format!("SELECT {SOURCE_COLUMNS} FROM token_source WHERE request_id = ?1");
+    match conn.query_row(&sql, [request_id], map_source) {
+        Ok(source) => Ok(Some(source)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
     }
-    Ok(out)
 }
 
 pub fn list_by_workspace(conn: &Connection, workspace_id: i64) -> AppResult<Vec<TokenSource>> {
     let sql =
         format!("SELECT {SOURCE_COLUMNS} FROM token_source WHERE workspace_id = ?1{ORDER_BY_NAME}");
-    collect_sources(conn, &sql, &[&workspace_id])
-}
-
-pub fn list_by_folder(conn: &Connection, folder_id: i64) -> AppResult<Vec<TokenSource>> {
-    let sql =
-        format!("SELECT {SOURCE_COLUMNS} FROM token_source WHERE folder_id = ?1{ORDER_BY_NAME}");
-    collect_sources(conn, &sql, &[&folder_id])
-}
-
-/// 沿「最近的在前」的文件夹链找第一个 Token 源。
-///
-/// 判定依据是 `token_source` 表里**真的有没有行**，而不是文件夹上的
-/// `is_token_source` 标记 —— 那个标记只是 UI 的入口引导（建 Token 源时顺手打上），
-/// 拿它当硬条件会让「先建源、后打标记」这条顺序把源变成隐形的。
-pub fn first_in_chain(conn: &Connection, chain: &[i64]) -> AppResult<Option<TokenSource>> {
-    for folder_id in chain {
-        if let Some(source) = list_by_folder(conn, *folder_id)?.into_iter().next() {
-            return Ok(Some(source));
-        }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([workspace_id], map_source)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
     }
-    Ok(None)
-}
-
-/// 工作区的**全局** Token 源 —— 挂在系统分类（「token刷新」）下的那一个。
-///
-/// 用途是 `first_in_chain` 之后的**兜底**：Token 来源固定配在系统分类下，
-/// 而绝大多数请求并不在这个分类里（甚至没挂任何分类），
-/// 只沿分类链找的话 `{{token.access}}` 会永远解析不出来。
-///
-/// 语义上是「链上没配就用全局那一个」——链上配了仍然以链上为准，
-/// 所以老的「按分类配 Token」用法完全不受影响。
-pub fn system_source(conn: &Connection) -> AppResult<Option<TokenSource>> {
-    let Some(workspace) = crate::storage::repo::workspace::active(conn)? else {
-        return Ok(None);
-    };
-    let Some(folder) = crate::storage::repo::folder::system_folder(conn, workspace.id)? else {
-        return Ok(None);
-    };
-    Ok(list_by_folder(conn, folder.id)?.into_iter().next())
+    Ok(out)
 }
 
 pub fn get(conn: &Connection, id: i64) -> AppResult<TokenSource> {
@@ -119,45 +93,45 @@ pub fn get(conn: &Connection, id: i64) -> AppResult<TokenSource> {
     })
 }
 
+/// 给某个接口建一份 Token 配置。
+///
+/// ⚠️ 调用方**必须**紧接着 `save` 一次全量字段：这条只写「归属 + 名字 + 取 token
+/// 的请求」，提取路径与提前量落到列默认值上。写窄 INSERT 而不是收一堆参数，
+/// 是因为 `save` 早就在往同一张表写同一批字段 —— 两条路径维护同一份数据，
+/// 迟早会有一份忘了改（`store/token.ts::create` 里有这段历史）。
 pub fn create(
     conn: &Connection,
     workspace_id: i64,
-    folder_id: i64,
+    request_id: i64,
     name: &str,
     fetch_request_id: i64,
 ) -> AppResult<TokenSource> {
     let now = now_iso();
     conn.execute(
-        "INSERT INTO token_source (workspace_id, folder_id, name, fetch_request_id, created_at, updated_at)
+        "INSERT INTO token_source
+           (workspace_id, request_id, name, fetch_request_id, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-        rusqlite::params![workspace_id, folder_id, name, fetch_request_id, now],
+        rusqlite::params![workspace_id, request_id, name, fetch_request_id, now],
     )?;
     get(conn, conn.last_insert_rowid())
 }
 
 /// 全量保存。
-///
-/// `folder_id` 要指向被标记为 `is_token_source` 的文件夹 ——
-/// 这里**只校验文件夹存在**，不校验那个标记：标记是 UI 层的引导，
-/// 不该做成数据库层的硬约束（否则先建 Token 源再打标记的流程会失败）。
 pub fn save(conn: &Connection, source: &TokenSource) -> AppResult<TokenSource> {
-    // 指纹变了 ⇒ 自己名下那行缓存立刻作废。
+    // 配置变了 ⇒ 自己名下那行缓存立刻作废。
     //
-    // 两个理由，缺一个都不够：
-    // 1. **旧 token 的来历说不清了** —— 改了 `access_path` 之后那份 token 是从
-    //    另一个字段里提的，接着用等于拿一份对不上配置的凭据去发请求。
-    // 2. 它可能正是原来那一组的**代表行**。配置一改它就不属于那一组了，
-    //    那行缓存会变成谁也不读的孤儿：占着库，还会在未来某次「改回原配置」
-    //    时被当成有效缓存读出来。
+    // 理由只有一个但足够：**旧 token 的来历说不清了** —— 改了 `access_path`
+    // 之后那份 token 是从另一个字段里提的，改了 `fetch_request_id` 之后它压根是
+    // 另一个接口发的。接着用等于拿一份对不上配置的凭据去发请求。
     //
-    // ⚠️ 只在**指纹**变化时清。改个名字就丢掉 token，代价是用户莫名其妙多打
-    // 一次取 token 请求 —— 而名字根本不影响 token 是什么。
+    // ⚠️ 只在**取值语义**变化时清。改个名字就丢掉 token，代价是用户莫名其妙
+    // 多打一次取 token 请求 —— 而名字根本不影响 token 是什么。
     let before = get(conn, source.id)?;
-    let key_changed = before.share_key() != source.share_key();
+    let shape_changed = before.token_shape() != source.token_shape();
 
     let affected = conn.execute(
         "UPDATE token_source SET
-           folder_id          = ?2,
+           request_id         = ?2,
            name               = ?3,
            fetch_request_id   = ?4,
            access_path        = ?5,
@@ -171,7 +145,7 @@ pub fn save(conn: &Connection, source: &TokenSource) -> AppResult<TokenSource> {
          WHERE id = ?1",
         rusqlite::params![
             source.id,
-            source.folder_id,
+            source.request_id,
             source.name,
             source.fetch_request_id,
             source.access_path,
@@ -192,12 +166,7 @@ pub fn save(conn: &Connection, source: &TokenSource) -> AppResult<TokenSource> {
         });
     }
 
-    if key_changed {
-        // ⚠️ 这里刻意传 `source.id` 而**不是** `cache_owner(...)`：
-        // 要清的是「这条来源名下那一行」——它可能正是原组的代表行（那就等于
-        // 把整组那份清掉，正确），也可能什么也没有（因为它本来就不是代表，
-        // 缓存挂在别人名下 —— 那种情况下**不该**去清，那条缓存对新配置无关，
-        // 对原组却仍然有效）。
+    if shape_changed {
         clear_cache(conn, source.id)?;
     }
 
@@ -220,63 +189,23 @@ pub fn delete(conn: &Connection, id: i64) -> AppResult<()> {
 // 缓存
 // ============================================================
 
-/// 这份来源的 token 缓存**该读写在哪一行上**。
+/// 读某个 Token 源的缓存。
 ///
-/// 判据不是「哪条来源记录」，而是 [`TokenSource::share_key`] ——「取 token 的那套
-/// 配置」。于是：
-///
-/// * 两条来源配的是同一条取 token 请求、同一套提取路径 ⇒ 同一个代表 ⇒
-///   同一行缓存 ⇒ 发送时只打一次网络、界面上只有一个倒计时；
-/// * 配置只要有一处不同 ⇒ 各自的代表 ⇒ 各自独立。
-///
-/// ## 代表取组内 id 最小的那个
-///
-/// * **稳定**：不随查询顺序变。若改成「按名字排序取第一个」，用户给来源改个名
-///   就会把缓存挪到另一个来源名下 —— 看起来就是「改完名字倒计时重置了」。
-/// * **单调**：后建的同配置来源不会把已有缓存从先建的来源手里抢走。
-///
-/// ## 为什么不用一条 SQL 表达
-///
-/// 指纹的构成（哪些字段、怎么拼接）必须**只有 [`TokenSource::share_key`] 一处**。
-/// 在 SQL 里再拼一遍 `fetch_request_id = ? AND access_path = ? AND …`，
-/// 就是同一件事的第二个定义，迟早会有一处改了另一处没改 —— 那种漂移的表现是
-/// 「缓存按一套规则共享、单飞锁按另一套」，最难查。这里改用「拉回工作区的来源
-/// （个位数）再按指纹比」，代价可以忽略。
-///
-/// 组为空时退化成 `source.id` 自己。正常走不到（来源一定在自己的组里），
-/// 只有「这一行刚被删掉、而某个执行链还攥着它的副本」才会命中 ——
-/// 那种情况下按最老的语义（按来源自己一行）读写，绝不 panic。
-pub fn cache_owner(conn: &Connection, source: &TokenSource) -> AppResult<i64> {
-    let key = source.share_key();
-    Ok(list_by_workspace(conn, source.workspace_id)?
-        .iter()
-        .filter(|other| other.share_key() == key)
-        .map(|other| other.id)
-        .min()
-        .unwrap_or(source.id))
-}
-
-/// 读某个**代表行**的缓存。
-///
-/// ⚠️ `owner_id` 必须是 [`cache_owner`] 给的那个 id，**不是**随手一条来源的 id。
-/// 传错的后果是静默的：`None` ⇒ 上层当成「从没取过」⇒ 界面显示「待刷新」，
-/// 而库里其实躺着一份能用的 token。参数特意不叫 `token_source_id`，
-/// 就是为了让调用点读起来像「我算过归属了吗」。
-pub fn get_cache(conn: &Connection, owner_id: i64) -> AppResult<Option<TokenCache>> {
+/// 缓存与来源**一一对应**（`idx_token_cache_source` 上的唯一索引），
+/// 所以参数就叫 `token_source_id` —— 这里没有任何"代谁读"的间接层。
+pub fn get_cache(conn: &Connection, token_source_id: i64) -> AppResult<Option<TokenCache>> {
     let sql = format!("SELECT {CACHE_COLUMNS} FROM token_cache WHERE token_source_id = ?1");
-    match conn.query_row(&sql, [owner_id], map_cache) {
+    match conn.query_row(&sql, [token_source_id], map_cache) {
         Ok(c) => Ok(Some(c)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
 
-/// 写入 / 覆盖某个**代表行**的缓存。每个共享组只保留一行（唯一索引兜底）。
-///
-/// `owner_id` 的约束同 [`get_cache`]。
+/// 写入 / 覆盖某个 Token 源的缓存（刷新即 upsert）。
 pub fn upsert_cache(
     conn: &Connection,
-    owner_id: i64,
+    token_source_id: i64,
     access_token: &str,
     refresh_token: Option<&str>,
     expires_at: Option<&str>,
@@ -293,7 +222,7 @@ pub fn upsert_cache(
            raw_response  = excluded.raw_response,
            updated_at    = excluded.updated_at",
         rusqlite::params![
-            owner_id,
+            token_source_id,
             access_token,
             refresh_token,
             expires_at,
@@ -302,21 +231,19 @@ pub fn upsert_cache(
         ],
     )?;
 
-    get_cache(conn, owner_id)?.ok_or_else(|| {
+    get_cache(conn, token_source_id)?.ok_or_else(|| {
         AppError::Internal(format!(
-            "token_cache row vanished after upsert (owner #{owner_id})"
+            "token_cache row vanished after upsert (source #{token_source_id})"
         ))
     })
 }
 
-/// 清掉某个代表行的缓存。
-///
-/// `owner_id` 的约束同 [`get_cache`]。**只用于「配置变了」与「删来源」两条路径**：
-/// 它删的是整个共享组的那一份 token，组里每一条来源都会因此重新取一次。
-pub fn clear_cache(conn: &Connection, owner_id: i64) -> AppResult<bool> {
+/// 清掉某个 Token 源的缓存。**只用于「配置变了」与「删来源」两条路径**，
+/// 两条都是"这份 token 已经不该被读到了"。
+pub fn clear_cache(conn: &Connection, token_source_id: i64) -> AppResult<bool> {
     let affected = conn.execute(
         "DELETE FROM token_cache WHERE token_source_id = ?1",
-        [owner_id],
+        [token_source_id],
     )?;
     Ok(affected > 0)
 }
@@ -333,21 +260,27 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO workspace (id, name, created_at, updated_at)
                VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-             INSERT INTO folder (id, workspace_id, name, is_token_source, created_at, updated_at)
-               VALUES (1, 1, 'auth', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-             INSERT INTO folder (id, workspace_id, name, is_token_source, created_at, updated_at)
-               VALUES (2, 1, '业务分类', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO folder (id, workspace_id, name, created_at, updated_at)
+               VALUES (1, 1, 'TS', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
              INSERT INTO request (id, folder_id, workspace_id, name, created_at, updated_at)
-               VALUES (1, 1, 1, 'login', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+               VALUES (1, 1, 1, 'login', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                      (2, 1, 1, 'me',    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                      (3, 1, 1, 'login', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
         )
         .unwrap();
         conn
     }
 
+    fn cache_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM token_cache", [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[test]
     fn create_uses_design_defaults() {
         let conn = db();
-        let s = create(&conn, 1, 1, "iPSA-OAuth", 1).unwrap();
+        let s = create(&conn, 1, 1, "iPSA-OAuth", 3).unwrap();
+        assert_eq!(s.request_id, 1);
         assert_eq!(s.access_path, "$.access_token");
         assert_eq!(s.refresh_path, "$.refresh_token");
         assert_eq!(s.expires_in_path, "$.expires_in");
@@ -357,20 +290,42 @@ mod tests {
         assert_eq!(s.refresh_request_id, None);
     }
 
+    /// 一个接口至多一份配置 —— 这才是 008 换来的硬约束。
+    /// 008 之前这里钉的是 UNIQUE(folder_id, name)：同一个分类下一份，
+    /// 于是全工作区只能有一份 Token 配置。
     #[test]
-    fn folder_and_name_must_be_unique() {
+    fn a_request_can_only_have_one_source() {
         let conn = db();
-        create(&conn, 1, 1, "dup", 1).unwrap();
-        assert!(
-            create(&conn, 1, 1, "dup", 1).is_err(),
-            "unique index on (folder_id, name) must reject duplicates"
-        );
+        create(&conn, 1, 1, "a", 3).unwrap();
+
+        let dup = create(&conn, 1, 1, "另一个名字", 3);
+        assert!(dup.is_err(), "同一个接口不该允许第二份 Token 配置");
+    }
+
+    /// 反过来：**不同接口同名**完全正常（这在 008 之前会撞唯一键）。
+    #[test]
+    fn different_requests_may_share_a_name() {
+        let conn = db();
+        let a = create(&conn, 1, 1, "login", 3).unwrap();
+        let b = create(&conn, 1, 3, "login", 3).unwrap();
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn by_request_only_finds_that_requests_own_source() {
+        let conn = db();
+        let a = create(&conn, 1, 1, "a", 3).unwrap();
+        create(&conn, 1, 2, "b", 3).unwrap();
+
+        assert_eq!(by_request(&conn, 1).unwrap().unwrap().id, a.id);
+        assert!(by_request(&conn, 2).unwrap().is_some());
+        assert!(by_request(&conn, 42).unwrap().is_none());
     }
 
     #[test]
     fn save_updates_every_configurable_field() {
         let conn = db();
-        let mut s = create(&conn, 1, 1, "oauth", 1).unwrap();
+        let mut s = create(&conn, 1, 1, "oauth", 3).unwrap();
         s.access_path = "$.data.token".into();
         s.expires_in_unit = ExpiryUnit::Millis;
         s.skew_seconds = 120;
@@ -386,7 +341,7 @@ mod tests {
     #[test]
     fn cache_upsert_keeps_a_single_row() {
         let conn = db();
-        let s = create(&conn, 1, 1, "oauth", 1).unwrap();
+        let s = create(&conn, 1, 1, "oauth", 3).unwrap();
 
         upsert_cache(
             &conn,
@@ -407,169 +362,34 @@ mod tests {
         );
         assert_eq!(updated.expires_at, None);
         assert_eq!(updated.raw_response.as_deref(), Some("{\"raw\":true}"));
-
-        let rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM token_cache", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(rows, 1);
-        let _ = "token-a";
+        assert_eq!(cache_rows(&conn), 1);
     }
 
-    /// ⚠️ 这条测试在 2026-09-18 换了语义。
+    /// 🔴 **两个接口配着一模一样的取 token 配置，也各存各的缓存。**
     ///
-    /// 原来它叫 `cache_is_scoped_per_source`，钉的是「缓存按**来源记录**隔离」——
-    /// 于是两条配着**同一条**取 token 请求的来源会各刷一次、各走一个倒计时。
-    /// 现在规则是「按**配置**共享」：同指纹共用一个代表行。
+    /// 这条钉的是 2026-09-18 撤掉的那套机制：曾经配置指纹相同的来源会被并成一组、
+    /// 共用一行缓存与一个倒计时（`share_key()` + `cache_owner()`）。现在的规则是
+    /// 「每个接口各自一份」，所以两条逐字段相同的配置必须落在**两行**上 ——
+    /// 否则两个接口的倒计时会一起跳，而那是明确不要的行为。
     #[test]
-    fn sources_with_the_same_config_share_one_cache_row() {
+    fn identical_configs_on_two_requests_still_keep_separate_cache_rows() {
         let conn = db();
-        // `create` 只吃「名字 + 取 token 请求」，其余落到列默认值 ——
-        // 所以 a 与 b 的配置**逐字段相同**，这正是「配置相同」的最小例子
-        let a = create(&conn, 1, 1, "a", 1).unwrap();
-        let b = create(&conn, 1, 1, "b", 1).unwrap();
-        assert_ne!(a.id, b.id, "先确认这是两条不同的来源记录");
-        assert_eq!(a.share_key(), b.share_key(), "配置逐字段相同 ⇒ 同一个指纹");
-
-        assert_eq!(cache_owner(&conn, &a).unwrap(), a.id, "代表取组内最小的 id");
-        assert_eq!(cache_owner(&conn, &b).unwrap(), a.id);
-
-        upsert_cache(
-            &conn,
-            cache_owner(&conn, &b).unwrap(),
-            "shared",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        // 缓存只落在代表那一行上：b 自己名下没有行，但 b 读得到同一份
-        assert!(get_cache(&conn, b.id).unwrap().is_none());
-        let seen = get_cache(&conn, cache_owner(&conn, &b).unwrap())
-            .unwrap()
-            .expect("b 应该读到组里那一行");
-        assert_eq!(seen.access_token, "shared");
-        assert_eq!(seen.token_source_id, a.id);
-
-        let rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM token_cache", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(rows, 1, "两条来源只该有一行缓存");
-    }
-
-    /// 配置只要有一处不同，就不再共享 —— 各自一行，互不覆盖。
-    #[test]
-    fn sources_with_different_configs_keep_separate_cache_rows() {
-        let conn = db();
-        let a = create(&conn, 1, 1, "a", 1).unwrap();
-        let mut b = create(&conn, 1, 1, "b", 1).unwrap();
+        // 建两条来源，除了归属之外逐字段相同：`create` 只吃「归属 + 名字 + 取 token
+        // 请求」，其余落到列默认值 —— 这正是"配置相同"的最小例子
+        let a = create(&conn, 1, 1, "a", 3).unwrap();
+        let b = create(&conn, 1, 2, "b", 3).unwrap();
         assert_eq!(
-            cache_owner(&conn, &a).unwrap(),
-            cache_owner(&conn, &b).unwrap(),
-            "先确认这两条本来是同一组"
+            a.token_shape(),
+            b.token_shape(),
+            "先确认这是两条配置逐字段相同的来源"
         );
 
-        b.access_path = "$.data.token".into();
-        let b = save(&conn, &b).unwrap();
+        upsert_cache(&conn, a.id, "ta", None, None, None).unwrap();
+        upsert_cache(&conn, b.id, "tb", None, None, None).unwrap();
 
-        assert_ne!(
-            cache_owner(&conn, &a).unwrap(),
-            cache_owner(&conn, &b).unwrap(),
-            "解析路径不同 ⇒ 取到的 token 可能不是一个东西，必须分开"
-        );
-
-        upsert_cache(
-            &conn,
-            cache_owner(&conn, &a).unwrap(),
-            "ta",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        upsert_cache(
-            &conn,
-            cache_owner(&conn, &b).unwrap(),
-            "tb",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            get_cache(&conn, cache_owner(&conn, &a).unwrap())
-                .unwrap()
-                .unwrap()
-                .access_token,
-            "ta"
-        );
-        assert_eq!(
-            get_cache(&conn, cache_owner(&conn, &b).unwrap())
-                .unwrap()
-                .unwrap()
-                .access_token,
-            "tb"
-        );
-    }
-
-    /// 清缓存清掉的是**整个共享组**那一份 —— 组里每条来源下次都得重新取。
-    /// 只有两条路径会走到它：配置变更（`save`）与删除来源（外键级联）。
-    #[test]
-    fn clearing_the_owner_row_drops_the_whole_group() {
-        let conn = db();
-        let a = create(&conn, 1, 1, "a", 1).unwrap();
-        let b = create(&conn, 1, 1, "b", 1).unwrap();
-        let owner = cache_owner(&conn, &b).unwrap();
-        upsert_cache(&conn, owner, "t", None, None, None).unwrap();
-
-        assert!(clear_cache(&conn, owner).unwrap());
-        assert!(get_cache(&conn, cache_owner(&conn, &a).unwrap())
-            .unwrap()
-            .is_none());
-        assert!(get_cache(&conn, cache_owner(&conn, &b).unwrap())
-            .unwrap()
-            .is_none());
-    }
-
-    /// 名字、所在分类、自动刷新开关、提前量**都不是**「token 是什么」。
-    ///
-    /// 改它们不能把一条来源踢出它原来的共享组 —— 否则「同一个接口按业务拆成
-    /// 两条来源、分放在两个分类下」这条最自然的用法就又变回各刷一次。
-    #[test]
-    fn fields_that_do_not_change_the_token_do_not_split_the_group() {
-        let conn = db();
-        let a = create(&conn, 1, 1, "a", 1).unwrap();
-        let owner = cache_owner(&conn, &a).unwrap();
-
-        let mut b = create(&conn, 1, 1, "b", 1).unwrap();
-        b.name = "renamed".into();
-        b.folder_id = 2;
-        b.auto_refresh = !b.auto_refresh;
-        b.skew_seconds = 600;
-        let b = save(&conn, &b).unwrap();
-
-        assert_eq!(b.folder_id, 2, "先确认位置真的改了");
-        assert_eq!(cache_owner(&conn, &b).unwrap(), owner, "这些字段不该换代表");
-        assert_eq!(b.share_key(), a.share_key());
-    }
-
-    /// 指纹取的是**有效的**刷新请求：`None`（复用取 token 那个）与
-    /// 「显式填成同一个」在行为上完全一样，不能拆成两组。
-    #[test]
-    fn an_explicit_refresh_request_equal_to_the_fetch_one_is_the_same_config() {
-        let conn = db();
-        let a = create(&conn, 1, 1, "a", 1).unwrap();
-        let mut b = create(&conn, 1, 1, "b", 1).unwrap();
-
-        b.refresh_request_id = Some(b.fetch_request_id);
-        let b = save(&conn, &b).unwrap();
-
-        assert_eq!(a.share_key(), b.share_key());
-        assert_eq!(
-            cache_owner(&conn, &a).unwrap(),
-            cache_owner(&conn, &b).unwrap()
-        );
+        assert_eq!(cache_rows(&conn), 2, "一个接口一行，不合并");
+        assert_eq!(get_cache(&conn, a.id).unwrap().unwrap().access_token, "ta");
+        assert_eq!(get_cache(&conn, b.id).unwrap().unwrap().access_token, "tb");
     }
 
     /// 配置变了 ⇒ 自己名下那行缓存立刻作废：旧 token 是从另一个字段里提的，
@@ -577,16 +397,8 @@ mod tests {
     #[test]
     fn changing_the_config_drops_the_cache_row() {
         let conn = db();
-        let mut a = create(&conn, 1, 1, "a", 1).unwrap();
-        upsert_cache(
-            &conn,
-            cache_owner(&conn, &a).unwrap(),
-            "stale",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let mut a = create(&conn, 1, 1, "a", 3).unwrap();
+        upsert_cache(&conn, a.id, "stale", None, None, None).unwrap();
         assert!(get_cache(&conn, a.id).unwrap().is_some());
 
         a.access_path = "$.other".into();
@@ -598,43 +410,58 @@ mod tests {
         );
     }
 
-    /// 对照组：只改名字**不该**丢 token —— 名字不影响 token 是什么，
+    /// 换取 token 的接口同理 —— 那份 token 压根是另一个接口发的。
+    #[test]
+    fn swapping_the_fetch_request_drops_the_cache_row() {
+        let conn = db();
+        let mut a = create(&conn, 1, 1, "a", 3).unwrap();
+        upsert_cache(&conn, a.id, "stale", None, None, None).unwrap();
+
+        a.fetch_request_id = 2;
+        save(&conn, &a).unwrap();
+
+        assert!(get_cache(&conn, a.id).unwrap().is_none());
+    }
+
+    /// 对照组：只改名字 / 提前量**不该**丢 token —— 它们不影响 token 是什么，
     /// 白白多打一次取 token 请求是用户看得见的代价。
     #[test]
     fn renaming_keeps_the_cache_row() {
         let conn = db();
-        let mut a = create(&conn, 1, 1, "a", 1).unwrap();
-        upsert_cache(
-            &conn,
-            cache_owner(&conn, &a).unwrap(),
-            "keep",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let mut a = create(&conn, 1, 1, "a", 3).unwrap();
+        upsert_cache(&conn, a.id, "keep", None, None, None).unwrap();
 
         a.name = "new name".into();
         a.skew_seconds = 90;
+        a.auto_refresh = false;
         save(&conn, &a).unwrap();
 
-        let kept = get_cache(&conn, cache_owner(&conn, &a).unwrap())
-            .unwrap()
-            .expect("改名字不该丢缓存");
+        let kept = get_cache(&conn, a.id).unwrap().expect("改名字不该丢缓存");
         assert_eq!(kept.access_token, "keep");
+    }
+
+    /// 清缓存只清这一条来源的 —— 另一个接口的那份不该被误伤。
+    #[test]
+    fn clearing_one_source_leaves_the_others_alone() {
+        let conn = db();
+        let a = create(&conn, 1, 1, "a", 3).unwrap();
+        let b = create(&conn, 1, 2, "b", 3).unwrap();
+        upsert_cache(&conn, a.id, "ta", None, None, None).unwrap();
+        upsert_cache(&conn, b.id, "tb", None, None, None).unwrap();
+
+        assert!(clear_cache(&conn, a.id).unwrap());
+        assert!(get_cache(&conn, a.id).unwrap().is_none());
+        assert_eq!(get_cache(&conn, b.id).unwrap().unwrap().access_token, "tb");
     }
 
     #[test]
     fn delete_source_cascades_to_cache() {
         let conn = db();
-        let s = create(&conn, 1, 1, "oauth", 1).unwrap();
+        let s = create(&conn, 1, 1, "oauth", 3).unwrap();
         upsert_cache(&conn, s.id, "t", None, None, None).unwrap();
 
         delete(&conn, s.id).unwrap();
-        let rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM token_cache", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(rows, 0);
+        assert_eq!(cache_rows(&conn), 0);
     }
 
     #[test]

@@ -360,7 +360,7 @@ pub fn resolve_spec(spec: &RequestSpec, ctx: &mut TemplateContext<'_>) -> Resolv
         body_type: spec.body_type,
         body,
         settings: spec.settings.clone(),
-        folder_id: spec.folder_id,
+        request_id: spec.request_id,
         form_fields,
     };
 
@@ -499,7 +499,7 @@ mod tests {
             body_type: BodyType::Json,
             body: r#"{"ts": {{$timestamp}}}"#.into(),
             settings: RequestSettings::default(),
-            folder_id: Some(3),
+            request_id: Some(3),
             form_fields: Vec::new(),
         }
     }
@@ -739,7 +739,7 @@ mod tests {
             assert_eq!(out.spec.headers[0].value, "Bearer t-abc");
             assert_eq!(out.spec.body, expected_body);
             assert_eq!(out.spec.params[0].value, "1", "没占位符的字段原样保留");
-            assert_eq!(out.spec.folder_id, Some(3), "上下文要跟着走");
+            assert_eq!(out.spec.request_id, Some(3), "上下文要跟着走");
             assert!(out.unresolved.is_empty());
         });
     }

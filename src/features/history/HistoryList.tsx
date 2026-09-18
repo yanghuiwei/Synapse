@@ -1,4 +1,4 @@
-import { Clock, Copy, CornerUpLeft, LoaderCircle, SearchX, Trash } from "lucide-react";
+import { Clock, Copy, CornerUpLeft, Eye, LoaderCircle, SearchX, Trash } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -12,6 +12,7 @@ import { zhCN } from "@/lib/i18n/zh-CN";
 import type { HistoryEntry, RequestSpec } from "@/lib/types";
 import { ContextMenu, type MenuItem } from "@/features/ui/ContextMenu";
 import { EmptyState } from "@/features/ui/EmptyState";
+import { HistoryResponseDialog, hasResponse } from "./HistoryResponseDialog";
 import { useHistoryStore } from "@/store/history";
 import { useRequestStore } from "@/store/request";
 import { useUiStore } from "@/store/ui";
@@ -45,6 +46,8 @@ export function HistoryList() {
   const [menu, setMenu] = useState<{ x: number; y: number; entry: HistoryEntry } | null>(
     null,
   );
+  /** 正在查看「当时的响应」的那一条；`null` = 没开着 */
+  const [responseEntry, setResponseEntry] = useState<HistoryEntry | null>(null);
 
   // 首次挂载拉第一页。
   //
@@ -98,6 +101,15 @@ export function HistoryList() {
     if (!menu) return [];
     const { entry } = menu;
     return [
+      {
+        key: "view-response",
+        label: t("history.viewResponse"),
+        icon: Eye,
+        // 没响应可看时置灰而不是藏起来：藏起来用户既不知道有这个功能，
+        // 也不知道「这条为什么没有」—— 而失败的那几条恰恰最想让人点开看
+        disabled: !hasResponse(entry),
+        onSelect: () => setResponseEntry(entry),
+      },
       {
         key: "fill",
         label: t("history.fill"),
@@ -238,6 +250,15 @@ export function HistoryList() {
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
+        />
+      ) : null}
+
+      {/* 查看「当时的响应」。菜单不用在这里手动关 —— `ContextMenu` 的点击处理
+          是 `onSelect()` 紧跟着 `onClose()`，同一拍里菜单就收掉了，不会两个浮层叠着 */}
+      {responseEntry ? (
+        <HistoryResponseDialog
+          entry={responseEntry}
+          onClose={() => setResponseEntry(null)}
         />
       ) : null}
     </>

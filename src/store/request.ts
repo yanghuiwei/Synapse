@@ -57,14 +57,14 @@ export interface RequestDraft {
   formFields: KeyValueItem[];
   settings: RequestSettings;
   /**
-   * 这条请求挂在哪个分类下。
+   * 这条请求**在库里的 id**；`null` = 还没保存的草稿。
    *
    * 草稿里放它不是为了编辑（界面上没有这个输入框），而是因为它是
-   * **发送语义的一部分**：Token 来源要沿分类链向上找
-   * （见 Rust `http::pipeline::find_token_source`）。历史快照回填时它是 `null` ——
-   * 那时确实没有分类上下文，这是如实反映而不是丢信息。
+   * **发送语义的一部分**：Token 源是逐请求一份的，后端得知道发的是哪一条
+   * 才能查到它自己那份取 token 配置（见 Rust `http::pipeline::find_token_source`）。
+   * 历史快照回填时它是 `null` —— 那份快照指的请求可能早已不在了。
    */
-  folderId: number | null;
+  requestId: number | null;
 }
 
 function emptyDraft(): RequestDraft {
@@ -79,7 +79,7 @@ function emptyDraft(): RequestDraft {
     bodyRows: [],
     formFields: [],
     settings: { ...DEFAULT_REQUEST_SETTINGS },
-    folderId: null,
+    requestId: null,
   };
 }
 
@@ -168,7 +168,7 @@ function draftFrom(req: ApiRequest): RequestDraft {
     // schema 把缺失的兜成 `[]` 了（老快照没有这一列），所以这里不必再判空
     formFields: formFieldsFrom(req.formFields, req.body),
     settings: { ...req.settings },
-    folderId: req.folderId,
+    requestId: req.id,
   };
 }
 
@@ -195,7 +195,7 @@ export function draftToSpec(draft: RequestDraft): RequestSpec {
     bodyRows: draft.bodyRows,
     formFields: draft.formFields,
     settings: draft.settings,
-    folderId: draft.folderId,
+    requestId: draft.requestId,
   };
 }
 
@@ -218,10 +218,10 @@ function draftFromSpec(spec: RequestSpec): RequestDraft {
     bodyRows: rowsFrom(spec.bodyType, spec.bodyRows, spec.body),
     formFields: formFieldsFrom(spec.formFields, spec.body),
     settings: { ...spec.settings },
-    // 历史快照可能来自 P2/P3，那时没有这个字段 —— 缺失就是「无分类」。
-    // 刻意**不**猜成「当前选中的分类」：猜错会让请求带上一个它从未有过的
-    // Token 来源，而界面上的「生效来源」看起来还挺合理。
-    folderId: spec.folderId ?? null,
+    // 历史快照可能来自 P2/P3（那时字段叫 `folderId`）。
+    // 刻意**不**猜成「当前选中的请求」：猜错会让历史里那次发送带上一个
+    // 它从未有过的 Token 来源，而界面上的「生效来源」看起来还挺合理。
+    requestId: spec.requestId ?? null,
   };
 }
 
@@ -819,5 +819,19 @@ function recordHistory(input: {
     // 回看时退化成「按当前内容推演」并标出来源。
     curl: input.response?.curlPlain,
     curlMasked: input.response?.curl,
+    // 010 起把**响应**也留下来：只记「200 · 143ms · 1.2KB」看不出那 1.2KB
+    // 是什么，隔天回来复核还得再发一次 —— 而那已经是另一次执行了
+    // （环境变了、Token 换了、服务端发过版）。
+    // 响应头原文搬过去。**不在这一层打码** —— 打码是「回给 AI 的 DTO」
+    // 那一侧的事，历史要的是「服务端当时到底回了什么」。存成 `••••`
+    // 会让界面把打码值显示得像真实回答，而真相只是我们没存。
+    respHeaders: input.response?.headers,
+    // 二进制响应的 body 是空串（内容在后端临时区，那次执行结束就没了）。
+    // 存空串会让历史看起来像「当时响应体就是空的」—— 留 undefined，
+    // 配合真实的 respSize，界面才能说清「这是个文件响应，内容没留下」。
+    respBody: input.response?.bodyEncoding === "binary" ? undefined : input.response?.body,
+    // 执行层那道 8MB 上限留下的标记。256KB 那道由后端统一裁
+    // （`NewHistoryEntry::clamp_response_body`），前端不该知道那个数字。
+    respBodyTruncated: input.response?.truncated,
   });
 }

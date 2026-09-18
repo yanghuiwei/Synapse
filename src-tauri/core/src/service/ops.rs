@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 
 use crate::error::{codes, AppError, AppResult};
 use crate::http::token::remaining_seconds;
-use crate::http::{HttpResponsePayload, Pipeline, RequestSpec};
+use crate::http::{BodyEncoding, HttpResponsePayload, Pipeline, RequestSpec};
 use crate::loadtest::{engine, LoadtestConfig, LoadtestDeps};
 use crate::redact::MASK;
 use crate::service::collection::ensure_usable_folder;
@@ -60,7 +60,7 @@ use crate::service::loadtest::{discard_run, persist_outcome, stored_run_config};
 use crate::service::request::send_request_with;
 use crate::service::validate::clean_name;
 use crate::storage::models::{
-    ApiRequest, BodyType, EnvVar, Environment, Folder, HttpVersion, KeyValueItem,
+    ApiRequest, BodyType, EnvVar, Environment, Folder, HttpVersion, KeyValueItem, NewHistoryEntry,
 };
 use crate::storage::{repo, with_conn};
 use crate::AppState;
@@ -397,12 +397,6 @@ pub struct SendRequestRequest {
     pub body_type: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
-    /// 内联定义挂到哪个文件夹下。
-    ///
-    /// 不是可有可无的元数据：Token 源与授权继承都要**沿文件夹链向上找**，
-    /// 不写它就解析不到 `{{token.access}}`。
-    #[serde(default, alias = "folderId")]
-    pub folder_id: Option<i64>,
     /// 指定用哪个环境。当前只支持「就是那个激活的环境」——
     /// 见 `Tools::check_environment` 的说明。
     #[serde(default)]
@@ -793,7 +787,7 @@ impl Ops {
         Ok(environment_dto(env, vars))
     }
 
-    /// 发一次真实请求。响应体 64KB 截断、敏感响应头打码。
+    /// 发一次真实请求。响应体 64KB 截断、敏感响应头打码，并把这一发写进历史。
     pub async fn send_request(&self, req: SendRequestRequest) -> AppResult<SendRequestResponse> {
         self.writable("send_request")?;
 
@@ -807,11 +801,25 @@ impl Ops {
         // 先取出来：`send_request_with` 之后 `spec` 还活着，但把「这次用的类型」
         // 显式传给 DTO 而不是让 DTO 去猜，能让回显这件事只有一个来源。
         let body_type = spec.body_type;
+
+        // 历史要的上下文也在 `spec` 被借用之前取好。工作区用「当前激活的」——
+        // 与 `list_requests` 同一个口径，否则会出现「AI 从列表里看到这条请求，
+        // 却在桌面端历史里找不到自己刚发的那一发」。
+        let workspace_id = self.resolve_workspace(None).await?;
+        let request_name = self.request_name_of(&spec).await;
+
         // `emit_curl = false`：MCP / CLI 的输出会进 AI 的上下文，
         // 而那份 curl 里带着展开后的 token。桌面端的「查看 curl」是另一条路
         // （`send_request` 命令传 `true`），凭据不从这里出去。
-        let payload = send_request_with(&self.state, &run_id, &spec, false).await?;
+        let outcome = send_request_with(&self.state, &run_id, &spec, false).await;
 
+        // ⚠️ 顺序是契约：先落历史、再 `?` 把错误抛出去。反过来的话
+        // **失败的发送一条都不会进历史** —— 而那恰恰是「AI 连试几次都打不通」
+        // 时用户唯一想回看的东西。
+        self.record_history(&spec, workspace_id, request_name, &outcome)
+            .await;
+
+        let payload = outcome?;
         Ok(response_dto(payload, self.max_body_bytes, body_type))
     }
 
@@ -1147,7 +1155,11 @@ impl Ops {
                 body_type: BodyType::None,
                 body: String::new(),
                 settings: crate::storage::models::RequestSettings::default(),
-                folder_id: req.folder_id,
+                // 内联草稿在库里没有身份 ⇒ 没有 Token 源可用。
+                // 想用某条请求的 Token 配置就传 `requestId`（那条路径会给
+                // `spec.request_id` 填上 id），而不是"借一个文件夹" —— 008 之后
+                // Token 源挂在请求上，文件夹借不出任何东西。
+                request_id: None,
                 // 内联定义里的 multipart 字段：留空，让 `body` 的
                 // `k=v&k=@路径` 回退解析来接管（见 `http::execute::build_body`）。
                 // 这条路径上多一个参数就是多一处要解释「谁覆盖谁」的地方。
@@ -1173,11 +1185,6 @@ impl Ops {
         if let Some(raw) = &req.body_type {
             spec.body_type = parse_body_type(raw)?;
         }
-        // folder_id 只在内联定义时生效：已保存请求的归属文件夹是它的属性，
-        // 不该被一次发送临时改写（Token 源与授权继承都挂在它上面）
-        if req.request_id.is_none() {
-            spec.folder_id = req.folder_id;
-        }
 
         // ⚠️ 下面两行的**顺序是契约：先推断、后校验**。反过来的话
         // `--body '{\"a\":1}'`（没给 type）会先被判成「none + 非空 body」直接报错，
@@ -1192,6 +1199,178 @@ impl Ops {
         ensure_body_type_consistent(spec.body_type, &spec.body)?;
 
         Ok(spec)
+    }
+
+    /// 这条请求在历史里叫什么。
+    ///
+    /// 已保存的用它的名字 —— 用户认的是那个名字，不是一长串 URL。
+    /// 内联定义没有名字可用，退回地址：总不能让它在列表里显示成「未命名」，
+    /// 那样一列表全是同名行，等于没记。取法与桌面端 `recordHistory` 一致，
+    /// 两边不要各写一套。
+    async fn request_name_of(&self, spec: &RequestSpec) -> String {
+        let Some(id) = spec.request_id else {
+            return spec.url.clone();
+        };
+        // 走到这里时 `build_spec` 刚取过同一行，理论上不会再失败。万一失败也
+        // 退回 URL —— 一个显示用的名字不值得让**已经发出去**的请求变成失败。
+        match self.load_request(id).await {
+            Ok(request) => request.name,
+            Err(_) => spec.url.clone(),
+        }
+    }
+
+    /// 当前激活环境的名字，给历史记「这一发打在哪个环境上」。
+    ///
+    /// `None` 是**真实状态**（用户在桌面端切到了「不使用环境」），不是缺数据 ——
+    /// 与桌面端 `recordHistory` 记 `environment` 的口径一致。
+    async fn active_environment_name(&self, workspace_id: i64) -> Option<String> {
+        with_conn(&self.state.pool, move |conn| {
+            Ok(repo::env::list_by_workspace(conn, workspace_id)?
+                .into_iter()
+                .find(|env| env.is_active)
+                .map(|env| env.name))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// 把这一发写进历史。
+    ///
+    /// ## 为什么这件事必须在这里做
+    ///
+    /// 桌面端的写入方是**前端**（发完之后调 `record_history` 命令）。MCP / CLI
+    /// 没有那一步 —— 它们的调用方是 AI，不会也不该去补一条数据库写入。
+    /// 结果是 AI 发出的请求在历史里根本不存在：用户在桌面端翻不到
+    /// 「刚才打的那一发」，而那恰恰是最需要回看的一类（试参数时连打十几次）。
+    ///
+    /// ## 成功与失败都写
+    ///
+    /// 与桌面端同一条规矩：`status = None` 而 `error` 有值代表网络层失败，
+    /// 是最值得回看的几条。这条路径没有「用户主动取消」，所以不存在第三态。
+    ///
+    /// ## curl 刻意不写
+    ///
+    /// 这一路的 `emit_curl = false`（凭据不进 AI 的上下文）。历史里那份明文
+    /// curl 会把展开后的 token 落到一张**要给 AI 看的表**里 —— 与「不给 curl」
+    /// 保持一致，而不是绕一圈漏出去。代价是历史详情里「当时的请求」那一栏
+    /// 对 AI 发的那几行是空的，界面会明说来源，不会拿今天的请求冒充当时那份。
+    ///
+    /// ## 响应则原样写（与 curl 的处理相反，这是有意的）
+    ///
+    /// 上面那条是为了**不让凭据流出去**；响应没有这个顾虑 —— 它是给用户自己
+    /// 回看的，而 `response_dto` 已经在回给 AI 的那条路上做过打码。
+    /// 在历史里再打一道，只会让界面把 `••••` 显示得像服务端的真实回答。
+    ///
+    /// ## 写历史失败不上报
+    ///
+    /// 请求已经真实发出去了（副作用已经产生）。把「历史没写成功」报成发送失败，
+    /// 会诱导调用方重试 —— 那就是把一个记录问题放大成一次重复的业务调用。
+    async fn record_history(
+        &self,
+        spec: &RequestSpec,
+        workspace_id: i64,
+        request_name: String,
+        outcome: &AppResult<HttpResponsePayload>,
+    ) {
+        // `snapshot` 是「点历史能回填」的依据，形状必须与桌面端写进去的那份一致
+        // （前端拿 `requestSpecSchema` 解它）。两边都源自同一个 `RequestSpec`。
+        let snapshot = match serde_json::to_value(spec) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("reqly: cannot snapshot the request for history: {error}");
+                return;
+            }
+        };
+
+        let environment = self.active_environment_name(workspace_id).await;
+
+        let mut entry = match outcome {
+            Ok(payload) => {
+                // 原样存，**不打码**。
+                //
+                // 打码是**通道**的事，不是历史的事：回给 AI 的那份 DTO 在
+                // `response_dto` 里已经打过码了，而历史是本机给用户自己看的快照。
+                // 在这里顺手再打一道会造出一个更坏的状态 —— 界面显示
+                // `set-cookie: ••••` 时读起来像「服务端返回的就是这个值」，
+                // 而真相只是我们没存。桌面端那条路一直存原文（连请求 curl 的
+                // 明文都在 `curl` 列里），两条路不一致的话，同一个字段在同一个
+                // 界面里会有两种含义，而没有人知道该按哪种读。
+                let headers: Vec<Value> = payload
+                    .headers
+                    .iter()
+                    .map(|header| {
+                        json!({
+                            "name": header.name,
+                            "value": header.value,
+                        })
+                    })
+                    .collect();
+
+                NewHistoryEntry {
+                    workspace_id,
+                    request_id: spec.request_id,
+                    request_name,
+                    snapshot,
+                    status: Some(i64::from(payload.status)),
+                    // `u64 → i64`：毫秒数到不了 i64 的天花板（那是 2.9 亿年）
+                    duration_ms: Some(payload.total_ms as i64),
+                    resp_size: Some(payload.body_size as i64),
+                    error: None,
+                    environment,
+                    curl: None,
+                    curl_masked: None,
+                    resp_headers: Some(Value::Array(headers)),
+                    // 原始体原样放进来，截断统一交给下面的 `clamp_response_body`
+                    // —— 上限与桌面端那条路共用一处定义。
+                    //
+                    // 二进制响应留 `None`：它的 `body` 是空串（内容在执行期落进
+                    // 临时区，随那次会话结束就没了），存空串会让回看时看起来像
+                    // 「当时响应体就是空的」。留 `None` + 一个真实的 `resp_size`，
+                    // 界面才能说清「这是个 3.2MB 的文件响应，内容没留下」。
+                    resp_body: match payload.body_encoding {
+                        BodyEncoding::Binary => None,
+                        BodyEncoding::Text | BodyEncoding::Lossy => Some(payload.body.clone()),
+                    },
+                    // `payload.truncated` 是**执行层**那道 8MB 上限留下的标记，
+                    // 比这里的 256KB 更松；它为 true 时同样要如实记下来。
+                    resp_body_truncated: Some(payload.truncated),
+                }
+            }
+            Err(error) => NewHistoryEntry {
+                workspace_id,
+                request_id: spec.request_id,
+                request_name,
+                snapshot,
+                // 响应那几列一起为 None。「网络层就失败了」与
+                // 「收到了、但内容是空的」是两回事，不能都落成空值。
+                status: None,
+                duration_ms: None,
+                resp_size: None,
+                // 只存错误码：文案归前端查表（后端不产出面向用户的句子）
+                error: Some(error.code().to_string()),
+                environment,
+                curl: None,
+                curl_masked: None,
+                resp_headers: None,
+                resp_body: None,
+                resp_body_truncated: None,
+            },
+        };
+
+        // 上限只有一处定义（见 `NewHistoryEntry::clamp_response_body`）：
+        // 先按原样构造、再统一裁剪，两条分支都不必各自记着截。
+        entry.clamp_response_body();
+
+        let written = with_conn(&self.state.pool, move |conn| {
+            repo::history::insert(conn, &entry).map(|_| ())
+        })
+        .await;
+
+        if let Err(error) = written {
+            // 见方法头「写历史失败不上报」：留一条线索，但不改变这次调用的结果。
+            eprintln!("reqly: cannot write the history entry: {error}");
+        }
     }
 
     /// 校验 `environment` 参数。

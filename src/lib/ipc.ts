@@ -43,6 +43,7 @@ import {
   savedFileSchema,
   settingSchema,
   tokenSourceSchema,
+  tokenStatusRowSchema,
   tokenStatusSchema,
   trashContentsSchema,
   workspaceSchema,
@@ -669,13 +670,14 @@ export const tokens = {
       parse: (v) => tokenSourceSchema.array().parse(v),
     }),
 
+  /** `requestId` = 这份配置属于哪一条请求（逐请求一份） */
   create: (
     workspaceId: number,
-    folderId: number,
+    requestId: number,
     name: string,
     fetchRequestId: number,
   ): Promise<TokenSource> =>
-    call("create_token_source", { workspaceId, folderId, name, fetchRequestId }, {
+    call("create_token_source", { workspaceId, requestId, name, fetchRequestId }, {
       parse: (v) => tokenSourceSchema.parse(v),
     }),
 
@@ -689,13 +691,13 @@ export const tokens = {
   },
 
   /**
-   * 某条请求**实际生效**的 Token 来源（沿分类链向上找第一个）。
+   * 这条请求自己那份 Token 来源（没有就 `null`）。
    *
-   * 用它把「当前生效的是哪个」摆到界面上 —— 否则用户对着三个配置
-   * 只能靠猜哪个在起作用。
+   * `requestId` 为 `null` = 这条请求还没保存，也就没有来源 ——
+   * Token 配置是**挂在请求上**的（见 `migrations/008`）。
    */
-  resolve: (folderId: number | null): Promise<TokenSource | null> =>
-    call("resolve_token_source", { folderId }, {
+  resolve: (requestId: number | null): Promise<TokenSource | null> =>
+    call("resolve_token_source", { requestId }, {
       parse: (v) => tokenSourceSchema.nullable().parse(v),
     }),
 
@@ -707,17 +709,20 @@ export const tokens = {
     call("refresh_token", { id }, { parse: (v) => tokenStatusSchema.parse(v) }),
 
   /**
-   * 一次拿回所有来源的状态。
+   * 一次拿回某个工作区**全部**来源的状态。
    *
-   * 没有做成一条后端命令：来源本来就只有个位数（一个工作区通常 1~3 个），
-   * 而 `get_token_status` 是纯读缓存、不触发网络。为省几次 IPC 加一条
-   * 聚合命令，换来的是两处需要同步的语义。
+   * 008 之后 Token 源逐请求一份 —— 某些工作区里有一百多条。
+   * 逐条调 `get_token_status` 就是一百多趟 IPC，而每一趟都要过一遍
+   * `with_conn` 那个异步 → 阻塞的边界 —— 所以这件事归后端做。
+   *
+   * 返回 `Map` 而不是数组：调用方要的从来都是「按来源 id 查」，
+   * 落地成 `Record` 那一步只在 store 里做一次。
    */
-  statuses: async (sources: readonly TokenSource[]): Promise<Map<number, TokenStatus>> => {
-    const rows = await Promise.all(
-      sources.map(async (s) => [s.id, await tokens.status(s.id)] as const),
-    );
-    return new Map(rows);
+  statuses: async (workspaceId: number): Promise<Map<number, TokenStatus>> => {
+    const rows = await call("list_token_statuses", { workspaceId }, {
+      parse: (v) => tokenStatusRowSchema.array().parse(v),
+    });
+    return new Map(rows.map((row) => [row.sourceId, row]));
   },
 };
 

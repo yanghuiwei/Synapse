@@ -263,6 +263,15 @@ export const zhCN = {
   "history.moveToTrash": "移入回收站",
   "history.noMatchHint": "换个关键字试试（当前是「{keyword}」）",
   "history.rightClickHint": "右键管理",
+  "history.viewResponse": "查看响应",
+  "history.responseTitle": "「{name}」的响应",
+  "history.responseSnapshotHint":
+    "这是当时那一次的响应快照：状态、响应头与响应体都在写库时留了下来。首字节与下载两段耗时没有留存，所以这里没有时间线页签。",
+  "history.responseBodyMissing":
+    "这次响应没有留下内容（共 {size}）。文件型响应的字节只在那一次执行里存在，历史只记下了它的大小。",
+  "history.responseNone": "这次没有响应",
+  "history.responseNoneHint": "网络层就失败了，当时的记录里只有错误码。",
+  "history.executedAt": "执行于",
 
   // ---- 回收站 ----
   "trash.groupFolders": "分类",
@@ -326,12 +335,11 @@ export const zhCN = {
   "token.namePlaceholder": "例如：内网 OAuth",
   // 仍在 `SaveDraftDialog` 里当「保存到哪个分类」的字段名用
   "token.folder": "所属分类",
-  "token.folderHint": "这个分类及其子分类下的请求都能用它",
   "token.fetchRequest": "获取 Token 的接口",
   "token.fetchRequestHint": "Token 过期时重新调它换一个，不用另配刷新接口",
   "token.pickRequest": "选择一个接口…",
-  "token.noRequestInFolder": "「token刷新」分类下还没有接口",
-  "token.createFetchRequest": "在该分类下新建接口",
+  "token.noRequestAtAll": "工作区里还没有别的接口可选",
+  "token.createFetchRequest": "新建一个取 Token 的接口",
   "token.fetchRequestGone": "（这个接口已经被删除了）",
   "token.extractTitle": "从响应里取什么",
   "token.accessPath": "access_token 路径",
@@ -349,17 +357,13 @@ export const zhCN = {
   "token.effective": "生效的 Token 来源",
   "token.effectiveName": "「{name}」",
   "token.none": "这条请求没有可用的 Token 来源",
-  "token.noneHint": "还没有配置 —— 配好之后 {{token.access}} 才有值",
-  // 「对所有请求生效」是**错的**，而且错得很贵：判据在 `pipeline::token_context`
-  // ——只有请求里出现 `{{token.*}}` 才去取 Token 源。照原样读，用户会以为
+  "token.noneHint": "这条接口还没有配置 —— 配好之后 {{token.access}} 才有值",
+  // 「配了源就对所有请求生效」是**错的**，而且错得很贵：008 之后 Token 源逐请求一份，
+  // B 接口拿不到 A 接口的 Token；而判据在 `pipeline::token_context` ——
+  // 只有请求里出现 `{{token.*}}` 才会去取 Token 源。照原样读，用户会以为
   // 「配了源 + 选了 Bearer」就等于带上了 Token，而实际带出去的是空凭据
-  "token.globalHint": "配在「token刷新」分类下 —— 凡是用到 {{token.access}} 的请求都从这里取",
-  "token.scopedHint": "这份配置只对它所在分类的子树生效",
-  // 「配置相同的来源共用一份 token」不是 bug 而是设计：两条来源只要取的接口、
-  // 提取路径、过期单位、刷新接口逐字段一致，后端就归到同一行缓存
-  // （`repo::token::cache_owner`）。不写这一句，用户配完第二条看到同一个倒计时，
-  // 会以为「我配的没生效」并且去乱改配置
-  "token.sharedWith": "与「{names}」配置相同，共用同一个 Token 与倒计时",
+  "token.localHint": "这份配置只对当前这条接口生效 —— 它不会被别的接口借用",
+  "token.unsavedHint": "这条接口还没保存 —— 先保存，才能把 Token 来源挂在它上面",
   "token.manage": "管理",
   "token.configure": "配置 Token 来源",
   "token.deleteTitle": "删除 Token 来源",

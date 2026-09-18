@@ -6,7 +6,7 @@ import { formatSeconds } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import { readJwtExpiry } from "@/lib/jwt";
 import { parsePlaceholders } from "@/lib/placeholder";
-import type { Folder, KeyValueItem, TokenSource, TokenStatus } from "@/lib/types";
+import type { KeyValueItem, TokenSource, TokenStatus } from "@/lib/types";
 import { useRequestStore } from "@/store/request";
 import { useTokenStore } from "@/store/token";
 import { useWorkspaceStore } from "@/store/workspace";
@@ -18,7 +18,7 @@ import {
   type TokenSourceDraft,
 } from "@/features/token/TokenSourceForm";
 import { TokenStatusBadge } from "@/features/token/TokenStatusBadge";
-import { useResolvedTokenSource, useSharedTokenSources } from "@/features/token/useTokenState";
+import { useResolvedTokenSource } from "@/features/token/useTokenState";
 import { HeaderInsertPanel } from "./HeaderInsertPanel";
 import { KeyValueTable } from "./KeyValueTable";
 
@@ -54,18 +54,9 @@ export function HeadersTab({ className }: HeadersTabProps) {
   const draft = useRequestStore((s) => s.draft);
   const setRows = useRequestStore((s) => s.setRows);
 
-  const folders = useWorkspaceStore((s) => s.folders);
-
-  /**
-   * 系统分类「token刷新」。Token 来源固定配在它下面 —— 后端在启动时就把它
-   * 建好了（`folder::ensure_system_folder`），所以这里找不到只可能是
-   * 「工作区还没加载完」这一个瞬时状态。
-   */
-  const systemFolder = useMemo(() => folders.find((f) => f.isSystem) ?? null, [folders]);
-
   /** 配置改完之后要重新解析一次「生效的 Token 来源」 */
   const [configVersion, setConfigVersion] = useState(0);
-  const { source: resolvedSource } = useResolvedTokenSource(draft.folderId, configVersion);
+  const { source: resolvedSource } = useResolvedTokenSource(draft.requestId, configVersion);
 
   const statuses = useTokenStore((s) => s.statuses);
   const refreshingId = useTokenStore((s) => s.refreshingId);
@@ -303,7 +294,7 @@ export function HeadersTab({ className }: HeadersTabProps) {
         {tokenExpanded ? (
           <div className="px-2.5 pb-2">
             <TokenSourcePanel
-              folder={systemFolder}
+              requestId={draft.requestId}
               source={resolvedSource}
               status={status}
               refreshing={resolvedSource !== null && refreshingId === resolvedSource.id}
@@ -403,15 +394,18 @@ function CredentialRowStatus({
  * 那一层自己判断。
  */
 function TokenSourcePanel({
-  folder,
+  requestId,
   source,
   status,
   refreshing,
   onRefresh,
   onSaved,
 }: {
-  /** 系统分类「token刷新」。`null` = 工作区还没加载完 */
-  folder: Folder | null;
+  /**
+   * 当前草稿的请求 id。`null` = 还没保存 ——
+   * Token 配置挂不到一条不存在的请求上。
+   */
+  requestId: number | null;
   source: TokenSource | null;
   status: TokenStatus | null;
   refreshing: boolean;
@@ -433,23 +427,35 @@ function TokenSourcePanel({
   const [saving, setSaving] = useState(false);
 
   const requests = useWorkspaceStore((s) => s.requests);
-  /** 能当 Token 接口的候选：系统分类「token刷新」下的那些请求 */
+  /**
+   * 能当 Token 接口的候选：工作区里除了它自己之外的全部请求。
+   *
+   * 排除自己不是洁癖：让一条请求当它自己的取 token 接口，只会得到一个
+   * 「拿自己的 token 去发自己」的循环配置，而它看起来还挺合理。
+   */
   const candidates = useMemo(
-    () => (folder ? requests.filter((r) => r.folderId === folder.id) : []),
-    [requests, folder],
+    () => requests.filter((r) => r.id !== requestId),
+    [requests, requestId],
   );
 
-  // 与它共用同一份 token 的**其它**来源。配置逐字段相同时后端会归到同一行缓存，
-  // 所以两条来源的倒计时本来就该一样 —— 不解释的话，用户看到「我配的第二条
-  // 倒计时跟第一条一模一样」，会以为自己的配置没生效。
-  const sharedWith = useSharedTokenSources(source?.id ?? null, status?.cacheOwnerId ?? null);
-
-  if (!folder) return null;
+  // 未保存的草稿没有 id，也就没有可挂的源 —— 给一句明白话，
+  // 而不是让整块面板默默消失
+  if (requestId === null) {
+    return (
+      <div className="space-y-1.5 rounded-md border border-line p-2">
+        <div className="flex items-center gap-1.5">
+          <KeyRound size={11} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
+          <span className="text-[11px] font-medium text-ink-muted">{t("token.refreshTitle")}</span>
+        </div>
+        <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.unsavedHint")}</p>
+      </div>
+    );
+  }
 
   const beginCreate = () =>
     setDraft({
-      ...emptyTokenSourceDraft(folder.id),
-      // 预填一个名字：这个分类下就一份配置，让用户少想一件事。
+      ...emptyTokenSourceDraft(requestId),
+      // 预填一个名字：一条请求就一份配置，让用户少想一件事。
       // 名字不能留空（后端 `clean_name` 会拒），也不能是中文文案常量 ——
       // 所以走 i18n，换语言时它跟着换
       name: t("token.defaultName"),
@@ -518,7 +524,7 @@ function TokenSourcePanel({
       ) : source === null ? (
         <>
           <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.noneHint")}</p>
-          <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.globalHint")}</p>
+          <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.localHint")}</p>
         </>
       ) : (
         <>
@@ -528,20 +534,7 @@ function TokenSourcePanel({
             </span>
             <TokenStatusBadge status={status} refreshing={refreshing} onRefresh={onRefresh} />
           </div>
-          {/* 配置不在系统分类下说明这是一份老的「按分类配的」来源 ——
-              那它只对那个分类的子树生效，别让用户以为它对所有请求都算数 */}
-          <p className="text-[11px] leading-relaxed text-ink-faint">
-            {source.folderId === folder.id
-              ? t("token.globalHint")
-              : t("token.scopedHint")}
-          </p>
-          {/* 「为什么第二条来源的倒计时和第一条一样」——答案在这一行。
-              共用是**按取 token 的配置**判定的，不是按分类或名字 */}
-          {sharedWith.length === 0 ? null : (
-            <p className="text-[11px] leading-relaxed text-ink-faint">
-              {t("token.sharedWith", { names: sharedWith.join("、") })}
-            </p>
-          )}
+          <p className="text-[11px] leading-relaxed text-ink-faint">{t("token.localHint")}</p>
         </>
       )}
     </div>

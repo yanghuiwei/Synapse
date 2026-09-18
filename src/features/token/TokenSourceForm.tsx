@@ -31,10 +31,10 @@ export type TokenSourceDraft = Omit<TokenSource, "id" | "createdAt" | "updatedAt
  * `refreshRequestId` 同理恒为 `null` —— 获取与刷新是同一个接口，
  * 界面上没有第二个请求可配（后端仍支持分开配，老配置照常走 `refresh_request_id`）。
  */
-export function emptyTokenSourceDraft(folderId: number): TokenSourceDraft {
+export function emptyTokenSourceDraft(requestId: number): TokenSourceDraft {
   return {
     workspaceId: 0, // 由调用方覆盖
-    folderId,
+    requestId,
     name: "",
     fetchRequestId: 0,
     accessPath: "$.access_token",
@@ -63,8 +63,8 @@ export interface TokenSourceFormProps {
   value: TokenSourceDraft;
   onChange: (next: TokenSourceDraft) => void;
   /**
-   * 可选的 Token 接口。**由调用方决定给哪些** —— 现在是系统分类「token刷新」
-   * 下的全部请求。表单自己不去全局捞：那样「这个接口到底放哪儿」这件事
+   * 可选的 Token 接口。**由调用方决定给哪些** —— 现在是工作区里除了它自己之外
+   * 的全部请求。表单自己不去全局捞：那样「这个接口到底放哪儿」这件事
    * 又变成用户要猜的东西了。
    */
   requests: readonly ApiRequest[];
@@ -141,7 +141,7 @@ export function TokenSourceForm({
             <div className="flex items-center gap-2">
               <p className="flex min-w-0 flex-1 items-start gap-1.5 py-1 text-[11px] text-warn">
                 <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="mt-0.5 shrink-0" />
-                {t("token.noRequestInFolder")}
+                {t("token.noRequestAtAll")}
               </p>
               {/* 光说「还没有接口」是个死路：用户会去左栏找「把刚才那个登录接口挪过来」
                   这个动作，而那里只有拖拽。直接给一个能在该分类下建接口的入口。 */}
@@ -149,7 +149,7 @@ export function TokenSourceForm({
                 size="sm"
                 variant="secondary"
                 icon={<Plus size={11} strokeWidth={2.2} />}
-                onClick={() => useUiStore.getState().openCreateDialog("request", value.folderId)}
+                onClick={() => useUiStore.getState().openCreateDialog("request", null)}
               >
                 {t("token.createFetchRequest")}
               </Button>

@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod models;
 pub mod pool;
 pub mod repo;
+pub mod seed;
 
 /// 需要连接池的测试才用它。`cfg(test)` 下才编译，不进产物。
 #[cfg(test)]

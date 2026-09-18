@@ -3,7 +3,7 @@
 //! ```text
 //!   用户点 Send
 //!     ├─1 取请求定义 + 当前环境（激活环境的变量）
-//!     ├─2 沿文件夹链准备「上下文」：Token 源
+//!     ├─2 按请求 id 取「上下文」：Token 源
 //!     ├─3 需要 token 就先确保就绪  ← 这一步可能打一次刷新请求（单飞锁在这儿）
 //!     ├─4 解析所有字符串字段上的占位符
 //!     └─5 交给 http::execute 发送
@@ -91,9 +91,8 @@ impl<'a> Pipeline<'a> {
         cancel: Option<&CancellationToken>,
     ) -> AppResult<Prepared> {
         let env = self.active_env().await?;
-        let chain = self.folder_chain(spec.folder_id).await?;
 
-        let token_ctx = self.token_context(spec, &chain, &env, cancel).await?;
+        let token_ctx = self.token_context(spec, &env, cancel).await?;
 
         let mut ctx = TemplateContext {
             env: &env,
@@ -128,18 +127,6 @@ impl<'a> Pipeline<'a> {
         .await
     }
 
-    /// 请求所在文件夹向上的链（最近的在前）。没有归属文件夹时是空链。
-    async fn folder_chain(
-        &self,
-        folder_id: Option<i64>,
-    ) -> AppResult<Vec<crate::storage::models::Folder>> {
-        let Some(folder_id) = folder_id else {
-            return Ok(Vec::new());
-        };
-        let pool = self.pool;
-        with_conn(pool, move |conn| repo::folder::ancestry(conn, folder_id)).await
-    }
-
     /// 判断这次发送用不用得上 token，用得上就先确保就绪。
     ///
     /// **用不上时不碰 Token 源**：仅仅因为「这个文件夹里有 Token 源」就去打一次
@@ -147,7 +134,6 @@ impl<'a> Pipeline<'a> {
     async fn token_context(
         &self,
         spec: &RequestSpec,
-        chain: &[crate::storage::models::Folder],
         env: &HashMap<String, String>,
         cancel: Option<&CancellationToken>,
     ) -> AppResult<Option<TokenContext>> {
@@ -158,7 +144,7 @@ impl<'a> Pipeline<'a> {
             return Ok(None);
         }
 
-        let source = self.find_token_source(chain).await?;
+        let source = self.find_token_source(spec.request_id).await?;
         let Some(source) = source else {
             // 没有 Token 源**不是错误**：`{{token.access}}` 会被原样保留并报
             // 「没有可用 Token 源」，用户看得见也就知道该去配了。
@@ -214,28 +200,22 @@ impl<'a> Pipeline<'a> {
             .map(|request| request.name)
     }
 
-    /// 这次发送用哪个 Token 源：**先沿分类链找最近的，找不到再用全局那一个**。
+    /// 这次发送用哪个 Token 源：**就是这条请求自己配的那一份**。
     ///
-    /// 两级而不是一级，是因为「Token 来源固定配在系统分类下」——
-    /// 而请求通常不在那个分类里。只查链的话，除了正好挂在「token刷新」
-    /// 底下的请求，其余一律拿不到 Token。反过来，链上真的配了就以链上为准，
-    /// 老用法（按分类各配一套）不受影响。
+    /// 2026-09-18 起的规则（plan.md §35）：Token 源逐请求一份，**没有**分类继承、
+    /// 也**没有**全局兜底。以前的两级查找（先沿文件夹链找最近的、再退到系统分类
+    /// 「token刷新」下的那一个）被整个删掉了 —— 它会让「A 接口的 token 悄悄被
+    /// B 接口用上」，而那正是最难看出来的那类串号。迁移见 `008`。
     ///
-    /// 注意链**可以是空的**（请求没挂分类）—— 那正是全局兜底最要紧的场景，
-    /// 所以这里没有「链为空就早退」。
-    async fn find_token_source(
-        &self,
-        chain: &[crate::storage::models::Folder],
-    ) -> AppResult<Option<TokenSource>> {
-        let ids: Vec<i64> = chain.iter().map(|f| f.id).collect();
+    /// `request_id` 为空 → `None`：未保存的草稿就是这样。这时
+    /// `{{token.access}}` 会被原样保留并报「没有可用 Token 源」，
+    /// 与「新请求还没配源」表现一致，不会静默借用别人的 token。
+    async fn find_token_source(&self, request_id: Option<i64>) -> AppResult<Option<TokenSource>> {
+        let Some(request_id) = request_id else {
+            return Ok(None);
+        };
         let pool = self.pool;
-        with_conn(pool, move |conn| {
-            if let Some(source) = repo::token::first_in_chain(conn, &ids)? {
-                return Ok(Some(source));
-            }
-            repo::token::system_source(conn)
-        })
-        .await
+        with_conn(pool, move |conn| repo::token::by_request(conn, request_id)).await
     }
 }
 
@@ -306,7 +286,7 @@ mod tests {
             body_type: crate::storage::models::BodyType::None,
             body: String::new(),
             settings: RequestSettings::default(),
-            folder_id: None,
+            request_id: None,
             form_fields: Vec::new(),
         }
     }
@@ -343,7 +323,7 @@ mod tests {
         assert_eq!(prepared.unresolved[0].reason, "envNotFound");
     }
 
-    /// 这条是「用不上就不碰 Token 源」的钉子：文件夹里有 Token 源，
+    /// 这条是「用不上就不碰 Token 源」的钉子：这条请求上有 Token 源，
     /// 但请求里没有 `{{token.*}}` → 一次刷新请求都不该发
     #[tokio::test]
     async fn does_not_touch_the_token_source_when_no_token_placeholder_is_used() {
@@ -357,7 +337,7 @@ mod tests {
         let clients = ClientCache::new();
         let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
         let mut s = spec();
-        s.folder_id = Some(1);
+        s.request_id = Some(2); // 它名下就是 token_source id=1
 
         let prepared = pipeline.prepare(&s, None, None).await.expect("prepare");
         assert_eq!(prepared.spec.url, "https://api.example.com/x");
@@ -365,7 +345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn injects_the_token_when_the_placeholder_is_used() {
+    async fn injects_the_token_from_the_requests_own_source() {
         let server = token_server();
         let (db, tokens) = pipeline_ctx("pipe-token");
         db.exec(&format!(
@@ -376,7 +356,7 @@ mod tests {
         let clients = ClientCache::new();
         let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
         let mut s = spec();
-        s.folder_id = Some(1);
+        s.request_id = Some(2);
         s.headers = vec![KeyValueItem::new(
             "Authorization",
             "Bearer {{token.access}}",
@@ -388,67 +368,41 @@ mod tests {
         assert_eq!(server.hits.load(Ordering::SeqCst), 1);
     }
 
-    /// Token 来源固定配在系统分类「token刷新」下，而请求通常不在那个分类里
-    /// —— 甚至**根本没挂分类**。这条钉住那个兜底。
+    /// ★ 逐请求隔离的钉子。
+    ///
+    /// request 2 和 request 3 **在同一个分类里**，而 Token 源挂在 request 2 名下。
+    /// 008 之前这里是「沿分类链向上找 + 系统分类兜底」，request 3 会**静默**
+    /// 拿到 request 2 的那份 token；现在它必须一无所获。
+    ///
+    /// 少了这一条，把 `by_request` 换成任何"宽松"的实现（按分类找、取第一条找到的）
+    /// 都能让上面两条测试照样绿 —— 而症状是「B 接口用了 A 接口的凭据」，
+    /// 只在服务端 401 / 越权时才暴露，界面上看不出任何异常。
     #[tokio::test]
-    async fn falls_back_to_the_system_folder_token_source() {
+    async fn a_neighbouring_request_in_the_same_folder_does_not_inherit_the_source() {
         let server = token_server();
-        let (db, tokens) = pipeline_ctx("pipe-system-fallback");
+        let (db, tokens) = pipeline_ctx("pipe-neighbour");
         db.exec(&format!(
-            "UPDATE request SET url = 'http://127.0.0.1:{}/t' WHERE id = 1;
-             INSERT INTO folder (id, workspace_id, name, is_token_source, is_system, created_at, updated_at)
-               VALUES (2, 1, 'token刷新', 1, 1,
-                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-             UPDATE token_source SET folder_id = 2 WHERE id = 1;",
+            "UPDATE request SET url = 'http://127.0.0.1:{}/t' WHERE id = 1",
             server.port
         ));
 
         let clients = ClientCache::new();
         let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
         let mut s = spec();
-        s.folder_id = None; // ★ 没有归属分类：链是空的
+        s.request_id = Some(3); // 与 request 2 同属分类 1，但自己没配源
         s.headers = vec![KeyValueItem::new(
             "Authorization",
             "Bearer {{token.access}}",
         )];
 
-        let prepared = pipeline.prepare(&s, None, None).await.expect("prepare");
-        assert_eq!(prepared.spec.headers[0].value, "Bearer tok");
-        assert!(prepared.unresolved.is_empty(), "不该留下没解析的占位符");
-        assert_eq!(server.hits.load(Ordering::SeqCst), 1);
-    }
-
-    /// 兜底是**两级里的第二级**：分类链上真的配了就以链上为准，
-    /// 别让系统分类那个把老用法盖掉
-    #[tokio::test]
-    async fn the_folder_chain_wins_over_the_system_folder() {
-        let server = token_server();
-        let (db, tokens) = pipeline_ctx("pipe-chain-wins");
-        db.exec(&format!(
-            "UPDATE request SET url = 'http://127.0.0.1:{}/t' WHERE id = 1;
-             INSERT INTO folder (id, workspace_id, name, is_token_source, is_system, created_at, updated_at)
-               VALUES (2, 1, 'token刷新', 1, 1,
-                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-             INSERT INTO token_source
-               (id, workspace_id, folder_id, name, fetch_request_id, access_path, created_at, updated_at)
-               VALUES (2, 1, 2, '全局', 1, '$.nope',
-                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
-            server.port
-        ));
-
-        let clients = ClientCache::new();
-        let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
-        let mut s = spec();
-        s.folder_id = Some(1); // 分类 1 上有 id=1 那个源（access_path = $.access_token）
-        s.headers = vec![KeyValueItem::new(
-            "Authorization",
-            "Bearer {{token.access}}",
-        )];
-
-        // 系统分类里那个源的 `access_path` 是 `$.nope`（必然提取失败）——
-        // 真要是它被选中，这里拿到的会是 E_TOKEN_EXTRACT 而不是 tok
-        let prepared = pipeline.prepare(&s, None, None).await.expect("prepare");
-        assert_eq!(prepared.spec.headers[0].value, "Bearer tok");
+        let prepared = pipeline.prepare(&s, None, None).await.expect("不该失败");
+        assert_eq!(
+            prepared.spec.headers[0].value, "Bearer {{token.access}}",
+            "同分类的另一条请求的 token 绝不能被继承过来"
+        );
+        assert_eq!(prepared.unresolved.len(), 1);
+        assert_eq!(prepared.unresolved[0].reason, "noTokenSource");
+        assert_eq!(server.hits.load(Ordering::SeqCst), 0, "不该替它去拿 token");
     }
 
     /// 没有 Token 源时 `{{token.access}}` 不该让请求失败，只留一条警告
@@ -459,7 +413,7 @@ mod tests {
         let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
 
         let mut s = spec();
-        // folder_id 为 None → 链为空 → 找不到 Token 源
+        // request_id 为 None → 未保存的草稿 → 找不到 Token 源
         s.headers = vec![KeyValueItem::new(
             "Authorization",
             "Bearer {{token.access}}",
@@ -481,7 +435,7 @@ mod tests {
         let clients = ClientCache::new();
         let pipeline = Pipeline::new(&db.pool, &clients, &tokens);
         let mut s = spec();
-        s.folder_id = Some(1);
+        s.request_id = Some(2);
         s.url = "{{token.access}}".into();
 
         let err = pipeline.prepare(&s, None, None).await.unwrap_err();
