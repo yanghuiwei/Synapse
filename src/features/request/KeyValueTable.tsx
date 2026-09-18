@@ -14,6 +14,14 @@ export interface KeyValueTableProps {
   keyPlaceholder?: string;
   valuePlaceholder?: string;
   className?: string;
+  /**
+   * 值列粘贴的转发，返回 `null` = 不干预。
+   *
+   * 表格本身**不做任何判断** —— 它只把「第几行、粘了什么、那一行现在长什么样」
+   * 交给调用方。规则只有一处实现（`HeadersTab` 的 `Bearer` 前缀归一化），
+   * 表格组件不为此长出第二套逻辑。
+   */
+  onPasteValue?: (index: number, pasted: string, row: KeyValueItem) => string | null;
 }
 
 /** 空行判定：什么都没写、且仍是启用状态。文件行由调用方另行判定（见 `FormFieldTable`） */
@@ -68,6 +76,7 @@ export function KeyValueTable({
   keyPlaceholder,
   valuePlaceholder,
   className,
+  onPasteValue,
 }: KeyValueTableProps) {
   const { t } = useI18n();
   const view = withTrailingBlank(rows);
@@ -145,6 +154,11 @@ export function KeyValueTable({
                     multiline
                     value={row.value}
                     onChange={(value) => patchRow(index, { value })}
+                    onPasteText={
+                      onPasteValue
+                        ? (pasted) => onPasteValue(index, pasted, row)
+                        : undefined
+                    }
                     placeholder={valuePlaceholder}
                     label={t("kv.value")}
                     tone={row.enabled ? "normal" : "muted"}

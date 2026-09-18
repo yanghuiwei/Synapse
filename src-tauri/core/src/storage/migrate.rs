@@ -55,6 +55,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "history_curl",
         sql: include_str!("../../migrations/006_history_curl.sql"),
     },
+    Migration {
+        version: 7,
+        name: "flatten_auth",
+        sql: include_str!("../../migrations/007_flatten_auth.sql"),
+    },
 ];
 
 /// 代码里定义的最高版本号
@@ -250,25 +255,226 @@ mod tests {
         }
     }
 
-    /// 002 是 `ALTER TABLE`，为「继承父级」提供数据源。
-    /// 存量库里必须能补上这一列且默认值是 `{}`（= 未配置）。
+    /// 007 的第三步：两个 auth 列必须都被删干净。
+    ///
+    /// 这条**取代**了原来那条 `folder_auth_column_is_added_with_empty_default`：
+    /// 002 加上这一列、007 又把它删掉，跑完全套迁移之后它注定不存在，
+    /// 所以「存量库里必须能补上这一列且默认 `{}`」这个断言的前提已经没了。
+    /// 002 真正想保住的东西 —— 老库能平滑升到最新版、`auth` 里的凭据不丢 ——
+    /// 由下面那条端到端测试看住。
     #[test]
-    fn folder_auth_column_is_added_with_empty_default() {
+    fn auth_columns_are_dropped_by_the_flatten_migration() {
         let mut conn = open_memory_with_pragmas();
         run(&mut conn).unwrap();
 
+        for tbl in ["request", "folder"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = 'auth'",
+                    [tbl],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{tbl}.auth 必须被 007 删掉");
+        }
+    }
+
+    /// 007 的核心：把「两处真相」合成一处。
+    ///
+    /// 造一个**已经跑过 001~006** 的库（直接执行那两个 SQL、再把版本号手工登记进
+    /// `schema_migration` —— 那正是老用户库里这张表的样子），塞进覆盖整张展开对照表的
+    /// 请求，然后让 `run()` 只补跑 007，断言末态的 `headers` / `params`。
+    ///
+    /// 之所以敢跳过 003~006：007 只碰 `request` / `folder` 的 auth 与 headers / params，
+    /// 那四个迁移加出来的列（body_by_type、is_system、form_fields、curl…）与它无关。
+    ///
+    /// 真库副本上的等价验证见 2026-09-17 工作日志（267 条请求：改动 36 条、
+    /// 新增 36 行头、其余 231 条逐字节未变）。这条测试是那个的一次性缩微版。
+    #[test]
+    fn legacy_auth_is_flattened_into_headers_by_migration_7() {
+        let mut conn = open_memory_with_pragmas();
+        conn.execute_batch(include_str!("../../migrations/001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/002_folder_auth.sql"))
+            .unwrap();
         conn.execute_batch(
-            "INSERT INTO workspace (id, name, created_at, updated_at)
-               VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-             INSERT INTO folder (id, workspace_id, name, created_at, updated_at)
-               VALUES (1, 1, 'f', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+            "CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_migration (version, applied_at) VALUES
+               (1,'2026-01-01T00:00:00.000Z'), (2,'2026-01-01T00:00:00.000Z'),
+               (3,'2026-01-01T00:00:00.000Z'), (4,'2026-01-01T00:00:00.000Z'),
+               (5,'2026-01-01T00:00:00.000Z'), (6,'2026-01-01T00:00:00.000Z');",
         )
         .unwrap();
 
-        let auth: String = conn
-            .query_row("SELECT auth FROM folder WHERE id = 1", [], |r| r.get(0))
-            .expect("folder.auth must exist after migration 2");
-        assert_eq!(auth, "{}");
+        // 分类 3 配 Bearer；分类 4 显式 none（用来证明它**中止**继承链）
+        conn.execute_batch(
+            r#"INSERT INTO workspace (id, name, created_at, updated_at)
+                 VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+               INSERT INTO folder (id, workspace_id, name, auth, created_at, updated_at)
+                 VALUES (3, 1, 'TS', '{"type":"bearer","token":"{{token.access}}"}',
+                         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                        (4, 1, 'noauth', '{"type":"none"}',
+                         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');"#,
+        )
+        .unwrap();
+
+        // 一条请求一个身份，注释写明它验的是展开对照表的哪一格
+        let cases: [(i64, Option<i64>, &str, &str, &str); 8] = [
+            // (id, folder, name, auth, headers)
+            (
+                10,
+                Some(3),
+                "inherit-from-folder",
+                r#"{"type":"inherit"}"#,
+                "[]",
+            ),
+            (
+                11,
+                Some(3),
+                "keeps-handwritten",
+                r#"{"type":"inherit"}"#,
+                r#"[{"key":"Authorization","value":"Bearer old","enabled":true}]"#,
+            ),
+            (
+                12,
+                Some(4),
+                "none-aborts-chain",
+                r#"{"type":"inherit"}"#,
+                "[]",
+            ),
+            (13, Some(3), "empty-object-inherits", "{}", "[]"),
+            (
+                14,
+                None,
+                "empty-bearer",
+                r#"{"type":"bearer","token":""}"#,
+                "[]",
+            ),
+            (
+                15,
+                None,
+                "basic",
+                r#"{"type":"basic","username":"u","password":"p"}"#,
+                "[]",
+            ),
+            (
+                16,
+                None,
+                "api-key-in-query",
+                r#"{"type":"apiKey","key":"X-Api-Key","value":"K","location":"query"}"#,
+                "[]",
+            ),
+            (
+                17,
+                None,
+                "blank-api-key-is-dropped",
+                r#"{"type":"apiKey","key":"","value":"","location":"query"}"#,
+                "[]",
+            ),
+        ];
+        for (id, folder, name, auth, headers) in cases {
+            conn.execute(
+                "INSERT INTO request (id, folder_id, workspace_id, name, auth, headers,
+                                      created_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5, '2026-01-01T00:00:00.000Z',
+                         '2026-01-01T00:00:00.000Z')",
+                rusqlite::params![id, folder, name, auth, headers],
+            )
+            .unwrap();
+        }
+
+        let applied = run(&mut conn).expect("upgrade");
+        assert_eq!(applied, vec![7], "老库只该补跑 007");
+
+        let raw_of = |id: i64| -> String {
+            conn.query_row("SELECT headers FROM request WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let headers_of = |id: i64| -> Vec<(String, String)> {
+            serde_json::from_str::<Vec<serde_json::Value>>(&raw_of(id))
+                .unwrap()
+                .iter()
+                .map(|h| {
+                    (
+                        h["key"].as_str().unwrap_or_default().to_string(),
+                        h["value"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        };
+
+        // ① 分类继承：物化成一条看得见的头
+        assert_eq!(
+            headers_of(10),
+            vec![(
+                "Authorization".to_string(),
+                "Bearer {{token.access}}".to_string()
+            )]
+        );
+        // ⚠️ `enabled` 必须是 JSON 布尔。写成 `1` 时 `KeyValueItem.enabled: bool`
+        // 会拒绝整条请求 —— 界面表现为「这条请求打不开了」。
+        assert!(
+            raw_of(10).contains(r#""enabled":true"#),
+            "enabled 必须是 JSON 布尔: {}",
+            raw_of(10)
+        );
+        // ② 去重：用户手写的同名头**不**被覆盖（风险 2）
+        assert_eq!(
+            headers_of(11),
+            vec![("Authorization".to_string(), "Bearer old".to_string())]
+        );
+        // ③ `{"type":"none"}` 中止继承链 ⇒ 一条凭据都不加
+        assert!(headers_of(12).is_empty(), "none 必须中止继承");
+        // ④ `{}` 与 `{"type":"inherit"}` 等价（旧 from_json 的退化行为）
+        assert_eq!(
+            headers_of(13),
+            vec![(
+                "Authorization".to_string(),
+                "Bearer {{token.access}}".to_string()
+            )]
+        );
+        // ⑤ 空 token 也要留下**看得见的空值**，而不是什么都不显示
+        assert_eq!(
+            headers_of(14),
+            vec![("Authorization".to_string(), "Bearer ".to_string())]
+        );
+        // ⑥ Basic 收进 $basic，不需要一种授权类型
+        assert_eq!(
+            headers_of(15),
+            vec![(
+                "Authorization".to_string(),
+                "{{$basic \"u\" \"p\"}}".to_string()
+            )]
+        );
+        // ⑦ apiKey(location=query) 落进 params，且**不**出现在 headers
+        assert!(headers_of(16).is_empty());
+        let param16: String = conn
+            .query_row("SELECT params FROM request WHERE id = 16", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            param16.contains(r#""key":"X-Api-Key""#) && param16.contains(r#""value":"K""#),
+            "params 里应有 X-Api-Key: K，实际 {param16}"
+        );
+        // ⑧ 键名为空 ⇒ 两边都不写（照抄旧 query_auth_pair 的 !key.trim().is_empty()）
+        assert!(headers_of(17).is_empty());
+        let param17: String = conn
+            .query_row("SELECT params FROM request WHERE id = 17", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(param17, "[]", "空键名不该在 params 里留下东西");
+
+        // ③ 两列都该没了
+        for tbl in ["request", "folder"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = 'auth'",
+                    [tbl],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{tbl}.auth 必须被 007 删掉");
+        }
     }
 
     /// 003 也是 `ALTER TABLE`：存量库里请求体那两列必须补得上，

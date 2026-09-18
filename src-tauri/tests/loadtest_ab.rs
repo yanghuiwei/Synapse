@@ -101,7 +101,7 @@ use tokio_util::sync::CancellationToken;
 
 use reqly_lib::http::{ClientCache, RequestSpec};
 use reqly_lib::loadtest::{engine, LoadtestConfig, LoadtestDeps, RunOutcome};
-use reqly_lib::storage::models::{AuthConfig, BodyType, HttpVersion, RequestSettings};
+use reqly_lib::storage::models::{BodyType, HttpVersion, RequestSettings};
 
 const REQUESTS: u64 = 500;
 const CONCURRENCY: u32 = 50;
@@ -484,7 +484,6 @@ fn run_engine(runtime: &Runtime, url: &str, keep_alive: bool) -> RunOutcome {
         body_type: BodyType::None,
         body: String::new(),
         form_fields: Vec::new(),
-        auth: AuthConfig::None,
         settings,
         folder_id: None,
     };

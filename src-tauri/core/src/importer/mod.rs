@@ -25,10 +25,10 @@ pub mod postman;
 pub mod reqly;
 pub mod tokenizer;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{codes, AppError, AppResult};
-use crate::storage::models::{AuthConfig, KeyValueItem, RequestSettings};
+use crate::storage::models::{KeyValueItem, RequestSettings};
 
 /// 支持的来源格式。加一种就在 [`detect`] 里加一条指纹。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,9 +122,6 @@ pub struct RequestDraft {
     pub body_type: String,
     #[serde(default)]
     pub body: String,
-    /// 宽松解析：认不出的形状退化成 `Inherit`，而不是让整份文件解析失败
-    #[serde(default, deserialize_with = "de_lenient_auth")]
-    pub auth: AuthConfig,
     #[serde(default)]
     pub settings: RequestSettings,
     #[serde(default)]
@@ -151,7 +148,6 @@ impl Default for RequestDraft {
             headers: Vec::new(),
             body_type: default_body_type(),
             body: String::new(),
-            auth: AuthConfig::Inherit,
             settings: RequestSettings::default(),
             pre_script: String::new(),
             test_script: String::new(),
@@ -161,18 +157,15 @@ impl Default for RequestDraft {
 
 /// 解析出来的一棵文件夹树。**嵌套**而不是拍平 ——
 /// 拍平要额外带 parentId，而导入时那些 id 还不存在。
+///
+/// 🔴 **文件夹上没有授权字段**。外部格式（Postman / ApiPost）里那些
+/// folder / collection 级 auth 在**解析时就被物化成请求行**了 ——
+/// 见 [`AuthRows`] 与 [`merge_auth_rows`] 的说明。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderNode {
     #[serde(default)]
     pub name: String,
-    /// 文件夹级授权（Postman 的 folder auth）。`None` = 没配，请求靠继承链去找
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "de_optional_auth"
-    )]
-    pub auth: Option<AuthConfig>,
     #[serde(default)]
     pub folders: Vec<FolderNode>,
     #[serde(default)]
@@ -183,7 +176,6 @@ impl FolderNode {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            auth: None,
             folders: Vec::new(),
             requests: Vec::new(),
         }
@@ -411,24 +403,62 @@ pub(crate) fn is_apipost_export(value: &serde_json::Value) -> bool {
         || apis.iter().any(|item| item.get("target_type").is_some())
 }
 
-/// 宽松的 auth 反序列化。见 [`AuthConfig::from_json`] 的注释 ——
-/// 外部文件里一个认不出的 `auth` 形状不该让整份导入失败。
-fn de_lenient_auth<'de, D: Deserializer<'de>>(de: D) -> Result<AuthConfig, D::Error> {
-    let raw = serde_json::Value::deserialize(de)?;
-    Ok(AuthConfig::from_json(&raw))
+/// 外部文件里的一份授权配置，翻译成 reqly 的**行**。
+///
+/// 这就是「授权不是独立概念」在导入器里的落点：外部格式仍然有独立的 auth 节点，
+/// 但它在解析阶段就被翻译成请求头 / 查询参数，落库时和用户手写的行没有区别。
+///
+/// ## 为什么分成两个数组
+///
+/// 因为落点确实有两处：`Authorization` 是请求头，`?api_key=x` 是查询参数。
+/// 若只给一个 `Vec<KeyValueItem>`，就得再加一个「这行该放哪儿」的标记 ——
+/// 那等于把刚拆掉的枚举换个名字装回来。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AuthRows {
+    pub headers: Vec<KeyValueItem>,
+    pub params: Vec<KeyValueItem>,
 }
 
-fn de_optional_auth<'de, D: Deserializer<'de>>(de: D) -> Result<Option<AuthConfig>, D::Error> {
-    let raw = serde_json::Value::deserialize(de)?;
-    if raw.is_null() {
-        return Ok(None);
+/// Basic 凭据的**模板值**：`{{$basic "U" "P"}}`。
+///
+/// **只在拼这一处**。这个拼法是模板函数 `$basic` 的输入契约
+/// （见 `template::functions::split_two_quoted`：两个成对的同种引号、中间可空白、
+/// 后面不许有别的东西），散在多处写，某处少一个引号就变成「值原样发出去」——
+/// 而那种错误在界面上看不出来，服务端只会回 401。
+///
+/// 为什么不在这里直接算出 base64：模板值里留着账号原文，用户在主面板上
+/// 能看清这条请求用的是哪个账号；展开发生在发送前一刻，算出来的
+/// `Basic <base64>` 与 curl / 浏览器自己算的逐字节一致。
+pub(crate) fn basic_auth_value(username: &str, password: &str) -> String {
+    format!("{{{{$basic \"{username}\" \"{password}\"}}}}")
+}
+
+/// 把「继承来的授权行」并进请求草稿。
+///
+/// **目标已有同名的行就跳过**（头名 / 参数键不分大小写）。判据与 007 迁移
+/// 逐字相同：用户手写的优先，自动展开的不许覆盖它 ——
+/// 反过来写的代价是「导入一次，用户的 `Authorization` 被文件里的旧 token 静默换掉」。
+///
+/// 追加而不是覆盖也意味着：反复导入同一份文件不会让行数越滚越多。
+pub(crate) fn merge_auth_rows(draft: &mut RequestDraft, rows: &AuthRows) {
+    for row in &rows.params {
+        if !draft
+            .params
+            .iter()
+            .any(|existing| existing.key.eq_ignore_ascii_case(&row.key))
+        {
+            draft.params.push(row.clone());
+        }
     }
-    // 显式写了 `{"type":"inherit"}` 等于没写 —— 落库时不必多出一列配置
-    let parsed = AuthConfig::from_json(&raw);
-    Ok(match parsed {
-        AuthConfig::Inherit => None,
-        other => Some(other),
-    })
+    for row in &rows.headers {
+        if !draft
+            .headers
+            .iter()
+            .any(|existing| existing.key.eq_ignore_ascii_case(&row.key))
+        {
+            draft.headers.push(row.clone());
+        }
+    }
 }
 
 /// 同一次导入里重名的请求加后缀，免得落库后靠名字都分不清谁是谁。

@@ -38,7 +38,7 @@ use crate::importer::{
 };
 use crate::service::collection::ensure_usable_folder;
 use crate::service::validate::MAX_NAME_LEN;
-use crate::storage::models::{ApiRequest, AuthConfig, BodyType, EnvVar, Folder};
+use crate::storage::models::{ApiRequest, BodyType, EnvVar, Folder};
 use crate::storage::repo;
 
 // ============================================================
@@ -215,8 +215,6 @@ impl Action {
 #[derive(Debug)]
 struct PlannedFolder {
     name: String,
-    /// 要写回的授权配置。`None` = 不用动（导入没带，或者与库里已经一致）
-    auth_to_write: Option<AuthConfig>,
     action: Action,
     children: Vec<PlannedNode>,
 }
@@ -479,17 +477,16 @@ impl Ctx<'_> {
         // 侧栏会变成一串看不出差别的壳。副本模式复制的是接口，不是壳。
         let found = self.existing.folder(parent, &name);
         // `slot` = 这个分类的落脚点，子节点靠它去库里查同名
-        let (action, slot, auth_to_write) = match found {
+        //
+        // 授权不再有「回写」这一说：007 之后文件夹不持有授权配置，
+        // 外部文件里的 folder 级 auth 在**解析时**就已经拍成请求上的行了
+        // （见 `importer::AuthRows`），这一层根本见不到它。
+        let (action, slot) = match found {
             Some(existing) => {
                 self.used_folders.insert(existing.id);
-                // 只有导入带了授权、且与库里不同才回写 —— 免得白改一次 updated_at
-                let write = match &node.auth {
-                    Some(incoming) if incoming != &existing.auth => Some(incoming.clone()),
-                    _ => None,
-                };
-                (Action::Existing(existing.id), existing.id, write)
+                (Action::Existing(existing.id), existing.id)
             }
-            None => (Action::Create, self.new_slot(), node.auth.clone()),
+            None => (Action::Create, self.new_slot()),
         };
         let child_slot = Some(slot);
 
@@ -505,7 +502,6 @@ impl Ctx<'_> {
 
         PlannedFolder {
             name,
-            auth_to_write,
             action,
             children,
         }
@@ -642,7 +638,6 @@ fn trash_folder(ctx: &Ctx<'_>, folder: &Folder, counts: &mut ImportCounts) -> Pl
 
     PlannedFolder {
         name: folder.name.clone(),
-        auth_to_write: None,
         action: Action::Remove(folder.id),
         children,
     }
@@ -708,16 +703,10 @@ fn apply_node(
     match node {
         PlannedNode::Folder(folder) => match folder.action {
             Action::Existing(id) => {
-                if let Some(auth) = &folder.auth_to_write {
-                    repo::folder::set_auth(conn, id, auth)?;
-                }
                 apply_children(conn, &folder.children, Some(id), workspace_id)?;
             }
             Action::Create => {
                 let created = repo::folder::create(conn, workspace_id, parent_id, &folder.name)?;
-                if let Some(auth) = &folder.auth_to_write {
-                    repo::folder::set_auth(conn, created.id, auth)?;
-                }
                 apply_children(conn, &folder.children, Some(created.id), workspace_id)?;
             }
             // 一棵子树一次带走，不再往里走（子节点只是预览用的样子）
@@ -821,7 +810,6 @@ fn apply_draft(target: &mut ApiRequest, draft: &RequestDraft) {
     target.headers = draft.headers.clone();
     target.body_type = BodyType::parse(&draft.body_type);
     target.body = draft.body.clone();
-    target.auth = draft.auth.clone();
     target.settings = draft.settings.clone();
     target.pre_script = draft.pre_script.clone();
     target.test_script = draft.test_script.clone();
@@ -839,7 +827,6 @@ fn content_matches(existing: &ApiRequest, draft: &RequestDraft) -> bool {
         && existing.headers == draft.headers
         && existing.body_type == BodyType::parse(&draft.body_type)
         && existing.body == draft.body
-        && existing.auth == draft.auth
         && existing.settings == draft.settings
         && existing.pre_script == draft.pre_script
         && existing.test_script == draft.test_script

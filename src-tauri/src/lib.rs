@@ -126,7 +126,6 @@ pub fn run() {
             commands::collection::create_folder,
             commands::collection::rename_folder,
             commands::collection::set_folder_token_source,
-            commands::collection::set_folder_auth,
             commands::collection::move_folder,
             commands::collection::delete_folder,
             commands::collection::restore_folder,

@@ -25,7 +25,7 @@
 //!
 //! 刻意**不**直接把 `storage::models` 的类型当返回：那些类型要加 `JsonSchema`
 //! 派生就得动共享数据模型，而这里对外暴露的形状本来就该比库表更克制
-//! （比如 auth 的值一律不外泄，见 `AuthSummary`；代理只报「有没有配」）。
+//! （比如凭据头的值一律不外泄；代理只报「有没有配」）。
 //!
 //! ## 三条安全边界（design.md §8.3）在本文件的落点
 //!
@@ -88,7 +88,7 @@ const LOADTEST_TIMEOUT: Duration = Duration::from_secs(120);
 //
 // 刻意**不**直接把 `storage::models` 的类型当返回值：那些类型要加 JsonSchema
 // 派生就得动共享的数据模型，而 MCP 对外暴露的形状本来就该比库表更克制
-// （比如 auth 的值一律不外泄，见 `AuthSummary`）。
+// （比如凭据头的值一律不外泄）。
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -126,18 +126,13 @@ pub struct KeyValueDto {
     pub desc: Option<String>,
 }
 
-/// 请求的授权配置 —— **只报类型，不报值**。
+/// 凭据**没有**单独的 DTO 字段 —— 它就是 `headers` / `params` 里的一行。
 ///
-/// §8.3 写着「MCP 层不提供读取原始 secret 的能力」，而 `AuthConfig::Bearer { token }`
-/// 里的 token 可能是用户直接粘进去的长期凭据（不全是 `{{token.access}}` 占位符）。
-/// 把整个 auth 结构回给 AI 等于开了一个绕过 §8.3 的后门，所以这里只给类型标签。
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthSummary {
-    /// `inherit` / `none` / `bearer` / `basic` / `apiKey`
-    pub r#type: String,
-}
-
+/// §8.3 写着「MCP 层不提供读取原始 secret 的能力」。旧的 `AuthSummary`
+/// 靠「只回类型标签、不回值」来兜这条线，而 007 之后凭据就是普通的行 ——
+/// 兜法必须换成[按头名打码][crate::redact]（见 [`key_value`]），
+/// 否则 `get_request` 会把用户粘进去的长期 token 原样交给 AI，
+/// 那就是绕过 §8.3 的后门。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestSettingsDto {
@@ -163,7 +158,6 @@ pub struct RequestDetail {
     pub headers: Vec<KeyValueDto>,
     pub body_type: String,
     pub body: String,
-    pub auth: AuthSummary,
     pub settings: RequestSettingsDto,
     pub pre_script: String,
     pub test_script: String,
@@ -689,7 +683,7 @@ impl Ops {
         })
     }
 
-    /// 取完整请求定义。auth 只报类型（见 [`AuthSummary`]）。
+    /// 取完整请求定义。凭据头的值**一律打码**（见 [`key_value`]）。
     pub async fn get_request(&self, req: GetRequestRequest) -> AppResult<RequestDetail> {
         let request = self.load_request(req.request_id).await?;
         Ok(detail(&request))
@@ -1152,7 +1146,6 @@ impl Ops {
                 headers: Vec::new(),
                 body_type: BodyType::None,
                 body: String::new(),
-                auth: crate::storage::models::AuthConfig::Inherit,
                 settings: crate::storage::models::RequestSettings::default(),
                 folder_id: req.folder_id,
                 // 内联定义里的 multipart 字段：留空，让 `body` 的
@@ -1261,7 +1254,7 @@ fn response_dto(
         .iter()
         .map(|header| HeaderDto {
             name: header.name.clone(),
-            value: mask_header_value(&header.name, &header.value),
+            value: mask_secret_value(&header.name, &header.value),
         })
         .collect();
 
@@ -1302,11 +1295,16 @@ fn response_dto(
     }
 }
 
-/// 敏感响应头打码。其余原样。
+/// 按名字判定「这一行是不是凭据」并打码，其余原样。
 ///
-/// 名单与 curl 导出共用（[`crate::redact`]），这里只是把「按名字判」这件事
-/// 换成调用点读得顺的写法。
-fn mask_header_value(name: &str, value: &str) -> String {
+/// 用在两处：
+/// * 响应头 —— `set-cookie` / `authorization` / `*-key` / `*-token` 之类；
+/// * **`get_request` 回给 AI 的请求头 / 查询参数** —— 007 之后凭据就住在
+///   那两个数组里，不打码等于把用户粘进去的长期 token 直接交出去（§8.3）。
+///
+/// 名单只有一份（[`crate::redact`]，与 curl 导出、日志脱敏共用），
+/// 这里只是把「按名字判」换成调用点读得顺的写法。
+fn mask_secret_value(name: &str, value: &str) -> String {
     crate::redact::mask_value(name, value)
 }
 
@@ -1517,9 +1515,6 @@ fn detail(request: &ApiRequest) -> RequestDetail {
         headers: request.headers.iter().map(key_value).collect(),
         body_type: request.body_type.as_db_str().to_string(),
         body: request.body.clone(),
-        auth: AuthSummary {
-            r#type: auth_type(&request.auth).to_string(),
-        },
         settings: RequestSettingsDto {
             follow_redirects: request.settings.follow_redirects,
             max_redirects: request.settings.max_redirects,
@@ -1533,24 +1528,19 @@ fn detail(request: &ApiRequest) -> RequestDetail {
     }
 }
 
+/// 一行键值 → DTO。
+///
+/// 🔴 **`value` 要按头名打码**。凭据现在是 `headers` / `params` 里的一行，
+/// 而 MCP 的 `get_request` 把这些行直接回给 AI —— 不打码就等于
+/// 把用户粘进去的长期 token 交出去（design.md §8.3 的边界）。
+/// 判据复用 [`crate::redact`] 那份名单：与 curl 导出、日志脱敏同一套，
+/// **只存在一份**，改一处三处都跟着动。
 fn key_value(item: &KeyValueItem) -> KeyValueDto {
     KeyValueDto {
         key: item.key.clone(),
-        value: item.value.clone(),
+        value: mask_secret_value(&item.key, &item.value),
         enabled: item.enabled,
         desc: item.desc.clone(),
-    }
-}
-
-/// 只报类型标签，值一概不回（见 [`AuthSummary`]）。
-fn auth_type(auth: &crate::storage::models::AuthConfig) -> &'static str {
-    use crate::storage::models::AuthConfig;
-    match auth {
-        AuthConfig::Inherit => "inherit",
-        AuthConfig::None => "none",
-        AuthConfig::Bearer { .. } => "bearer",
-        AuthConfig::Basic { .. } => "basic",
-        AuthConfig::ApiKey { .. } => "apiKey",
     }
 }
 
@@ -1624,19 +1614,19 @@ mod tests {
 
     #[test]
     fn sensitive_headers_are_masked_and_others_are_not() {
-        assert_eq!(mask_header_value("Set-Cookie", "sid=1"), MASK);
-        assert_eq!(mask_header_value("Authorization", "Bearer x"), MASK);
+        assert_eq!(mask_secret_value("Set-Cookie", "sid=1"), MASK);
+        assert_eq!(mask_secret_value("Authorization", "Bearer x"), MASK);
         // 凭据类自定义头：真实接口里这些和 Authorization 等价，不能漏
-        assert_eq!(mask_header_value("X-Api-Key", "k"), MASK);
-        assert_eq!(mask_header_value("Api-Key", "k"), MASK);
-        assert_eq!(mask_header_value("Proxy-Authorization", "Basic x"), MASK);
-        assert_eq!(mask_header_value("X-Auth-Token", "t"), MASK);
-        assert_eq!(mask_header_value("X-Client-Secret", "s"), MASK);
-        assert_eq!(mask_header_value("X-User-Password", "p"), MASK);
+        assert_eq!(mask_secret_value("X-Api-Key", "k"), MASK);
+        assert_eq!(mask_secret_value("Api-Key", "k"), MASK);
+        assert_eq!(mask_secret_value("Proxy-Authorization", "Basic x"), MASK);
+        assert_eq!(mask_secret_value("X-Auth-Token", "t"), MASK);
+        assert_eq!(mask_secret_value("X-Client-Secret", "s"), MASK);
+        assert_eq!(mask_secret_value("X-User-Password", "p"), MASK);
         // 反向：不能打过头 —— 排障要看的头必须原样透出
-        assert_eq!(mask_header_value("X-Request-Id", "abc-123"), "abc-123");
+        assert_eq!(mask_secret_value("X-Request-Id", "abc-123"), "abc-123");
         assert_eq!(
-            mask_header_value("Content-Type", "application/json"),
+            mask_secret_value("Content-Type", "application/json"),
             "application/json"
         );
     }

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import * as ipc from "@/lib/ipc";
-import type { ApiRequest, AuthConfig, DeleteFolderResult, Folder, Workspace } from "@/lib/types";
+import type { ApiRequest, DeleteFolderResult, Folder, Workspace } from "@/lib/types";
 
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
 
@@ -31,14 +31,6 @@ export interface WorkspaceState {
   renameFolder: (id: number, name: string) => Promise<void>;
   renameRequest: (id: number, name: string) => Promise<void>;
   duplicateRequest: (id: number, name: string) => Promise<ApiRequest>;
-  /**
-   * 设置分类的授权（P4）。
-   *
-   * 这是授权继承链的**数据源**：子分类/请求上配 `inherit` 就是沿链向上找
-   * 第一个非 `inherit` 的配置。所以它一改，整棵子树下所有请求的发送语义
-   * 都跟着变 —— 必须 `refresh()` 而不是只改本地那一行。
-   */
-  setFolderAuth: (id: number, auth: AuthConfig) => Promise<void>;
   moveFolder: (id: number, parentId: number | null) => Promise<void>;
   moveRequest: (id: number, folderId: number | null) => Promise<void>;
   deleteFolder: (id: number) => Promise<DeleteFolderResult>;
@@ -159,11 +151,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const copy = await ipc.requests.duplicate(id, name);
     await get().refresh();
     return copy;
-  },
-
-  setFolderAuth: async (id, auth) => {
-    await ipc.folders.setAuth(id, auth);
-    await get().refresh();
   },
 
   moveFolder: async (id, parentId) => {

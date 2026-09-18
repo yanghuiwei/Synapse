@@ -76,7 +76,8 @@ export interface TokenGateProps {
  *
  * ## 它解决什么
  *
- * 在这之前，Token 的状态只在「授权」页里看得见 —— 而发送前没人会去翻那里。
+ * 在这之前，Token 的状态只在「请求头」页那个折叠的 Token 来源块里看得见
+ * —— 而发送前没人会去翻那里。
  * 于是「这次发出去带的是新 token 还是两小时前那个」只能靠发完看 401 来发现。
  *
  * 这块东西把四个问题摆到发送键旁边：
@@ -109,7 +110,7 @@ export function TokenGate({ folderId, wantsToken, className }: TokenGateProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
 
   // Token 状态是「站在发送键旁边看一眼」才需要的，所以在这里懒加载 ——
-  // 一进应用就全量拉会给首屏加一趟无谓的 IPC（与授权页同一个判断）
+  // 一进应用就全量拉会给首屏加一趟无谓的 IPC（与请求头页那个 Token 来源块同一个判断）
   useEffect(() => {
     const store = useTokenStore.getState();
     if (store.status === "idle") void store.load();

@@ -1,4 +1,4 @@
-import { Ban, Braces, ChevronDown, Gauge, ListTree, Lock, Save, Send, Settings2, Terminal } from "lucide-react";
+import { Ban, Braces, ChevronDown, Gauge, KeyRound, ListTree, Save, Send, Settings2, Terminal } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -15,19 +15,18 @@ import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
 import { LoadTestPanel } from "@/features/loadtest/LoadTestPanel";
 import { parsePlaceholders } from "@/lib/placeholder";
 import { TokenGate } from "./TokenGate";
-import { AuthTab } from "./AuthTab";
 import { BodyEditor } from "./BodyEditor";
+import { HeadersTab } from "./HeadersTab";
 import { KeyValueTable } from "./KeyValueTable";
 import { SaveDraftDialog } from "./SaveDraftDialog";
 import { UrlBar } from "./UrlBar";
 
-type RequestTab = "params" | "headers" | "body" | "auth" | "scripts" | "settings" | "loadtest";
+type RequestTab = "params" | "headers" | "body" | "scripts" | "settings" | "loadtest";
 
 const TAB_LABEL: Record<RequestTab, MessageKey> = {
   params: "request.tab.params",
   headers: "request.tab.headers",
   body: "request.tab.body",
-  auth: "request.tab.auth",
   scripts: "request.tab.scripts",
   settings: "request.tab.settings",
   loadtest: "loadtest.tab",
@@ -35,9 +34,10 @@ const TAB_LABEL: Record<RequestTab, MessageKey> = {
 
 const TAB_ICON: Record<RequestTab, typeof ListTree> = {
   params: ListTree,
-  headers: ListTree,
+  // 请求头页现在**也是凭据页**（007 之后 Authorization 就是一行头），
+  // 所以图标给它而不是给 params —— 让「token 在哪儿」这件事看一眼就知道
+  headers: KeyRound,
   body: Braces,
-  auth: Lock,
   scripts: Terminal,
   settings: Settings2,
   loadtest: Gauge,
@@ -50,13 +50,15 @@ const TAB_ICON: Record<RequestTab, typeof ListTree> = {
  * 第一个页签上（`DEFAULT_TAB`），否则每次打开请求都得先点一下才能开始打字。
  *
  * 「压测」排在最后，因为它**不是**在编辑请求 —— 它是拿当前草稿去打一轮。
- * 插在 body/auth 中间会让人以为它也是请求定义的一部分。
+ * 插在 body/headers 中间会让人以为它也是请求定义的一部分。
+ *
+ * ⚠️ 这里**没有「授权」页**了（007）：授权就是请求头里的一行，
+ * 独立的页签只会让「我配的 token 到底生效没有」这个问题多一层要翻的地方。
  */
 const TAB_ORDER: readonly RequestTab[] = [
   "body",
   "params",
   "headers",
-  "auth",
   "scripts",
   "settings",
   "loadtest",
@@ -268,7 +270,7 @@ export function RequestPane() {
           placeholder={t("request.urlPlaceholder")}
         />
 
-        {/* Token 状态条就摆在发送键旁边 —— 在这之前它只存在于「授权」页里，
+        {/* Token 状态条就摆在发送键旁边 —— 在这之前它只在「授权」页里出现过，
             而发送前没人会去翻那儿，于是「这次带的是不是新 token」只能靠发完
             看 401 来发现。没写 `{{token.*}}` 时它整块不出现，不制造噪音 */}
         <TokenGate folderId={draft.folderId} wantsToken={wantsToken} />
@@ -309,7 +311,7 @@ export function RequestPane() {
             {headerLabel}
           </span>
           {/* 未保存的草稿没有归属分类，而 Token 来源按分类链继承 ——
-              这里必须给出「存到哪儿去」的入口，否则授权页那句提示是条死路 */}
+              这里必须给出「存到哪儿去」的入口，否则请求头页那句提示是条死路 */}
           {saved ? null : (
             <button
               type="button"
@@ -351,20 +353,19 @@ export function RequestPane() {
         <div className="min-h-0 flex-1 overflow-auto">
           <SettingsForm />
         </div>
-      ) : tab === "params" || tab === "headers" ? (
+      ) : tab === "params" ? (
         <div className="min-h-0 flex-1 overflow-auto">
           <KeyValueTable
-            rows={tab === "params" ? draft.params : draft.headers}
-            onChange={(rows) => setRows(tab === "params" ? "params" : "headers", rows)}
-            showDesc={tab === "headers"}
+            rows={draft.params}
+            onChange={(rows) => setRows("params", rows)}
             keyPlaceholder={t("kv.key")}
             valuePlaceholder={t("kv.value")}
           />
         </div>
-      ) : tab === "auth" ? (
-        <div className="min-h-0 flex-1 overflow-auto">
-          <AuthTab />
-        </div>
+      ) : tab === "headers" ? (
+        // 请求头页自带滚动、内边距与折叠区（007 起它同时是凭据页），
+        // 所以不像 params 那样再套一层容器
+        <HeadersTab className="min-h-0 flex-1" />
       ) : (
         // scripts 是 P5 的事，先明确占位而不是留白
         <EmptyState
@@ -376,7 +377,7 @@ export function RequestPane() {
       )}
 
       {/* 它是个 portal；挂在这里是为了跟着当前请求走，
-          而且切页签（比如切去授权页看那句话）不会把它卸掉 */}
+          而且切页签不会把它卸掉 */}
       <SaveDraftDialog />
     </section>
   );
@@ -390,12 +391,14 @@ export function RequestPane() {
  * 权威在 Rust 的 `template::resolver::scan_spec`：真正「这次要不要 token」
  * 由它决定（`http::pipeline::token_context` 用它判断该不该去取 Token）。
  * 这里只服务于「要不要显示那个徽标」，所以两边不一致的代价被限制在
- * **显示层**：漏判 = 少一个入口（用户还能去授权页看），
+ * **显示层**：漏判 = 少一个入口（用户还能去「请求头」页看那个折叠的
+ * Token 来源块），
  * 误判 = 多一个入口（点开发现没有来源，正好说明问题）。
  *
  * ⚠️ 但**字段清单必须跟着 `scan_spec` 一起改**。它扫的是 url / params /
- * headers / body / auth —— 这里同样一条不落。少扫一处（比如以为
- * 「授权里不会写 token」）就会在一整类请求上静默地不显示这个入口。
+ * headers / body —— 这里同样一条不落。少扫一处（比如以为
+ * 「授权里不会写 token」，那已经是 007 之前的事了）就会在一整类请求上
+ * 静默地不显示这个入口。
  *
  * 宁可多扫：未勾选的行、文件路径都一起看。**多显示一个入口**只是多一次点击，
  * **漏显示**才是那个「上次改了 token 配置，发出去还是旧 token」的场景。
@@ -404,9 +407,8 @@ function draftWantsToken(draft: RequestDraft): boolean {
   const texts: string[] = [
     draft.url,
     draft.body,
-    // 逐个字段列举授权会在加新授权类型时漏掉，而它是 `{{token.access}}`
-    // 最常见的落点（Bearer）。直接序列化，代价只是可能扫到字段名本身
-    JSON.stringify(draft.auth),
+    // 凭据头（`Authorization: {{token.access}}`）天然就在 headers 里，
+    // 不必再单列一项 —— 这正是 007 的收益之一
     ...draft.params.flatMap((row) => [row.key, row.value]),
     ...draft.headers.flatMap((row) => [row.key, row.value]),
     ...draft.bodyRows.flatMap((row) => [row.key, row.value]),

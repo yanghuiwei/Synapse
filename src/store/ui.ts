@@ -70,9 +70,9 @@ export interface UiState {
   /**
    * 「保存到分类」对话框是否打开。
    *
-   * 与 `importOpen` 同一个理由：触发它的地方有两处 —— 请求标签栏那个入口
-   * （住在 `RequestPane`）和授权页那条死路提示旁边的按钮（住在 `AuthTab`），
-   * 而对话框本体只能挂一处（挂在 `RequestPane`，这样它跟着当前请求走）。
+   * 与 `importOpen` 同一个理由：对话框本体只能挂一处（挂在 `RequestPane`，
+   * 这样它跟着当前请求走），而打开它的入口在请求标签栏上。
+   * （007 之前授权页那条死路提示旁边还有第二个入口，那个页面已经没了。）
    */
   saveDraftOpen: boolean;
 

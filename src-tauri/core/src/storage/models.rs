@@ -5,8 +5,10 @@
 //!
 //! JSON 列的处理原则：
 //! * 结构稳定、多处复用（params / headers / settings）→ 定义具体结构体
-//! * 结构还在演化（auth）→ 先用 [`serde_json::Value`] 占位并标注 TODO，
-//!   避免现在拍一个 P2/P4 就会推翻的 schema
+//! * 结构还没定下来（历史条目 / 导入预览的快照）→ 用 [`serde_json::Value`] 占位
+//!
+//! 🔴 这里**没有 `auth` 这个东西**。007 迁移之后「带什么凭据」就是 `headers`
+//! 里的一行（见 [`ApiRequest::headers`]），分类层不再持有任何授权配置。
 
 use std::collections::BTreeMap;
 
@@ -152,91 +154,6 @@ impl ExpiryUnit {
     }
 }
 
-/// API Key 放在哪里（design.md §4.4）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ApiKeyLocation {
-    #[default]
-    Header,
-    Query,
-}
-
-impl ApiKeyLocation {
-    pub fn as_db_str(self) -> &'static str {
-        match self {
-            ApiKeyLocation::Header => "header",
-            ApiKeyLocation::Query => "query",
-        }
-    }
-
-    pub fn parse(raw: &str) -> Self {
-        match raw {
-            "query" => ApiKeyLocation::Query,
-            _ => ApiKeyLocation::Header,
-        }
-    }
-}
-
-/// 授权配置（design.md §4.4）。请求级与文件夹级共用一套结构。
-///
-/// ## 为什么入口是 [`AuthConfig::from_json`] 而不是直接 `serde_json::from_str`
-///
-/// `request.auth` 从 P2 起一直是**透传**的 JSON，001 迁移给的默认值是 `'{}'` ——
-/// 一个没有 `type` 字段的对象。内部标签（`#[serde(tag = "type")]`）的枚举
-/// 直接反序列化 `{}` 会失败，而失败的代价是**整条请求读不出来**（连列表都列不出），
-/// 完全不成比例。所以走宽松解析：认不出的形状一律退化成
-/// [`AuthConfig::Inherit`]，也就是最保守的「不注入任何授权」。
-///
-/// 之所以敢这么退化而不担心丢数据：P4 之前界面上根本没有编辑 auth 的入口，
-/// 库里所有 auth 只可能是 `{}`。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum AuthConfig {
-    /// 沿文件夹树向上找最近的非 `inherit` 配置（design.md §4.4）
-    #[default]
-    Inherit,
-    /// 明确不注入授权 —— 与「继承父级」的区别在于它**中止**继承链
-    None,
-    Bearer {
-        token: String,
-    },
-    Basic {
-        username: String,
-        password: String,
-    },
-    ApiKey {
-        key: String,
-        value: String,
-        #[serde(default)]
-        location: ApiKeyLocation,
-    },
-}
-
-impl AuthConfig {
-    /// 宽松解析。见类型级注释。
-    pub fn from_json(raw: &Value) -> Self {
-        serde_json::from_value(raw.clone()).unwrap_or_default()
-    }
-
-    /// 该配置里所有可能含占位符的字符串。
-    ///
-    /// 扫描（`template::resolver::scan_spec`）与解析都从这一份清单取材，
-    /// 免得将来给 AuthConfig 加了字段却只改了其中一处。
-    pub fn text_fields(&self) -> Vec<&str> {
-        match self {
-            AuthConfig::Inherit | AuthConfig::None => Vec::new(),
-            AuthConfig::Bearer { token } => vec![token.as_str()],
-            AuthConfig::Basic { username, password } => vec![username.as_str(), password.as_str()],
-            AuthConfig::ApiKey { key, value, .. } => vec![key.as_str(), value.as_str()],
-        }
-    }
-
-    /// 是否还需要沿文件夹树向上找 —— 只有 `inherit` 需要。
-    pub fn is_inherit(&self) -> bool {
-        matches!(self, AuthConfig::Inherit)
-    }
-}
-
 /// 逐请求的发送设置，对应 `request.settings` 这一 JSON 列。
 ///
 /// 每个字段都有 serde default，所以历史数据里的 `{}` 能平滑升级成完整配置。
@@ -317,8 +234,6 @@ pub struct Folder {
     /// 这个是「这一行由程序托管」的硬约束。Token 来源固定配在系统分类下，
     /// 所以系统分类同时也是 Token 分组（建的时候顺手置上）。
     pub is_system: bool,
-    /// 分组级授权配置。请求的 auth 为 `inherit` 时沿树向上取最近的一个
-    pub auth: AuthConfig,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
@@ -334,6 +249,13 @@ pub struct ApiRequest {
     pub method: String,
     pub url: String,
     pub params: Vec<KeyValueItem>,
+    /// 授权**不是**一个字段 —— 它就是这个数组里的一行。
+    ///
+    /// `Authorization: Bearer {{token.access}}` 与 `X-Access-Token: <裸 JWT>`
+    /// 都是普通请求头，值为普通模板串。原先那套 `AuthConfig`
+    /// （inherit / none / bearer / basic / apiKey）连同 `folder.auth` 继承链
+    /// 在 007 迁移里被拆掉了：实测继承链深度恒为 1，而它的代价是
+    /// 「4 条请求因为自己写了显式授权、反而静默切断了继承、一条凭据都不带」。
     pub headers: Vec<KeyValueItem>,
     pub body_type: BodyType,
     /// 当前 `body_type` 对应的那份内容，**原样发出**（见 `http::execute::build_body`）。
@@ -359,8 +281,6 @@ pub struct ApiRequest {
     /// 与 `body_rows` 同构，差别只在多一点：`file` 非空的行是**文件字段**，
     /// 值是一个磁盘路径，发送时才读。
     pub form_fields: Vec<KeyValueItem>,
-    /// 授权配置。P4 起定稿（design.md §4.4）。
-    pub auth: AuthConfig,
     pub settings: RequestSettings,
     pub pre_script: String,
     pub test_script: String,
@@ -574,7 +494,6 @@ mod tests {
             sort_order: 3,
             is_token_source: true,
             is_system: true,
-            auth: AuthConfig::None,
             created_at: "c".into(),
             updated_at: "u".into(),
             deleted_at: None,
@@ -587,45 +506,23 @@ mod tests {
         assert!(json.get("workspace_id").is_none(), "snake_case leaked");
     }
 
-    /// 老库里的 `auth` 是 `{}`（P2 起一直透传），必须能读成「不注入授权」
-    /// 而不是让整条请求打不开。
+    /// 凭据头是**普通请求头**，序列化形状必须与前端 `KeyValueItem` 逐字段对齐 ——
+    /// `enabled` 必须是 JSON 布尔，写成 `1` 会让 serde 拒掉整条请求
+    /// （007 迁移里 `json_object(…, 'enabled', json('true'))` 那个 `json()` 就是为它）。
     #[test]
-    fn legacy_empty_auth_json_falls_back_to_inherit() {
+    fn credential_headers_serialize_as_plain_key_value_items() {
+        let item = KeyValueItem::new("Authorization", "Bearer {{token.access}}");
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["key"], serde_json::json!("Authorization"));
+        assert_eq!(json["value"], serde_json::json!("Bearer {{token.access}}"));
         assert_eq!(
-            AuthConfig::from_json(&serde_json::json!({})),
-            AuthConfig::Inherit
+            json["enabled"],
+            serde_json::json!(true),
+            "enabled 必须是 JSON 布尔而不是数字 1"
         );
-        assert_eq!(AuthConfig::from_json(&Value::Null), AuthConfig::Inherit);
-        // 认得出真形状，且连字段都解对
-        assert_eq!(
-            AuthConfig::from_json(&serde_json::json!({
-                "type": "apiKey",
-                "key": "X-Api-Key",
-                "value": "v",
-                "location": "query"
-            })),
-            AuthConfig::ApiKey {
-                key: "X-Api-Key".into(),
-                value: "v".into(),
-                location: ApiKeyLocation::Query,
-            }
-        );
-    }
 
-    /// 前端读的是 camelCase 的 `type` 标签，别被 rename_all 悄悄改坏
-    #[test]
-    fn auth_config_serializes_with_camel_case_tag() {
-        let value = serde_json::to_value(AuthConfig::ApiKey {
-            key: "k".into(),
-            value: "v".into(),
-            location: ApiKeyLocation::Header,
-        })
-        .unwrap();
-        assert_eq!(value["type"], serde_json::json!("apiKey"));
-        assert_eq!(value["location"], serde_json::json!("header"));
-
-        let inherit = serde_json::to_value(AuthConfig::Inherit).unwrap();
-        assert_eq!(inherit["type"], serde_json::json!("inherit"));
+        let back: KeyValueItem = serde_json::from_value(json).expect("roundtrip");
+        assert_eq!(back, item);
     }
 
     #[test]

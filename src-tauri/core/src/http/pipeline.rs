@@ -3,7 +3,7 @@
 //! ```text
 //!   用户点 Send
 //!     ├─1 取请求定义 + 当前环境（激活环境的变量）
-//!     ├─2 沿文件夹链准备「上下文」：Token 源、要继承的授权
+//!     ├─2 沿文件夹链准备「上下文」：Token 源
 //!     ├─3 需要 token 就先确保就绪  ← 这一步可能打一次刷新请求（单飞锁在这儿）
 //!     ├─4 解析所有字符串字段上的占位符
 //!     └─5 交给 http::execute 发送
@@ -16,11 +16,6 @@
 //! 扫描用的是 `template::resolver::scan_spec`，与解析**共用同一份字段清单**——
 //! 两份清单一旦漂移，就会出现「扫描说不用 token、解析时却发现用上了」，
 //! 表现为请求带着 `{{token.access}}` 原样发出去。
-//!
-//! ## 授权继承在这里解析，而不是在解析器里
-//!
-//! `AuthConfig::Inherit` 要沿文件夹链往上找，那是**数据查询**而不是字符串处理。
-//! 把它留在解析器里会把数据库依赖拖进那个本来是同步纯函数的模块。
 //!
 //! ## `{{resp.*}}` 是「上一条成功响应的 JSON」
 //!
@@ -38,7 +33,7 @@ use crate::error::AppResult;
 use crate::http::client::ClientCache;
 use crate::http::execute::RequestSpec;
 use crate::http::token::{remaining_seconds, TokenDeps, TokenRefresher, TokenUsage};
-use crate::storage::models::{AuthConfig, TokenSource};
+use crate::storage::models::TokenSource;
 use crate::storage::pool::SqlitePool;
 use crate::storage::{repo, with_conn};
 use crate::template::functions::Entropy;
@@ -98,14 +93,7 @@ impl<'a> Pipeline<'a> {
         let env = self.active_env().await?;
         let chain = self.folder_chain(spec.folder_id).await?;
 
-        // 先把授权继承解开，再扫描：继承来的授权里也可能写 `{{token.access}}`，
-        // 顺序反了就会漏判
-        let working = RequestSpec {
-            auth: inherited_auth(&spec.auth, &chain),
-            ..spec.clone()
-        };
-
-        let token_ctx = self.token_context(&working, &chain, &env, cancel).await?;
+        let token_ctx = self.token_context(spec, &chain, &env, cancel).await?;
 
         let mut ctx = TemplateContext {
             env: &env,
@@ -114,7 +102,7 @@ impl<'a> Pipeline<'a> {
             now: Local::now(),
             entropy: Entropy::from_system(),
         };
-        let resolved = resolve_spec(&working, &mut ctx);
+        let resolved = resolve_spec(spec, &mut ctx);
 
         Ok(Prepared {
             spec: resolved.spec,
@@ -251,24 +239,6 @@ impl<'a> Pipeline<'a> {
     }
 }
 
-/// 沿文件夹链解析 `inherit`：取最近的、不是 `inherit` 的那个配置。
-///
-/// 请求自己写了具体类型时（Bearer / Basic / …）直接用它的，不往上找 ——
-/// 否则「在这个请求上设了 Basic」会被上级的 Bearer 覆盖，那是反直觉的。
-///
-/// 链走完都没有 → `None`，语义是「不注入授权」。这里刻意不报错：
-/// 没配授权是绝大多数请求的正常状态。
-fn inherited_auth(auth: &AuthConfig, chain: &[crate::storage::models::Folder]) -> AuthConfig {
-    if !auth.is_inherit() {
-        return auth.clone();
-    }
-    chain
-        .iter()
-        .find(|folder| !folder.auth.is_inherit())
-        .map(|folder| folder.auth.clone())
-        .unwrap_or(AuthConfig::None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,7 +305,6 @@ mod tests {
             headers: Vec::new(),
             body_type: crate::storage::models::BodyType::None,
             body: String::new(),
-            auth: AuthConfig::Inherit,
             settings: RequestSettings::default(),
             folder_id: None,
             form_fields: Vec::new(),
@@ -545,89 +514,5 @@ mod tests {
             "https://api.example.com/{{resp.$.data.id}}"
         );
         assert_eq!(prepared.unresolved[0].reason, "noResponse");
-    }
-
-    // ============================================================
-    // 授权继承（纯函数，不需要库）
-    // ============================================================
-
-    fn folder(id: i64, parent: Option<i64>, auth: AuthConfig) -> crate::storage::models::Folder {
-        crate::storage::models::Folder {
-            id,
-            workspace_id: 1,
-            parent_id: parent,
-            name: format!("f{id}"),
-            sort_order: 0,
-            is_token_source: false,
-            is_system: false,
-            auth,
-            created_at: "c".into(),
-            updated_at: "u".into(),
-            deleted_at: None,
-        }
-    }
-
-    #[test]
-    fn explicit_auth_wins_over_inheritance() {
-        let chain = vec![folder(
-            2,
-            Some(1),
-            AuthConfig::Bearer {
-                token: "from-folder".into(),
-            },
-        )];
-        let mine = AuthConfig::Basic {
-            username: "u".into(),
-            password: "p".into(),
-        };
-        assert_eq!(inherited_auth(&mine, &chain), mine);
-    }
-
-    #[test]
-    fn inherit_takes_the_nearest_non_inherit_folder() {
-        // 最近的在前：子 → 父 → 根
-        let chain = vec![
-            folder(3, Some(2), AuthConfig::Inherit),
-            folder(
-                2,
-                Some(1),
-                AuthConfig::ApiKey {
-                    key: "X-K".into(),
-                    value: "v".into(),
-                    location: crate::storage::models::ApiKeyLocation::Header,
-                },
-            ),
-            folder(
-                1,
-                None,
-                AuthConfig::Bearer {
-                    token: "root".into(),
-                },
-            ),
-        ];
-
-        assert_eq!(
-            inherited_auth(&AuthConfig::Inherit, &chain),
-            AuthConfig::ApiKey {
-                key: "X-K".into(),
-                value: "v".into(),
-                location: crate::storage::models::ApiKeyLocation::Header,
-            },
-            "取最近的，而不是最上面的"
-        );
-    }
-
-    /// 链上全是 inherit（`{}` 读出来就是它）→ 不注入授权，且**不报错**
-    #[test]
-    fn all_inherit_resolves_to_none() {
-        let chain = vec![
-            folder(2, Some(1), AuthConfig::Inherit),
-            folder(1, None, AuthConfig::Inherit),
-        ];
-        assert_eq!(
-            inherited_auth(&AuthConfig::Inherit, &chain),
-            AuthConfig::None
-        );
-        assert_eq!(inherited_auth(&AuthConfig::Inherit, &[]), AuthConfig::None);
     }
 }

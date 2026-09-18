@@ -35,6 +35,10 @@ const FUNCTION_NAMES = new Set([
   "$timestampMs",
   "$randomInt",
   "$datetime",
+  // Basic 凭据：`{{$basic "u" "p"}}` → 发送时展开成 `Basic base64(u:p)`。
+  // 它存在于这个清单里只是为了让输入框**当场**把它染成「会被解析」；
+  // 真正的编码在 Rust（`template::functions::basic`），前端不做 base64
+  "$basic",
 ]);
 
 export interface ParsedPlaceholder {

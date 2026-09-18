@@ -1,30 +1,31 @@
 //! 接口请求仓储。
 //!
-//! 这个仓储比其他的麻烦一点：`params` / `headers` / `auth` / `settings`
-//! 四列都是 JSON，读出时要反序列化、写入时要序列化。
+//! 这个仓储比其他的麻烦一点：`params` / `headers` / `body_by_type` / `body_rows` /
+//! `form_fields` / `settings` 六列都是 JSON，读出时要反序列化、写入时要序列化。
 //!
 //! 因此这里**不用 `query_map`**，改用显式的 `rows.next()` 循环 ——
 //! `query_map` 的映射闭包只能返回 `rusqlite::Result`，
 //! 而 JSON 解析失败要冒泡成我们自己的错误类型（见 `parse_json_column` 的说明）。
+//!
+//! 🔴 **这里没有 `auth` 列**。007 迁移把 `request.auth` / `folder.auth` 拆掉了，
+//! 凭据现在就是 `headers` 里的一行普通键值对（见 `models::ApiRequest::headers`）。
 
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, Row};
-use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::models::{ApiRequest, AuthConfig, BodyType, KeyValueItem, RequestSettings};
+use crate::storage::models::{ApiRequest, BodyType, KeyValueItem, RequestSettings};
 use crate::storage::now_iso;
 use crate::storage::repo::{opt_text, parse_json_column, to_json_column, ORDER_BY_SORT};
 
 const COLUMNS: &str = "id, folder_id, workspace_id, name, method, url, params, headers, \
-     body_type, body, body_by_type, body_rows, form_fields, auth, settings, pre_script, test_script, \
+     body_type, body, body_by_type, body_rows, form_fields, settings, pre_script, test_script, \
      sort_order, created_at, updated_at, deleted_at";
 
 fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
     let params_raw: String = row.get("params")?;
     let headers_raw: String = row.get("headers")?;
-    let auth_raw: String = row.get("auth")?;
     let settings_raw: String = row.get("settings")?;
     let body_type_raw: String = row.get("body_type")?;
     let body_by_type_raw: String = row.get("body_by_type")?;
@@ -51,8 +52,7 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
             &form_fields_raw,
             "request.form_fields",
         )?,
-        // 宽松解析：存量值是 `{}`（P2 起 auth 一直只做透传），见 AuthConfig 的注释
-        auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "request.auth")?),
+        // 凭据头（`Authorization` / `X-Api-Key` / …）就在这个数组里，与普通头无区别
         settings: parse_json_column(&settings_raw, "request.settings")?,
         pre_script: row.get("pre_script")?,
         test_script: row.get("test_script")?,
@@ -163,12 +163,11 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
            body_by_type = ?10,
            body_rows    = ?11,
            form_fields  = ?12,
-           auth         = ?13,
-           settings     = ?14,
-           pre_script   = ?15,
-           test_script  = ?16,
-           sort_order   = ?17,
-           updated_at   = ?18
+           settings     = ?13,
+           pre_script   = ?14,
+           test_script  = ?15,
+           sort_order   = ?16,
+           updated_at   = ?17
          WHERE id = ?1",
         rusqlite::params![
             req.id,
@@ -183,8 +182,6 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
             to_json_column(&req.body_by_type, "request.body_by_type")?,
             to_json_column(&req.body_rows, "request.body_rows")?,
             to_json_column(&req.form_fields, "request.form_fields")?,
-            serde_json::to_string(&req.auth)
-                .map_err(|e| AppError::Internal(format!("request.auth: {e}")))?,
             to_json_column(&req.settings, "request.settings")?,
             req.pre_script,
             req.test_script,
@@ -238,11 +235,11 @@ pub fn duplicate(conn: &Connection, id: i64, name: &str) -> AppResult<ApiRequest
         "INSERT INTO request
            (folder_id, workspace_id, name, method, url, params, headers,
             body_type, body, body_by_type, body_rows, form_fields,
-            auth, settings, pre_script, test_script,
+            settings, pre_script, test_script,
             sort_order, created_at, updated_at)
          SELECT folder_id, workspace_id, ?2, method, url, params, headers,
                 body_type, body, body_by_type, body_rows, form_fields,
-                auth, settings, pre_script, test_script,
+                settings, pre_script, test_script,
                 ?3, ?4, ?4
          FROM request WHERE id = ?1",
         rusqlite::params![id, name, next_order, now],
@@ -369,8 +366,6 @@ mod tests {
         assert!(r.params.is_empty());
         assert!(r.headers.is_empty());
         assert_eq!(r.settings, RequestSettings::default());
-        // 建表默认是 `'{}'`，读出来是「不注入授权」而不是报错
-        assert_eq!(r.auth, AuthConfig::Inherit);
         // 003 的两列默认是**空快照**：前端读到 `{}` 会用 body 兜底填当前类型
         assert!(r.body_by_type.is_empty());
         assert!(r.body_rows.is_empty());
@@ -379,7 +374,7 @@ mod tests {
     #[test]
     fn save_roundtrips_every_json_column() {
         let conn = db();
-        let f = folder(&conn, "auth");
+        let f = folder(&conn, "group");
         let mut r = create(&conn, 1, Some(f), "login").unwrap();
 
         r.method = "POST".into();
@@ -394,9 +389,6 @@ mod tests {
             ("raw".to_string(), "plain text".to_string()),
         ]);
         r.body_rows = vec![KeyValueItem::new("grant_type", "password")];
-        r.auth = AuthConfig::Bearer {
-            token: "{{token.access}}".into(),
-        };
         r.settings.timeout_ms = 5_000;
         r.settings.verify_tls = false;
         r.settings.proxy = Some("http://127.0.0.1:7890".into());
@@ -410,7 +402,6 @@ mod tests {
         assert_eq!(saved.headers, r.headers);
         assert_eq!(saved.body_by_type, r.body_by_type);
         assert_eq!(saved.body_rows, r.body_rows);
-        assert_eq!(saved.auth, r.auth);
         assert_eq!(saved.settings, r.settings);
         assert_eq!(saved.pre_script, "console.log(1)");
     }
@@ -430,7 +421,7 @@ mod tests {
     #[test]
     fn list_separates_foldered_and_unfiled() {
         let conn = db();
-        let f = folder(&conn, "auth");
+        let f = folder(&conn, "group");
         create(&conn, 1, Some(f), "login").unwrap();
         create(&conn, 1, None, "root-level").unwrap();
 
@@ -463,7 +454,7 @@ mod tests {
     #[test]
     fn restore_detaches_from_trashed_folder() {
         let conn = db();
-        let f = folder(&conn, "auth");
+        let f = folder(&conn, "group");
         let r = create(&conn, 1, Some(f), "login").unwrap();
 
         conn.execute(
@@ -498,7 +489,7 @@ mod tests {
     #[test]
     fn duplicate_copies_content_into_the_same_folder() {
         let conn = db();
-        let f = folder(&conn, "auth");
+        let f = folder(&conn, "group");
         let mut src = create(&conn, 1, Some(f), "login").unwrap();
         src.method = "POST".into();
         src.url = "https://example.com/login".into();

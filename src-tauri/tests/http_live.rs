@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use reqly_lib::error::codes;
 use reqly_lib::http::{execute, execute_with_cancel, BodyEncoding, ClientCache, RequestSpec};
-use reqly_lib::storage::models::{AuthConfig, BodyType, KeyValueItem, RequestSettings};
+use reqly_lib::storage::models::{BodyType, KeyValueItem, RequestSettings};
 use tokio_util::sync::CancellationToken;
 
 /// 公网请求一律给足时间：httpbin 偶尔要好几秒，因为它慢而报红是假警报
@@ -41,7 +41,6 @@ fn spec(method: &str, url: &str) -> RequestSpec {
         body_type: BodyType::None,
         body: String::new(),
         form_fields: Vec::new(),
-        auth: AuthConfig::None,
         settings: settings(),
         folder_id: None,
     }

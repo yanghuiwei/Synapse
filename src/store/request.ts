@@ -4,7 +4,6 @@ import { DEFAULT_REQUEST_SETTINGS } from "@/lib/http";
 import * as ipc from "@/lib/ipc";
 import type {
   ApiRequest,
-  AuthConfig,
   BodyType,
   HttpResponsePayload,
   KeyValueItem,
@@ -56,14 +55,13 @@ export interface RequestDraft {
    * 值是磁盘路径 —— 发送时由后端去读，前端不碰文件内容。
    */
   formFields: KeyValueItem[];
-  auth: AuthConfig;
   settings: RequestSettings;
   /**
    * 这条请求挂在哪个分类下。
    *
    * 草稿里放它不是为了编辑（界面上没有这个输入框），而是因为它是
-   * **发送语义的一部分**：Token 来源与授权继承都要沿分类链向上找
-   * （见 Rust `http::pipeline`）。历史快照回填时它是 `null` ——
+   * **发送语义的一部分**：Token 来源要沿分类链向上找
+   * （见 Rust `http::pipeline::find_token_source`）。历史快照回填时它是 `null` ——
    * 那时确实没有分类上下文，这是如实反映而不是丢信息。
    */
   folderId: number | null;
@@ -80,9 +78,6 @@ function emptyDraft(): RequestDraft {
     bodyByType: {},
     bodyRows: [],
     formFields: [],
-    // 新请求默认**继承分类**：绝大多数时候用户会在分类上配一次授权，
-    // 然后希望下面所有请求自动用上
-    auth: { type: "inherit" },
     settings: { ...DEFAULT_REQUEST_SETTINGS },
     folderId: null,
   };
@@ -172,8 +167,6 @@ function draftFrom(req: ApiRequest): RequestDraft {
     bodyRows: rowsFrom(req.bodyType, req.bodyRows, req.body),
     // schema 把缺失的兜成 `[]` 了（老快照没有这一列），所以这里不必再判空
     formFields: formFieldsFrom(req.formFields, req.body),
-    // 授权配置也是对象（apiKey 变体有字段），同样得拷贝
-    auth: { ...req.auth },
     settings: { ...req.settings },
     folderId: req.folderId,
   };
@@ -201,7 +194,6 @@ export function draftToSpec(draft: RequestDraft): RequestSpec {
     bodyByType: bodySnapshot(draft.bodyType, draft.body, draft.bodyByType),
     bodyRows: draft.bodyRows,
     formFields: draft.formFields,
-    auth: draft.auth,
     settings: draft.settings,
     folderId: draft.folderId,
   };
@@ -225,7 +217,6 @@ function draftFromSpec(spec: RequestSpec): RequestDraft {
     bodyByType: bodySnapshot(spec.bodyType, spec.body, spec.bodyByType),
     bodyRows: rowsFrom(spec.bodyType, spec.bodyRows, spec.body),
     formFields: formFieldsFrom(spec.formFields, spec.body),
-    auth: { ...spec.auth },
     settings: { ...spec.settings },
     // 历史快照可能来自 P2/P3，那时没有这个字段 —— 缺失就是「无分类」。
     // 刻意**不**猜成「当前选中的分类」：猜错会让请求带上一个它从未有过的
@@ -386,10 +377,6 @@ function draftFields(draft: RequestDraft): Partial<ApiRequest> {
     bodyByType: bodySnapshot(draft.bodyType, draft.body, draft.bodyByType),
     bodyRows: draft.bodyRows,
     formFields: draft.formFields,
-    // 授权**必须**落库：用户在授权页签改完之后多半不会点保存，
-    // 靠的就是自动保存。漏了这一个字段的表现是「切走再切回来，授权没了」——
-    // 而请求本身看起来完全正常
-    auth: draft.auth,
     settings: draft.settings,
   };
 }
@@ -458,7 +445,8 @@ export interface RequestState {
    *
    * 为什么必须有这个动作：草稿（`sourceId === null`）没有归属分类，
    * 而 Token 来源**必须**挂在分类上（沿分类链向上找，见 Rust `http::pipeline`）——
-   * 于是「粘个地址就发」这条路走到授权页就断了：那里只说「先在左侧选中一个分类」，
+   * 于是「粘个地址就发」这条路在用到 `{{token.*}}` 时就断了（发送报
+   * 「没有可用 Token 源」，见 `placeholder.reason.noTokenSource`），
    * 而左侧根本没有「把这份内容收进某个分类」这个动作。
    */
   saveAs: (folderId: number | null, name: string) => Promise<ApiRequest>;

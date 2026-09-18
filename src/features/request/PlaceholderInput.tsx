@@ -1,5 +1,5 @@
 import { TriangleAlert } from "lucide-react";
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, type ClipboardEvent } from "react";
 
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
@@ -76,6 +76,18 @@ export interface PlaceholderInputProps {
    * 它的文字本来就是透明的。
    */
   tone?: "normal" | "muted";
+  /**
+   * 粘贴拦截。返回 `null` = 不干预，走浏览器默认行为。
+   *
+   * 存在的理由只有一条：从网站上复制 token 时，页面上写的往往是
+   * `Bearer eyJ…`，而这一行里已经写着 `Bearer ` —— 直接粘下去就变成
+   * `Bearer Bearer eyJ…`。这个值会**原样发出去**，服务端必然回 401，
+   * 而界面上看不出哪里不对（两个词都是白的，值也不短）。
+   *
+   * 规则由调用方给（见 `HeadersTab`），这个组件不做任何判断 ——
+   * 它只负责在「用户没有选中文本」时把粘贴的路子让出来。
+   */
+  onPasteText?: (pasted: string, current: string) => string | null;
 }
 
 const TONE_CLASS = { normal: "text-ink", muted: "text-ink-faint" } as const;
@@ -142,6 +154,7 @@ export function PlaceholderInput({
   dense = false,
   multiline = false,
   tone = "normal",
+  onPasteText,
 }: PlaceholderInputProps) {
   const { t } = useI18n();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -156,6 +169,31 @@ export function PlaceholderInput({
     const mirror = mirrorRef.current;
     if (input && mirror) mirror.scrollLeft = input.scrollLeft;
   }, []);
+
+  /**
+   * 粘贴的转发。有选区时一律不干预 —— 那时用户想的是「换掉这一段」，
+   * 替他去重前缀只会得到一个不是他想要的拼接结果。
+   *
+   * 光标位置在 `onChange` 之后会回到末尾（值被整体替换了）。对「粘一段
+   * token 进来」这个动作来说，末尾正是接下来的落点，所以不额外做选区恢复 ——
+   * 那是给 contentEditable 才需要的复杂度。
+   */
+  const handlePaste = useCallback(
+    (e: ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!onPasteText) return;
+      if (e.currentTarget.selectionStart !== e.currentTarget.selectionEnd) return;
+
+      const pasted = e.clipboardData.getData("text/plain");
+      if (pasted === "") return;
+
+      const next = onPasteText(pasted, value);
+      if (next === null) return;
+
+      e.preventDefault();
+      onChange(next);
+    },
+    [onPasteText, value, onChange],
+  );
 
   // 单行控件里，镜像层必须和 `<input>` 一样先把换行剥掉。
   // 浏览器对 `type=text` 会 strip newlines（HTML 规范），而这里是
@@ -217,6 +255,7 @@ export function PlaceholderInput({
           value={value}
           disabled={disabled}
           onChange={(e) => onChange(e.target.value)}
+          onPaste={handlePaste}
           // 回车留给换行（`onEnter` 是单行控件的约定：那儿的回车没有别的事可做）
           spellCheck={false}
           autoComplete="off"
@@ -260,6 +299,7 @@ export function PlaceholderInput({
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         onScroll={syncScroll}
+        onPaste={handlePaste}
         onKeyDown={(e) => {
           if (e.key === "Enter" && onEnter) {
             e.preventDefault();

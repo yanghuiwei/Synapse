@@ -196,7 +196,23 @@ pub fn request_detail(request: &RequestDetail) -> String {
             .map(|id| id.to_string())
             .unwrap_or_else(|| "（工作区根）".into())
     );
-    let _ = writeln!(out, "  auth:      {}", request.auth.r#type);
+    // 凭据没有单独的字段了：它就是 headers / params 里的一行。
+    // 这里只报**哪些行是凭据**（名字而已，值在 DTO 里已经打成 `••••`）——
+    // 报名字就够回答「这条请求靠什么鉴权」，而把值打出来就等于
+    // 把用户粘进去的长期 token 写进终端历史。
+    let credentials: Vec<&str> = request
+        .headers
+        .iter()
+        .chain(request.params.iter())
+        .filter(|row| reqly_core::redact::is_secret_header(&row.key))
+        .map(|row| row.key.as_str())
+        .collect();
+    let credentials = if credentials.is_empty() {
+        "无".to_string()
+    } else {
+        credentials.join("、")
+    };
+    let _ = writeln!(out, "  凭据:      {credentials}");
     let _ = writeln!(
         out,
         "  settings:  重定向={} 上限={} 校验TLS={} 超时={}ms 版本={} 代理={}",

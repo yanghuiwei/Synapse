@@ -15,7 +15,7 @@ use tauri::State;
 
 use crate::commands::validate::clean_name;
 use crate::error::AppResult;
-use crate::storage::models::{ApiRequest, AuthConfig, Folder, HistoryEntry};
+use crate::storage::models::{ApiRequest, Folder, HistoryEntry};
 use crate::storage::{repo, with_conn};
 use crate::AppState;
 
@@ -65,22 +65,6 @@ pub async fn set_folder_token_source(
 ) -> AppResult<Folder> {
     with_conn(&state.pool, move |conn| {
         repo::folder::set_token_source(conn, id, is_token_source)
-    })
-    .await
-}
-
-/// 设置分组级授权配置（design.md §4.4 的「继承父级」靠它落数据）。
-///
-/// 不校验内容：`AuthConfig` 是枚举，形状在类型层就已经定死了；
-/// 里面那些字符串字段允许为空（比如 Bearer 的 token 留空等着写 `{{token.access}}`）。
-#[tauri::command]
-pub async fn set_folder_auth(
-    state: State<'_, AppState>,
-    id: i64,
-    auth: AuthConfig,
-) -> AppResult<Folder> {
-    with_conn(&state.pool, move |conn| {
-        repo::folder::set_auth(conn, id, &auth)
     })
     .await
 }

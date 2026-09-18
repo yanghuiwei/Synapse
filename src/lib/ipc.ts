@@ -50,7 +50,6 @@ import {
 import type {
   ApiRequest,
   AppInfo,
-  AuthConfig,
   ConflictMode,
   DeleteFolderResult,
   EnvVar,
@@ -445,13 +444,6 @@ export const folders = {
 
   rename: (id: number, name: string): Promise<Folder> =>
     call("rename_folder", { id, name }, { parse: (v) => folderSchema.parse(v) }),
-
-  /**
-   * 设置分类的授权（P4）。这是**继承链的数据源** ——
-   * 子分类/请求上配 `inherit` 就是沿链向上找第一个非 `inherit` 的。
-   */
-  setAuth: (id: number, auth: AuthConfig): Promise<Folder> =>
-    call("set_folder_auth", { id, auth }, { parse: (v) => folderSchema.parse(v) }),
 
   /** `parentId = null` 表示移到根。移进自己的子孙会被后端拒绝。 */
   move: (id: number, parentId: number | null): Promise<Folder> =>

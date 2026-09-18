@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{codes, AppError, AppResult};
-use crate::storage::models::{ApiKeyLocation, AuthConfig, BodyType, KeyValueItem, RequestSettings};
+use crate::storage::models::{BodyType, KeyValueItem, RequestSettings};
 use crate::template::resolver::UnresolvedPlaceholder;
 
 /// 内联返回给前端的响应体上限。
@@ -50,17 +50,16 @@ pub struct RequestSpec {
     pub body_type: BodyType,
     #[serde(default)]
     pub body: String,
-    /// 授权配置。`inherit` 会由流水线（`http::pipeline`）解析成具体配置后才落到这里；
-    /// 真到了执行层还是 `inherit`，就什么都不注入（见 `apply_auth`）。
-    #[serde(default, deserialize_with = "de_auth_config")]
-    pub auth: AuthConfig,
     #[serde(default)]
     pub settings: RequestSettings,
     /// 这条请求挂在哪个文件夹下。
     ///
-    /// Token 源分组（§4.3）与授权继承（§4.4）都要**沿文件夹链向上找**，
+    /// 用途只剩一个：Token 源分组（§4.3）要**沿文件夹链向上找**。
     /// 所以它不是可有可无的元数据，而是这次发送语义的一部分 ——
     /// 放进 spec 里，历史快照回填之后再发送也能找回同样的上下文。
+    ///
+    /// ⚠️ 以前这里还有第二个用途（授权继承 §4.4），007 迁移之后没有了：
+    /// 凭据就在 `headers` 里，不再需要往上找。
     ///
     /// 可空 + `serde(default)`：P2/P3 时期存下来的历史快照里没有这个字段。
     #[serde(default)]
@@ -81,19 +80,6 @@ pub struct RequestSpec {
     /// 只写 `body` 列也能发出 multipart 请求。
     #[serde(default)]
     pub form_fields: Vec<KeyValueItem>,
-}
-
-/// `AuthConfig` 的宽松反序列化。
-///
-/// 走 [`AuthConfig::from_json`] 而不是让 serde 直接认：`{}`（老库里的存量值）
-/// 或任何写坏的形状都只会退化成 `inherit`，而不是让整份请求反序列化失败 ——
-/// 一份请求因为授权字段读不出来而整个发不出去，代价完全不成比例。
-fn de_auth_config<'de, D>(deserializer: D) -> Result<AuthConfig, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = serde_json::Value::deserialize(deserializer)?;
-    Ok(AuthConfig::from_json(&raw))
 }
 
 impl RequestSpec {
@@ -117,7 +103,6 @@ impl From<&crate::storage::models::ApiRequest> for RequestSpec {
             headers: request.headers.clone(),
             body_type: request.body_type,
             body: request.body.clone(),
-            auth: request.auth.clone(),
             settings: request.settings.clone(),
             folder_id: request.folder_id,
             // 无条件带上：`build_body` 只在 `body_type = form` 时读它，
@@ -292,10 +277,8 @@ async fn execute_inner(
     let method = parse_method(&spec.method)?;
     let mut url = parse_url(&spec.url)?;
     apply_query_params(&mut url, &spec.params);
-    // API Key 放 query 的那一支必须**在**建 builder 之前落到 URL 上
-    if let Some((key, value)) = query_auth_pair(&spec.auth) {
-        url.query_pairs_mut().append_pair(key, value);
-    }
+    // 凭据不再有单独的一支：`X-Api-Key` 之类就是 `params` / `headers` 里的一行，
+    // 上面那次 `apply_query_params` 已经把它算进去了。
 
     let built = build_body(&spec.body_type, &spec.body, &spec.form_fields)?;
     let mut headers = build_headers(&spec.headers)?;
@@ -316,10 +299,6 @@ async fn execute_inner(
         // 与 `Text(_, None)` 的语义一致：这段内容不自带类型
         BuiltBody::Text(_, None) | BuiltBody::None => {}
     }
-    // API Key 放 header 的那一支同理，用 `insert` 而不是 `append`：见 `apply_auth` 的注释
-    if let Some((name, value)) = header_auth_pair(&spec.auth)? {
-        headers.insert(name, value);
-    }
 
     let mut builder = client.request(method, url.clone()).headers(headers);
     match built {
@@ -327,13 +306,6 @@ async fn execute_inner(
         BuiltBody::Text(text, _) => builder = builder.body(text),
         BuiltBody::Multipart(form) => builder = builder.multipart(form),
     }
-    // Bearer / Basic 交给 reqwest：它内部已经处理好了 `Basic` 的 base64 与
-    // `Bearer ` 前缀，自己拼一遍只是多一处会写错的地方
-    builder = match &spec.auth {
-        AuthConfig::Bearer { token } => builder.bearer_auth(token),
-        AuthConfig::Basic { username, password } => builder.basic_auth(username, Some(password)),
-        _ => builder,
-    };
 
     let timeout_ms = spec.settings.timeout_ms.max(1);
     let started = Instant::now();
@@ -491,56 +463,6 @@ pub(crate) fn parse_url(raw: &str) -> AppResult<Url> {
             raw: trimmed.to_string(),
             reason: format!("只支持 http/https，收到 `{other}`"),
         }),
-    }
-}
-
-/// 把授权配置落成请求头 / query 参数（design.md §4.4）。
-///
-/// ## 为什么授权在用户 headers **之后**应用
-///
-/// 用户在 Auth 面板选了 Bearer、同时又手写了一条 `Authorization` 时，
-/// 两条都发出去等于让服务端替我们挑一条 —— 那比「谁赢」还不可预期。
-/// 所以显式的授权配置赢，用 `insert`（覆盖）而不是 `append`（追加）。
-///
-/// ## `inherit` 到这里还没解析开，是不该发生的
-///
-/// 流水线（`http::pipeline`）负责沿文件夹链把它解析成具体配置。
-/// 真出现了就什么都不注入 —— 与 `None` 同义，绝不猜一个出来。
-///
-/// 返回 `None` 表示「授权不体现为请求头」（Bearer/Basic 走 builder 方法，
-/// query 形态的 API Key 走 URL）。
-fn header_auth_pair(auth: &AuthConfig) -> AppResult<Option<(HeaderName, HeaderValue)>> {
-    match auth {
-        AuthConfig::ApiKey {
-            key,
-            value,
-            location: ApiKeyLocation::Header,
-        } => {
-            let name = HeaderName::from_bytes(key.trim().as_bytes()).map_err(|e| {
-                AppError::InvalidInput {
-                    field: "auth.key",
-                    reason: format!("`{key}` 不是合法的 header 名：{e}"),
-                }
-            })?;
-            let value = HeaderValue::from_str(value).map_err(|e| AppError::InvalidInput {
-                field: "auth.value",
-                reason: format!("值里有非法字符：{e}"),
-            })?;
-            Ok(Some((name, value)))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// 授权里要放进 query 的那一对（`ApiKey` + `location = query`）。
-pub(crate) fn query_auth_pair(auth: &AuthConfig) -> Option<(&str, &str)> {
-    match auth {
-        AuthConfig::ApiKey {
-            key,
-            value,
-            location: ApiKeyLocation::Query,
-        } if !key.trim().is_empty() => Some((key.trim(), value.as_str())),
-        _ => None,
     }
 }
 
@@ -1375,7 +1297,6 @@ mod tests {
             headers: Vec::new(),
             body_type: BodyType::None,
             body: String::new(),
-            auth: AuthConfig::None,
             settings: RequestSettings::default(),
             folder_id: None,
             form_fields: Vec::new(),

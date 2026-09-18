@@ -19,11 +19,11 @@ use serde_json::{json, Value};
 
 use super::Format;
 use super::{
-    urlencode, value_to_string, EnvDraft, EnvVarDraft, FolderNode, ImportBundle, ImportWarning,
-    RequestDraft, WarningKind,
+    merge_auth_rows, urlencode, value_to_string, AuthRows, EnvDraft, EnvVarDraft, FolderNode,
+    ImportBundle, ImportWarning, RequestDraft, WarningKind,
 };
 use crate::error::{codes, AppError, AppResult};
-use crate::storage::models::{ApiKeyLocation, AuthConfig, KeyValueItem};
+use crate::storage::models::KeyValueItem;
 
 pub fn parse(text: &str, format: Format) -> AppResult<ImportBundle> {
     let root: Value = serde_json::from_str(text).map_err(|err| {
@@ -81,15 +81,18 @@ fn parse_postman(root: &Value, warnings: &mut Vec<ImportWarning>) -> ImportBundl
         }
     }
 
-    // 集合级授权：reqly 的「根」没有 auth 这一列，所以要么物化到顶层文件夹、
-    // 要么 inline 进根级请求（见 walk 里的 inside_folder 分支）
-    let collection_auth = postman_auth(root.get("auth"), warnings);
+    // 集合级授权在这里就被展开成**行**，往下传给每个请求。
+    //
+    // 旧实现把它挂到顶层文件夹的 `auth` 列上，靠落库后的继承链去解析。
+    // 007 之后那条链没有了（文件夹不再持有任何授权配置），所以物化的位置
+    // 必须跟着往下一层走到请求身上 —— 否则集合级凭据会在导入时静默消失。
+    let collection_auth = postman_auth_rows(root.get("auth"), warnings).unwrap_or_default();
 
     if let Some(items) = root.get("item").and_then(Value::as_array) {
         for item in items {
             push_walked(
                 &mut bundle,
-                walk_postman(item, &mut vars, &collection_auth, false, warnings),
+                walk_postman(item, &mut vars, &collection_auth, warnings),
             );
         }
     }
@@ -117,13 +120,15 @@ fn push_walked(bundle: &mut ImportBundle, walked: Walked) {
     }
 }
 
-/// `inside_folder` 决定「没有显式 auth 的请求」怎么处理：
-/// 在文件夹里 → 留 `Inherit`（由文件夹链解析）；在根上 → 把集合级授权 inline 进来。
+/// `inherited` 是上层（集合 / 外层文件夹）已经展开好的凭据行。
+///
+/// 为什么继承在**解析时**就做掉、而不是留给落库后的运行时：
+/// 007 之后文件夹不再持有授权配置，也就没有「运行时继承链」可走 ——
+/// 凭据要落到某个请求上，只能在解析这一刻找好它该属于谁。
 fn walk_postman(
     item: &Value,
     vars: &mut Vec<EnvVarDraft>,
-    inherited: &Option<AuthConfig>,
-    inside_folder: bool,
+    inherited: &AuthRows,
     warnings: &mut Vec<ImportWarning>,
 ) -> Walked {
     // ---- 文件夹 ----
@@ -131,11 +136,11 @@ fn walk_postman(
         let name = str_at(item, "name").unwrap_or_default();
         let mut node = FolderNode::new(name);
         collect_postman_vars(item, vars);
-        // 文件夹自己没配就沿用上层 —— 物化下来，让继承链在落库后依然成立
-        node.auth = postman_auth(item.get("auth"), warnings).or_else(|| inherited.clone());
-        let child_inherited = node.auth.clone();
+        // 文件夹自己没配就沿用上层 —— 继承在解析时就拍平成行，往下传
+        let child_rows =
+            postman_auth_rows(item.get("auth"), warnings).unwrap_or_else(|| inherited.clone());
         for child in children {
-            match walk_postman(child, vars, &child_inherited, true, warnings) {
+            match walk_postman(child, vars, &child_rows, warnings) {
                 Walked::Folder(child_node) => node.folders.push(child_node),
                 Walked::Request(draft) => node.requests.push(draft),
                 Walked::Skipped => {}
@@ -164,13 +169,11 @@ fn walk_postman(
     let (url, params) = postman_url(request.get("url"));
     let (body_type, body) = postman_body(request.get("body"), warnings);
     let (pre_script, test_script) = postman_scripts(item);
-    let auth = postman_auth(request.get("auth"), warnings).unwrap_or_else(|| {
-        if inside_folder {
-            AuthConfig::Inherit
-        } else {
-            inherited.clone().unwrap_or(AuthConfig::Inherit)
-        }
-    });
+    // 这一请求自己的 auth 优先；没写才沿用上层。
+    // `noauth` 也会走到这里 —— 它展开成**空**的行，于是显式地把继承切断，
+    // 与旧实现里「显式 none」的语义完全一致。
+    let rows =
+        postman_auth_rows(request.get("auth"), warnings).unwrap_or_else(|| inherited.clone());
 
     let mut draft = RequestDraft {
         name: str_at(item, "name").unwrap_or_default(),
@@ -184,11 +187,12 @@ fn walk_postman(
         headers: postman_headers(request.get("header"), warnings),
         body_type,
         body,
-        auth,
         settings: Default::default(),
         pre_script,
         test_script,
     };
+    // 用户手写的同名列优先（见 `merge_auth_rows`）
+    merge_auth_rows(&mut draft, &rows);
     finalize_draft(&mut draft, warnings);
     Walked::Request(draft)
 }
@@ -506,43 +510,46 @@ fn collect_postman_vars(node: &Value, out: &mut Vec<EnvVarDraft>) {
 // 授权
 // ============================================================
 
-/// Postman 的 auth 与我们 `AuthConfig` 的差异只在**形状**：
-/// Postman 是 `{"type":"bearer","bearer":[{"key":"token","value":"x"}]}`，
-/// 我们是 `{"type":"bearer","token":"x"}`。所以必须翻译一遍，
-/// 不能指望 `from_json` 直接吃下去（吃不下会退化成 Inherit = 授权静默丢失）。
-fn postman_auth(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> Option<AuthConfig> {
+/// Postman 的 auth 被翻译成 reqly 的**行**（请求头 / 查询参数），
+/// 而不是翻译成某个配置对象 —— 这就是「授权不是独立概念」在导入侧的落点。
+///
+/// 形状差异：Postman 是 `{"type":"bearer","bearer":[{"key":"token","value":"x"}]}`，
+/// 有些工具（含 Reqly 自己早期导出的文件）则直接平铺成
+/// `{"type":"bearer","token":"x"}`。两种都由 `auth_param` 统一读出来。
+///
+/// 返回值有两层含义，**别合并**：
+/// * `None` —— 这份文件没在这儿写显式授权 → 沿用上层的行；
+/// * `Some(rows)` —— 写了，就用它，**哪怕 rows 是空的**
+///   （`{"type":"noauth"}` 是「这里明确不要凭据」，它必须能切断继承）。
+fn postman_auth_rows(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> Option<AuthRows> {
     let value = value?;
     if value.is_null() {
         return None;
     }
-    // 有些工具会直接写成我们的形状
-    let direct = AuthConfig::from_json(value);
-    if direct != AuthConfig::Inherit {
-        return Some(direct);
-    }
 
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
-        "noauth" => Some(AuthConfig::None),
-        "bearer" => Some(AuthConfig::Bearer {
-            token: auth_param(value, "bearer", "token").unwrap_or_default(),
-        }),
-        "basic" => Some(AuthConfig::Basic {
-            username: auth_param(value, "basic", "username").unwrap_or_default(),
-            password: auth_param(value, "basic", "password").unwrap_or_default(),
-        }),
-        "apikey" => Some(AuthConfig::ApiKey {
-            key: auth_param(value, "apikey", "key").unwrap_or_default(),
-            value: auth_param(value, "apikey", "value").unwrap_or_default(),
-            location: match auth_param(value, "apikey", "in").as_deref() {
-                Some("query") => ApiKeyLocation::Query,
-                _ => ApiKeyLocation::Header,
-            },
-        }),
+        // 显式「不要凭据」：空行 = 切断继承
+        "noauth" => Some(AuthRows::default()),
+        "bearer" => Some(bearer_rows(
+            auth_param(value, "bearer", "token").unwrap_or_default(),
+        )),
+        "basic" => Some(basic_rows(
+            &auth_param(value, "basic", "username").unwrap_or_default(),
+            &auth_param(value, "basic", "password").unwrap_or_default(),
+        )),
+        "apikey" => Some(api_key_rows(
+            auth_param(value, "apikey", "key").unwrap_or_default(),
+            auth_param(value, "apikey", "value").unwrap_or_default(),
+            auth_param(value, "apikey", "in")
+                .or_else(|| auth_param(value, "apikey", "location"))
+                .as_deref(),
+            warnings,
+        )),
         "" | "inherit" => None,
         other => {
             // digest / oauth2 / hawk / aws… 我们没有对应实现。
-            // 退化成「不注入」并说出来 —— 静默丢掉授权会表现为 401，最难查
+            // 退化成「不注入」并**说出来** —— 静默丢掉授权会表现为 401，最难查
             warnings.push(ImportWarning::simple(
                 WarningKind::UnsupportedField,
                 format!("auth type `{other}` is not supported; dropped"),
@@ -552,18 +559,87 @@ fn postman_auth(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> Opt
     }
 }
 
-/// Postman 的 auth 参数有两种形状：对象 `{"token":"x"}` 或数组 `[{"key":"token","value":"x"}]`
-fn auth_param(value: &Value, group: &str, key: &str) -> Option<String> {
-    let node = value.get(group)?;
-    if let Some(map) = node.as_object() {
-        return map.get(key).map(value_to_string);
+/// `Authorization: Bearer <token>`。
+///
+/// **空 token 也写**（`Bearer ` 尾部一个空格）—— 与 007 迁移同一条判据：
+/// 留着一条看得见的空凭据，比「界面上什么都不显示、请求裸着发出去」强。
+fn bearer_rows(token: String) -> AuthRows {
+    header_row("Authorization", format!("Bearer {token}"))
+}
+
+/// Basic 凭据写成 `{{$basic "U" "P"}}` 模板，与 007 迁移逐字一致。
+///
+/// 不在导入时就算出 base64：模板值里留的是原文，所以界面上能看清用的是
+/// 哪个账号；base64 的展开发生在发送前一刻（见 `template::functions::basic`）。
+///
+/// ⚠️ 用户名 / 密码里若含双引号，写出来的模板会被 `$basic` 解析坏 ——
+/// 转义规则属于模板解析器，不该由导入器自己发明（迁移里也是同样的取舍）。
+fn basic_rows(username: &str, password: &str) -> AuthRows {
+    header_row("Authorization", super::basic_auth_value(username, password))
+}
+
+/// API Key 按 `in` 落到请求头或查询参数。**键名空的一律不写** ——
+/// 与执行层的 `!key.trim().is_empty()` 是同一条判据
+/// （库里的 id=14 就撞在这条上：它本来就一条凭据都不带）。
+fn api_key_rows(
+    key: String,
+    value: String,
+    location: Option<&str>,
+    warnings: &mut Vec<ImportWarning>,
+) -> AuthRows {
+    if key.trim().is_empty() {
+        warnings.push(ImportWarning::simple(
+            WarningKind::UnsupportedField,
+            "api key auth without a key name was dropped".to_string(),
+        ));
+        return AuthRows::default();
     }
-    for entry in node.as_array()? {
-        if entry.get("key").and_then(Value::as_str) == Some(key) {
-            return entry.get("value").map(value_to_string);
+    let row = KeyValueItem::new(key.trim(), value);
+    if location == Some("query") {
+        AuthRows {
+            headers: Vec::new(),
+            params: vec![row],
+        }
+    } else {
+        AuthRows {
+            headers: vec![row],
+            params: Vec::new(),
         }
     }
-    None
+}
+
+fn header_row(name: &str, value: String) -> AuthRows {
+    AuthRows {
+        headers: vec![KeyValueItem::new(name, value)],
+        params: Vec::new(),
+    }
+}
+
+/// 读 auth 里的一个参数。三种形状都认：
+///
+/// * 分组对象 —— `{"bearer":{"token":"x"}}`
+/// * 分组数组 —— `{"bearer":[{"key":"token","value":"x"}]}`（Postman 官方）
+/// * 平铺 —— `{"token":"x"}`（有些工具，以及 Reqly 自己早期导出的文件）
+///
+/// 平铺那一支是**兜底而不是首选**：先看分组，分组里没有再往上找。
+/// 少了它，那些文件里的凭据会整条静默消失（表现为 401，最难查）。
+fn auth_param(value: &Value, group: &str, key: &str) -> Option<String> {
+    if let Some(node) = value.get(group) {
+        if let Some(map) = node.as_object() {
+            if let Some(found) = map.get(key) {
+                return Some(value_to_string(found));
+            }
+        } else if let Some(entries) = node.as_array() {
+            for entry in entries {
+                if entry.get("key").and_then(Value::as_str) == Some(key) {
+                    if let Some(found) = entry.get("value") {
+                        return Some(value_to_string(found));
+                    }
+                }
+            }
+        }
+    }
+    value.get(key).map(value_to_string)
 }
 
 // ============================================================
@@ -654,11 +730,15 @@ fn apipost_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Option<Re
         headers: apipost_headers(item.get("headers").or_else(|| item.get("header"))),
         body_type,
         body,
-        auth: apipost_auth(item.get("auth"), warnings).unwrap_or(AuthConfig::Inherit),
         settings: Default::default(),
         pre_script,
         test_script,
     };
+    // apipost 原生的 auth 也展开成行，落点规则与 Postman 完全一致
+    merge_auth_rows(
+        &mut draft,
+        &apipost_auth_rows(item.get("auth"), warnings).unwrap_or_default(),
+    );
     finalize_draft(&mut draft, warnings);
     Some(draft)
 }
@@ -784,14 +864,15 @@ fn apipost_params_to_json(parameters: Option<&[Value]>) -> String {
     Value::Object(map).to_string()
 }
 
-fn apipost_auth(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> Option<AuthConfig> {
+/// apipost 的 auth 与 Postman 的走**同一套「行」翻译** —— 差别只在
+/// 分组名的拼写（`bearer_token` / `api_key` / `addTo` 之类）。
+///
+/// 所以这里只做「字段名映射」，行的构造复用上面那三个函数：
+/// 凭据的落点规则（空键名不写、query / header 分流）只存在一份。
+fn apipost_auth_rows(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> Option<AuthRows> {
     let value = value?;
     if value.is_null() {
         return None;
-    }
-    let direct = AuthConfig::from_json(value);
-    if direct != AuthConfig::Inherit {
-        return Some(direct);
     }
     // apipost 把参数放在 `auth` 下的分组名里，分组名的拼写有几种
     let kind = value
@@ -800,26 +881,21 @@ fn apipost_auth(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> Opt
         .unwrap_or("")
         .to_ascii_lowercase();
     match kind.as_str() {
-        "noauth" | "none" => Some(AuthConfig::None),
-        "bearer" | "bearer_token" => Some(AuthConfig::Bearer {
-            token: auth_param_any(value, &["bearer", "bearer_token"], &["token", "value"])
+        "noauth" | "none" => Some(AuthRows::default()),
+        "bearer" | "bearer_token" => Some(bearer_rows(
+            auth_param_any(value, &["bearer", "bearer_token"], &["token", "value"])
                 .unwrap_or_default(),
-        }),
-        "basic" => Some(AuthConfig::Basic {
-            username: auth_param_any(value, &["basic"], &["username", "user"]).unwrap_or_default(),
-            password: auth_param_any(value, &["basic"], &["password", "pass"]).unwrap_or_default(),
-        }),
-        "apikey" | "api_key" => Some(AuthConfig::ApiKey {
-            key: auth_param_any(value, &["apikey", "api_key"], &["key", "name"])
-                .unwrap_or_default(),
-            value: auth_param_any(value, &["apikey", "api_key"], &["value"]).unwrap_or_default(),
-            location: match auth_param_any(value, &["apikey", "api_key"], &["in", "addTo"])
-                .as_deref()
-            {
-                Some("query") => ApiKeyLocation::Query,
-                _ => ApiKeyLocation::Header,
-            },
-        }),
+        )),
+        "basic" => Some(basic_rows(
+            &auth_param_any(value, &["basic"], &["username", "user"]).unwrap_or_default(),
+            &auth_param_any(value, &["basic"], &["password", "pass"]).unwrap_or_default(),
+        )),
+        "apikey" | "api_key" => Some(api_key_rows(
+            auth_param_any(value, &["apikey", "api_key"], &["key", "name"]).unwrap_or_default(),
+            auth_param_any(value, &["apikey", "api_key"], &["value"]).unwrap_or_default(),
+            auth_param_any(value, &["apikey", "api_key"], &["in", "addTo"]).as_deref(),
+            warnings,
+        )),
         "" | "inherit" => None,
         other => {
             warnings.push(ImportWarning::simple(
@@ -977,7 +1053,6 @@ fn apipost_export_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Op
         headers: apipost_export_kv_list(request.get("header")),
         body_type,
         body,
-        auth: AuthConfig::Inherit,
         settings: Default::default(),
         pre_script,
         test_script,
@@ -1383,13 +1458,15 @@ mod tests {
     }
 
     #[test]
-    fn postman_bearer_auth_is_translated() {
+    fn postman_bearer_auth_becomes_an_authorization_header() {
         let bundle = postman(COLLECTION);
+        let header = bundle.folders[0].requests[1]
+            .headers
+            .iter()
+            .find(|h| h.key.eq_ignore_ascii_case("authorization"))
+            .expect("Bearer 必须落成一条 Authorization 头");
         assert_eq!(
-            bundle.folders[0].requests[1].auth,
-            AuthConfig::Bearer {
-                token: "{{token.access}}".to_string()
-            },
+            header.value, "Bearer {{token.access}}",
             "占位符要原样保留，不能展开"
         );
     }
@@ -1440,6 +1517,11 @@ mod tests {
         assert_eq!(bundle.requests[0].url, "https://x/y");
     }
 
+    /// 集合级授权在**解析时**就被拍成请求上的行。
+    ///
+    /// 旧实现把它物化到顶层文件夹的 `auth` 列，靠落库后的继承链解析；
+    /// 007 之后文件夹不持有授权配置了，所以物化必须直接落到请求身上 ——
+    /// 否则这份文件的凭据会在导入后静默消失（表现为 401，最难查）。
     #[test]
     fn postman_folder_auth_is_materialized_down_the_tree() {
         let text = r#"{
@@ -1453,22 +1535,27 @@ mod tests {
         }"#;
         let bundle = postman(text);
         let folder = &bundle.folders[0];
+
+        let header_names = |draft: &RequestDraft| -> Vec<String> {
+            draft
+                .headers
+                .iter()
+                .map(|h| format!("{}: {}", h.key, h.value))
+                .collect()
+        };
+
         assert_eq!(
-            folder.auth,
-            Some(AuthConfig::Bearer {
-                token: "collection-token".to_string()
-            }),
-            "集合级授权要物化到顶层文件夹，否则落库后就丢了"
+            header_names(&folder.requests[0]),
+            vec!["Authorization: Bearer collection-token".to_string()],
+            "集合级授权要一路物化到请求上"
         );
-        assert_eq!(folder.requests[0].auth, AuthConfig::Inherit);
-        assert_eq!(
-            folder.requests[1].auth,
-            AuthConfig::None,
-            "显式 noauth 不能继承"
+        assert!(
+            header_names(&folder.requests[1]).is_empty(),
+            "显式 noauth 必须切断继承"
         );
     }
 
-    /// 没有文件夹时，集合级授权必须 inline 进根级请求
+    /// 没有文件夹时，集合级授权同样落到根级请求上
     #[test]
     fn postman_collection_auth_inlines_into_root_requests() {
         let text = r#"{
@@ -1477,12 +1564,14 @@ mod tests {
           "item":[ { "name":"a","request":{"url":"https://x/a"} } ]
         }"#;
         let bundle = postman(text);
+        let header = bundle.requests[0]
+            .headers
+            .iter()
+            .find(|h| h.key.eq_ignore_ascii_case("authorization"))
+            .expect("集合级 Basic 必须落到请求上");
         assert_eq!(
-            bundle.requests[0].auth,
-            AuthConfig::Basic {
-                username: "u".to_string(),
-                password: "p".to_string()
-            }
+            header.value, r#"{{$basic "u" "p"}}"#,
+            "密码不留成明文，展开发生在发送前一刻"
         );
     }
 
@@ -1490,7 +1579,10 @@ mod tests {
     fn postman_unsupported_auth_warns_instead_of_silently_dropping() {
         let text = r#"{"info":{"name":"c"},"item":[{"name":"a","request":{"url":"https://x/a","auth":{"type":"oauth2"}}}]}"#;
         let bundle = postman(text);
-        assert_eq!(bundle.requests[0].auth, AuthConfig::Inherit);
+        assert!(
+            bundle.requests[0].headers.is_empty(),
+            "认不出的授权不该凭空造出一条凭据"
+        );
         assert!(bundle
             .warnings
             .iter()
@@ -1593,12 +1685,12 @@ mod tests {
         assert_eq!(draft.body_type, "json");
         assert_eq!(draft.headers[0].key, "content-type");
         assert_eq!(draft.pre_script, "console.log(1)");
-        assert_eq!(
-            draft.auth,
-            AuthConfig::Bearer {
-                token: "{{token.access}}".to_string()
-            }
-        );
+        let auth_header = draft
+            .headers
+            .iter()
+            .find(|h| h.key.eq_ignore_ascii_case("authorization"))
+            .expect("apipost 的 bearer 必须落到请求头上");
+        assert_eq!(auth_header.value, "Bearer {{token.access}}");
         assert_eq!(bundle.environments[0].vars[0].key, "host");
     }
 

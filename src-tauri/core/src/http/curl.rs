@@ -25,20 +25,22 @@
 //!   `Content-Type`（boundary 必须由发送方现生成，手写的那条注定对不上），
 //!   这里跟着删才与真实请求一致。
 //!
-//! ## 但**判据**上不许有分歧
+//! ## 凭据已经是普通请求头（007 迁移之后）
 //!
-//! 上面三处都是在「多写一点还是少写一点」上做取舍。授权那边不是同一类事：
+//! 这里曾经有一段「授权必须单独拼一次」的逻辑，以及一条专门的回归：
 //! `token` 是空串时执行层照发不误（`bearer_auth("")` → 值为 `"Bearer "` 的合法头），
-//! 生成端却曾经判空把它整个丢掉 —— 于是面板上少掉唯一能解释那次 401 的一行，
-//! 而用户是拿着这份面板去找原因的（2026-09-17 真实踩到，见
-//! `an_empty_bearer_is_written_out_rather_than_dropped`）。
-//! **同一件事的两条路，判据必须相同**：宁可多写一条值为空的头，
-//! 也不能让面板比真实请求更干净。
+//! 生成端却判空把它整个丢掉 —— 于是面板上少掉唯一能解释那次 401 的一行
+//! （2026-09-17 真实踩到）。
+//!
+//! 现在这条分叉**在结构上不存在了**：凭据就是 `spec.headers` 里的一行，
+//! 生成端与执行端读的是同一个数组、走的是同一段循环。判据想分歧都没地方分歧。
+//! 空值的 `Authorization` 依然会被照实写出来 —— 那只是「一个值为空的头」，
+//! 不需要任何特殊照顾。
 
-use super::execute::{apply_query_params, form_fields_from_body, parse_url, query_auth_pair};
+use super::execute::{apply_query_params, form_fields_from_body, parse_url};
 use super::RequestSpec;
 use crate::redact;
-use crate::storage::models::{ApiKeyLocation, AuthConfig, BodyType, KeyValueItem};
+use crate::storage::models::{BodyType, KeyValueItem};
 
 /// 把一份请求拼成可执行的 curl 命令。
 ///
@@ -53,20 +55,10 @@ pub fn to_curl(spec: &RequestSpec, mask_secrets: bool) -> String {
     // 表现是「粘出去的 curl 打的是另一个接口」—— 方法错了，401 与 200 都无法解释。
     parts.push(format!("-X {}", spec.method.trim().to_ascii_uppercase()));
 
-    parts.push(quote(&build_url(spec, mask_secrets)));
+    parts.push(quote(&build_url(spec)));
 
     for line in header_lines(spec, mask_secrets) {
         parts.push(format!("-H {}", quote(&line)));
-    }
-
-    if let AuthConfig::Basic { username, password } = &spec.auth {
-        let password = if mask_secrets {
-            redact::MASK
-        } else {
-            password.as_str()
-        };
-        // 用户名不打码：核对「是不是发错了账号」时它是有用信息，而它本身不是凭据
-        parts.push(format!("-u {}", quote(&format!("{username}:{password}"))));
     }
 
     parts.extend(body_args(spec));
@@ -97,11 +89,14 @@ pub fn to_curl(spec: &RequestSpec, mask_secrets: bool) -> String {
     parts.join(" \\\n  ")
 }
 
-/// 拼最终 URL（params + query 形态的 API Key）。
+/// 拼最终 URL（`params`）。
 ///
-/// 复用执行层的两个函数而不是自己拼字符串：`?`、`#`、中文、重复 key 的编码差异
+/// 复用执行层的函数而不是自己拼字符串：`?`、`#`、中文、重复 key 的编码差异
 /// 会让这条命令与真实请求指向不同的地址，而这个面板的全部价值就是「一模一样」。
-fn build_url(spec: &RequestSpec, mask_secrets: bool) -> String {
+///
+/// 放在 query 里的凭据（`?api_key=…`）不需要单独一支 —— 它就是 `spec.params`
+/// 里的一行，上面那次 `apply_query_params` 已经把它算进去了。
+fn build_url(spec: &RequestSpec) -> String {
     let Ok(mut url) = parse_url(spec.url.trim()) else {
         // 解析不了（占位符没解析出来、或用户还没填完）→ 原样给出。
         // 这时显示原文比显示一个我们改写过「更像样」的版本有用。
@@ -109,14 +104,14 @@ fn build_url(spec: &RequestSpec, mask_secrets: bool) -> String {
     };
 
     apply_query_params(&mut url, &spec.params);
-    if let Some((key, value)) = query_auth_pair(&spec.auth) {
-        let value = if mask_secrets { redact::MASK } else { value };
-        url.query_pairs_mut().append_pair(key, value);
-    }
     url.to_string()
 }
 
-/// 请求头行（`name: value`），含授权与缺省 `Content-Type`。
+/// 请求头行（`name: value`），含凭据头与缺省 `Content-Type`。
+///
+/// 凭据没有单独一支：`Authorization` / `X-Api-Key` / … 就是 `spec.headers`
+/// 里的普通一行，这段循环天然把它们写出来了（值的打码走 [`redact::mask_value`]
+/// 的按头名判定，也早就覆盖了这些名字）。
 fn header_lines(spec: &RequestSpec, mask_secrets: bool) -> Vec<String> {
     let multipart = matches!(spec.body_type, BodyType::Form);
 
@@ -143,38 +138,6 @@ fn header_lines(spec: &RequestSpec, mask_secrets: bool) -> Vec<String> {
             item.value.clone()
         };
         out.push(format!("{name}: {value}"));
-    }
-
-    match &spec.auth {
-        // 🔴 **不判空**，空的也照实写出来。执行层（`execute::execute_inner`）把
-        // `Bearer` 无条件交给 reqwest，而 `bearer_auth("")` 生成的是值为
-        // `"Bearer "` 的**合法头** —— 真发出去的请求带的就是这么一条空凭据，
-        // 服务端据此回 401。这里要是判空丢掉，面板上就少掉唯一能解释这次 401 的
-        // 那一行，而这个面板存在的全部理由就是「显示真实发出去的那串值」。
-        // 判据一旦与执行层不同，用户会拿着一份不完整的事实去怀疑一个不存在的 bug。
-        AuthConfig::Bearer { token } => {
-            let value = if mask_secrets {
-                redact::MASK.to_string()
-            } else {
-                token.clone()
-            };
-            out.push(format!("Authorization: Bearer {value}"));
-        }
-        AuthConfig::ApiKey {
-            key,
-            value,
-            location: ApiKeyLocation::Header,
-        } if !key.trim().is_empty() => {
-            let value = if mask_secrets {
-                redact::mask_value(key, value)
-            } else {
-                value.clone()
-            };
-            out.push(format!("{}: {value}", key.trim()));
-        }
-        // `inherit` 到这一步还没解析开是不该发生的（流水线负责解开）；
-        // 真出现了就什么都不加，绝不猜一个出来。`None` 同理 —— 它表示「不注入」。
-        _ => {}
     }
 
     if !has_content_type && !multipart {
@@ -290,7 +253,6 @@ mod tests {
             headers: Vec::new(),
             body_type: BodyType::None,
             body: String::new(),
-            auth: AuthConfig::None,
             settings: RequestSettings {
                 // 测试大多不关心重定向与超时，钉住它们才能让断言只反映被测的那一项
                 follow_redirects: false,
@@ -339,71 +301,78 @@ mod tests {
         assert!(!curl.contains("dropped"), "未勾选的参数不该出现：{curl}");
     }
 
+    /// 凭据头照原样写出。
+    ///
+    /// 007 之后 `Authorization` / `X-Api-Key` 就是普通请求头（快捷插入按钮
+    /// 只是把那一行填进去，不留任何隐藏状态），所以这条断言钉的是
+    /// 「生成端不动它」—— 不改大小写、不加前缀、不因为名字特殊就另走一条路。
     #[test]
-    fn bearer_token_becomes_an_authorization_header() {
+    fn a_credential_header_is_written_out_verbatim() {
         let mut s = spec();
-        s.auth = AuthConfig::Bearer {
-            token: "eyJhbGciOi.abc".into(),
-        };
+        s.headers = vec![
+            KeyValueItem::new("Authorization", "Bearer opaque-1"),
+            KeyValueItem::new("X-Api-Key", "k-123"),
+        ];
+
+        let curl = to_curl(&s, false);
+        assert!(curl.contains("'Authorization: Bearer opaque-1'"), "{curl}");
+        assert!(curl.contains("'X-Api-Key: k-123'"), "{curl}");
+    }
+
+    /// 值为空的凭据头**照实写出来**，绝不静默丢掉。
+    ///
+    /// 这条是 2026-09-17 真实踩出来的：实测原始请求里就带着
+    /// `authorization: Bearer `（尾部一个空格，`bearer_auth("")` 的产物），
+    /// 而生成端当时判空把它整个丢了 —— 面板于是比真实请求「更干净」，
+    /// 用户拿着这份不完整的事实去找了一个不存在的 bug。
+    ///
+    /// 007 之后这条分叉**在结构上消失**（凭据就是 `headers` 里的一行，
+    /// 走的是和最普通的头完全一样的循环），但断言留着 ——
+    /// 它守的是一条判据：**面板不许比真实请求更干净**。
+    #[test]
+    fn an_empty_credential_header_is_still_written_out() {
+        let mut s = spec();
+        s.headers = vec![KeyValueItem::new("Authorization", "Bearer ")];
 
         let curl = to_curl(&s, false);
         assert!(
-            curl.contains("'Authorization: Bearer eyJhbGciOi.abc'"),
+            curl.contains("'Authorization: Bearer '"),
+            "值为空的凭据头也必须出现：{curl}"
+        );
+    }
+
+    /// Basic 凭据也是请求头，**没有** `-u` 这个独立开关了。
+    ///
+    /// 以前这里会生成 `-u user:pass`，那是 curl 自己的一个参数、也是导出面板上
+    /// 唯一的第二条凭据通道。现在 `{{$basic "U" "P"}}` 在**发送前**就展开成
+    /// `Authorization: Basic <base64>` —— 面板上看到的就是真发出去的那一条。
+    #[test]
+    fn basic_credentials_go_out_as_a_precomputed_header() {
+        let mut s = spec();
+        // base64("alice:s3cr3t")
+        s.headers = vec![KeyValueItem::new("Authorization", "Basic YWxpY2U6czNjcjN0")];
+
+        let curl = to_curl(&s, false);
+        assert!(
+            curl.contains("'Authorization: Basic YWxpY2U6czNjcjN0'"),
             "{curl}"
         );
+        assert!(!curl.contains(" -u "), "不该再有独立的 -u 开关：{curl}");
     }
 
-    /// 空的 Bearer **照实写出来**，绝不静默丢掉。
+    /// 放在 query 里的凭据**只**出现在 URL 上，不会同时变成请求头。
     ///
-    /// 执行层不判空（`bearer_auth("")` 生成的是值为 `"Bearer "` 的合法头），
-    /// 真发出去的请求确实带着一条空凭据 —— 实测过，原始请求头就是
-    /// `authorization: Bearer `（尾部一个空格）。这里判空丢掉的话，
-    /// 「面板显示的」和「真实发出的」就说不到一起，而用户打开这个面板的
-    /// 动机恰恰是解释一个已经发生的 401：少掉那一行，等于让他去找一个
-    /// 不存在的 bug（2026-09-17 真实踩到）。
-    ///
-    /// 这条测试钉的是**两边判据必须一致**，不是「空值好看不好看」。
+    /// 007 之后它就是 `params` 里的一行，而 `header_lines` 只读 `headers` ——
+    /// 「两边各发一遍」在结构上不可能。以前那种「凭据走自己的支路、
+    /// 由两处代码各自决定写哪儿」的写法，正是这类重复发送的温床。
     #[test]
-    fn an_empty_bearer_is_written_out_rather_than_dropped() {
+    fn a_credential_param_lands_in_the_url_not_in_headers() {
         let mut s = spec();
-        s.auth = AuthConfig::Bearer {
-            token: String::new(),
-        };
-
-        let curl = to_curl(&s, false);
-        assert!(
-            curl.contains("Authorization: Bearer '"),
-            "空 token 也必须照实写出来（尾部是那个空值），否则面板会撒谎：{curl}"
-        );
-    }
-
-    #[test]
-    fn basic_auth_uses_the_user_flag() {
-        let mut s = spec();
-        s.auth = AuthConfig::Basic {
-            username: "alice".into(),
-            password: "s3cr3t".into(),
-        };
-
-        let curl = to_curl(&s, false);
-        assert!(curl.contains("-u 'alice:s3cr3t'"), "{curl}");
-    }
-
-    #[test]
-    fn api_key_in_query_lands_in_the_url_not_in_headers() {
-        let mut s = spec();
-        s.auth = AuthConfig::ApiKey {
-            key: "api_key".into(),
-            value: "v1".into(),
-            location: ApiKeyLocation::Query,
-        };
+        s.params = vec![KeyValueItem::new("api_key", "v1")];
 
         let curl = to_curl(&s, false);
         assert!(curl.contains("api_key=v1"), "{curl}");
-        assert!(
-            !curl.contains("-H 'api_key"),
-            "query 形态不该变成请求头：{curl}"
-        );
+        assert!(!curl.contains("-H 'api_key"), "不该出现在请求头里：{curl}");
     }
 
     #[test]
@@ -514,17 +483,24 @@ mod tests {
         assert!(curl.contains("-x 'http://127.0.0.1:7890'"), "{curl}");
     }
 
+    /// 打码只换值、不换名字，也不动普通头。
+    ///
+    /// ⚠️ 打的是**整条值**，`Bearer ` 这个前缀也不留。以前凭据走的是自己那条支路，
+    /// 那里只把 token 换掉、前缀是代码写死的所以留了下来；现在凭据就是普通请求头，
+    /// 走的是和 `Set-Cookie` 一样的那条规则（[`crate::redact`]），
+    /// 保留前缀就得为「凭据头」再开一个特例 —— 而判据一多，
+    /// 下一次漏掉的就是新加的那个头。方向上宁可多打。
     #[test]
     fn masking_hides_credentials_but_keeps_ordinary_headers() {
         let mut s = spec();
-        s.headers = vec![KeyValueItem::new("X-Request-Id", "trace-1")];
-        s.auth = AuthConfig::Bearer {
-            token: "super-secret".into(),
-        };
+        s.headers = vec![
+            KeyValueItem::new("X-Request-Id", "trace-1"),
+            KeyValueItem::new("Authorization", "Bearer super-secret"),
+        ];
 
         let curl = to_curl(&s, true);
         assert!(!curl.contains("super-secret"), "凭据不能出现：{curl}");
-        assert!(curl.contains("'Authorization: Bearer ••••'"), "{curl}");
+        assert!(curl.contains("'Authorization: ••••'"), "{curl}");
         assert!(
             curl.contains("'X-Request-Id: trace-1'"),
             "普通头不该被打码：{curl}"
@@ -570,7 +546,6 @@ mod tests {
             headers: draft.headers,
             body_type: BodyType::parse(&draft.body_type),
             body: draft.body,
-            auth: draft.auth,
             settings: draft.settings,
             folder_id: None,
             form_fields: Vec::new(),
@@ -606,21 +581,19 @@ mod tests {
         // ② Bearer + JSON body
         let mut post = spec();
         post.method = "POST".into();
-        post.headers = vec![KeyValueItem::new("Accept", "application/json")];
+        post.headers = vec![
+            KeyValueItem::new("Accept", "application/json"),
+            KeyValueItem::new("Authorization", "Bearer opaque-1"),
+        ];
         post.body_type = BodyType::Json;
         post.body = r#"{"name":"张三","tags":["a","b"]}"#.into();
-        post.auth = AuthConfig::Bearer {
-            token: "eyJhbGciOi.abc".into(),
-        };
         assert_round_trip(&post, "Bearer + JSON");
 
         // ③ Basic 认证走 `-u`
         let mut basic = spec();
         basic.method = "POST".into();
-        basic.auth = AuthConfig::Basic {
-            username: "alice".into(),
-            password: "s3cr3t".into(),
-        };
+        // base64("alice:s3cr3t")：`{{$basic}}` 展开之后就是这个样子
+        basic.headers = vec![KeyValueItem::new("Authorization", "Basic YWxpY2U6czNjcjN0")];
         basic.body_type = BodyType::Urlencoded;
         basic.body = "grant_type=password&scope=all".into();
         assert_round_trip(&basic, "Basic + urlencoded");
@@ -650,12 +623,10 @@ mod tests {
 
         // ⑥ query 形态的 API Key
         let mut api_key = spec();
-        api_key.auth = AuthConfig::ApiKey {
-            key: "api_key".into(),
-            value: "v1".into(),
-            location: ApiKeyLocation::Query,
-        };
-        api_key.params = vec![KeyValueItem::new("page", "1")];
+        api_key.params = vec![
+            KeyValueItem::new("page", "1"),
+            KeyValueItem::new("api_key", "v1"),
+        ];
         assert_round_trip(&api_key, "query API Key");
 
         // ⑦ 全部设置项都开
@@ -678,8 +649,10 @@ mod tests {
         s.method = "POST".into();
         s.body_type = BodyType::Json;
         s.body = r#"{"a":1}"#.into();
-        s.headers = vec![KeyValueItem::new("X-Request-Id", "trace-1")];
-        s.auth = AuthConfig::Bearer { token: "t".into() };
+        s.headers = vec![
+            KeyValueItem::new("X-Request-Id", "trace-1"),
+            KeyValueItem::new("Authorization", "Bearer t"),
+        ];
 
         let plain = to_curl(&s, false);
         let masked = to_curl(&s, true);

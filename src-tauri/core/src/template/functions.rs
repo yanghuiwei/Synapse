@@ -107,6 +107,7 @@ pub fn evaluate(expr: &str, now: &DateTime<Local>, entropy: &mut Entropy) -> Opt
         "$timestampMs" => no_args(args).then(|| now.timestamp_millis().to_string()),
         "$randomInt" => no_args(args).then(|| entropy.int_inclusive(RANDOM_INT_MAX).to_string()),
         "$datetime" => datetime(args, now),
+        "$basic" => basic(args),
         _ => None,
     }
 }
@@ -165,6 +166,96 @@ fn unquote(args: &str) -> Option<&str> {
         return Some(&args[1..args.len() - 1]);
     }
     None
+}
+
+/// `$basic "user" "pass"` → `Basic dXNlcjpwYXNz`。
+///
+/// 存在的理由只有一个：Basic 的全部麻烦就是那个 base64。把这一个知识点收进
+/// 函数名之后，「授权」就不必再是一种独立的**类型**了 ——
+/// `Authorization: {{$basic "u" "p"}}` 与 `Authorization: Bearer {{token.access}}`
+/// 是同一张表里的两行，没有类型，也就没有「类型和头不一致」这种可能。
+///
+/// ## 只吃字面量，不吃命名空间
+///
+/// `{{$basic env.API_USER env.API_PASS}}` **不被支持**：那要求函数参数能做
+/// 命名空间引用，而现在 `evaluate` 拿不到 `TemplateContext`（它只收 now /
+/// entropy）。这是设计稿 §7「待定点」里明确留的降级方案 ——
+/// 功能等效，代价是密码只能写在请求里。
+///
+/// ⚠️ 关键在**失败方式**：不支持的写法返回 `None`，于是调用方**原样保留
+/// 占位符并记一条警告**（见 `evaluate` 的返回约定）。绝不会因为「猜了个边界」
+/// 而拼出一段看起来像凭据、实际是垃圾的字符串发到服务端。
+fn basic(args: &str) -> Option<String> {
+    let (user, pass) = split_two_quoted(args)?;
+    Some(format!(
+        "Basic {}",
+        base64(&[user.as_bytes(), b":", pass.as_bytes()].concat())
+    ))
+}
+
+/// 拆出两个成对的引号参数：`"u" "p"` → `("u", "p")`。
+///
+/// 刻意只认「两个成对引号 + 中间可有空白 + 后面没别的」这一种形状，
+/// 其余一律 `None`。理由同 [`unquote`]：参数里可以有空格，没有引号就定不了边界，
+/// 而猜错边界的输出会**原样发到服务端**。
+///
+/// 两个引号必须是同一种；**不支持转义** —— 没有转义规则时，
+/// 密码里含引号会落进 `None` 分支（原样保留 + 警告），而不是被悄悄截断。
+fn split_two_quoted(args: &str) -> Option<(String, String)> {
+    let rest = args.trim_start();
+    let quote = *rest.as_bytes().first()?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+
+    let after_open = &rest[1..];
+    let close = after_open.find(quote as char)?;
+    let user = &after_open[..close];
+
+    let rest = after_open[close + 1..].trim_start();
+    if *rest.as_bytes().first()? != quote {
+        return None;
+    }
+    let after_open = &rest[1..];
+    let close = after_open.find(quote as char)?;
+    let pass = &after_open[..close];
+
+    if !after_open[close + 1..].trim().is_empty() {
+        return None;
+    }
+    Some((user.to_string(), pass.to_string()))
+}
+
+/// 标准 base64：`A–Za–z0–9+/` 字母表，带 `=` 填充。
+///
+/// 自己写而不是引 crate：为这十几行加一个依赖的代价是 `Cargo.lock` 变动
+/// 外加一次联网拉包，而这台机器上 cargo 走网络会被一个来路不明的代理卡死
+/// （见 `refs/rust.md`）。输入也只有 `user:pass` 这种短串，不值得为性能选库。
+///
+/// ⚠️ 这里**不许**被当成加解密用 —— base64 只是编码，Basic 凭据在网络上
+/// 本来就要靠 TLS 保护。
+fn base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).copied().map(u32::from);
+        let b2 = chunk.get(2).copied().map(u32::from);
+        let n = (b0 << 16) | (b1.unwrap_or(0) << 8) | b2.unwrap_or(0);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if b1.is_some() {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if b2.is_some() {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -230,6 +321,85 @@ mod tests {
         assert!(evaluate("$datetime %Y", &now, &mut e).is_none());
         // 空格式串
         assert!(evaluate("$datetime ''", &now, &mut e).is_none());
+    }
+
+    /// `$basic` 存在的唯一理由就是那个 base64。
+    /// 期望值都与 Python `base64.b64encode(...)` 对齐过。
+    #[test]
+    fn basic_encodes_user_and_password_with_a_colon_between() {
+        let now = clock();
+        let mut e = entropy();
+
+        assert_eq!(
+            evaluate(r#"$basic "user" "pass""#, &now, &mut e).unwrap(),
+            "Basic dXNlcjpwYXNz"
+        );
+        assert_eq!(
+            evaluate(r#"$basic "apiUser" "apiPass""#, &now, &mut e).unwrap(),
+            "Basic YXBpVXNlcjphcGlQYXNz"
+        );
+        // 单引号也认
+        assert_eq!(
+            evaluate("$basic 'user' 'pass'", &now, &mut e).unwrap(),
+            "Basic dXNlcjpwYXNz"
+        );
+        // 空密码必须留下那个冒号，`=` 填充一个都不能省
+        assert_eq!(
+            evaluate(r#"$basic "u" """#, &now, &mut e).unwrap(),
+            "Basic dTo="
+        );
+        // 用户名里带冒号是合法的：Basic 只按**第一个**冒号切分
+        assert_eq!(
+            evaluate(r#"$basic "a:b" "c""#, &now, &mut e).unwrap(),
+            "Basic YTpiOmM="
+        );
+    }
+
+    /// 不支持的形状必须返回 `None`（调用方原样保留 + 警告）。
+    /// 绝不能猜一个边界、然后拼出一段**看起来像凭据**的垃圾发到服务端 ——
+    /// 那是「配置全对、就是没用上」这类 401 的经典来源。
+    #[test]
+    fn basic_rejects_anything_that_is_not_two_literal_quotes() {
+        let now = clock();
+        let mut e = entropy();
+
+        for expr in [
+            // 命名空间引用：设计稿 §7 明确留作降级方案，当前「不支持」
+            "$basic env.API_USER env.API_PASS",
+            // 只给了一半
+            r#"$basic "u""#,
+            // 尾巴上还有东西
+            r#"$basic "u" "p" extra"#,
+            // 没加引号 —— 参数里能有空格，不加引号定不了边界
+            "$basic u p",
+            // 两个引号不是同一种
+            r#"$basic "u" 'p'"#,
+            // 没有参数
+            "$basic",
+        ] {
+            assert!(
+                evaluate(expr, &now, &mut e).is_none(),
+                "`{expr}` 不该被当成合法的 $basic"
+            );
+        }
+    }
+
+    /// base64 的边界：长度 1 / 2 / 3 的尾块分别出 2 / 3 / 4 个字符。
+    /// 填充位算错会得到一个**长度也对、看着也像**的错串，最难查。
+    #[test]
+    fn base64_pads_each_remainder_correctly() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // 字母表里最大的两个下标（`+` = 62、`/` = 63）要真的取到：
+        // 写成 URL-safe 变体（`-_`）时，普通 Basic 头会被服务端判成非法
+        assert_eq!(base64(&[0xfb, 0xf0]), "+/A=");
+        assert_eq!(base64(&[0xff, 0xff, 0xff]), "////");
+        assert_eq!(base64(&[0x00, 0x00, 0x00]), "AAAA");
     }
 
     #[test]

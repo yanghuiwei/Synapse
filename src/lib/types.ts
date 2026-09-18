@@ -46,27 +46,16 @@ export type HttpVersion = "auto" | "http1" | "http2";
 
 export type ExpiryUnit = "seconds" | "millis" | "absolute";
 
-/** API Key 注入到哪儿 */
-export type ApiKeyLocation = "header" | "query";
-
-/**
- * 授权配置，与 Rust 的 `storage::models::AuthConfig` 一一对应。
- *
- * 内部标签枚举（`type` 字段判别），变体名两边都是 camelCase。
- *
- * `inherit` 的语义是「沿文件夹链向上找最近的非 inherit 配置」，由后端在
- * 发送时解析（`http::pipeline`）—— 前端只负责显示「继承自哪里」。
- *
- * ⚠️ **前端的 `Record<string, unknown>` 时代结束了**：老库里存的是 `{}`，
- * 后端把它宽松解析成 `inherit`（见 `AuthConfig::from_json`）。前端这边
- * `schemas.ts` 同样给了兜底，读到认不出的形状就退回 `inherit`。
- */
-export type AuthConfig =
-  | { type: "inherit" }
-  | { type: "none" }
-  | { type: "bearer"; token: string }
-  | { type: "basic"; username: string; password: string }
-  | { type: "apiKey"; key: string; value: string; location: ApiKeyLocation };
+// 🔴 这里**没有「授权」这个东西**。
+//
+// 迁移 007 之后，「授权」不再是独立概念 —— 它就是请求头（少数情况是查询参数）
+// 里的一行。Bearer / Basic / API Key 不是三种*类型*，只是请求头页上三个
+// 快捷插入按钮（省得用户自己去拼 `Bearer ` 前缀或算 base64）。
+//
+// 所以本文件里搜 `AuthConfig` 一无所获是**对的**，不是漏改。
+// 唯一还带「授权」味的东西是导入器：外部格式（Postman / curl）的 auth 在
+// **解析时**就被翻译成了 headers 行（见 Rust `importer::AuthRows`），
+// 落库的永远是普通的键值对。
 
 /** 逐请求的发送设置，对应 `request.settings` JSON 列 */
 export interface RequestSettings {
@@ -109,13 +98,6 @@ export interface Folder {
    * Token 来源就配在它下面，所以它同时也是 Token 分组。
    */
   isSystem: boolean;
-  /**
-   * 这个分类给其下所有请求提供的授权（P4）。
-   *
-   * 之所以放在**分类**上：一个团队的内网接口往往共用一套 Bearer，
-   * 逐请求配一遍就是逐请求写错一遍的机会。
-   */
-  auth: AuthConfig;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -160,7 +142,6 @@ export interface ApiRequest {
    * 会把上一种表格的行原样带过去，而用户以为那是 form 的内容。
    */
   formFields: KeyValueItem[];
-  auth: AuthConfig;
   settings: RequestSettings;
   preScript: string;
   testScript: string;
@@ -308,6 +289,13 @@ export interface RequestSpec {
   method: string;
   url: string;
   params: KeyValueItem[];
+  /**
+   * 请求头。**凭据就住在这里**（007 之后没有单独的「授权」字段了）——
+   * `Authorization: Bearer xxx`、`X-Api-Key: xxx` 都只是这个数组里的一行。
+   *
+   * 值里可以写 `{{$basic "u" "p"}}`（发送时展开成 base64），
+   * 也可以写 `{{token.xxx}}` 引 Token 来源。
+   */
   headers: KeyValueItem[];
   bodyType: BodyType;
   body: string;
@@ -335,13 +323,12 @@ export interface RequestSpec {
    * 而不是让整条历史记录打不开。
    */
   formFields: KeyValueItem[];
-  auth: AuthConfig;
   settings: RequestSettings;
   /**
    * 这条请求挂在哪个分类下。
    *
-   * 不是可有可无的元数据：Token 源分组（§4.3）与授权继承（§4.4）都要
-   * **沿分类链向上找**，所以它是这次发送语义的一部分。
+   * 不是可有可无的元数据：Token 源分组（§4.3）要**沿分类链向上找**，
+   * 所以它是这次发送语义的一部分。
    * P2/P3 存下来的历史快照里没有这个字段 —— 缺失时按「无分类」处理。
    */
   folderId?: number | null;

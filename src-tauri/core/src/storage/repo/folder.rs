@@ -7,15 +7,14 @@
 //!   `UNION` 去重能让查询停下来，而 `UNION ALL` 会直接无限循环。
 
 use rusqlite::{Connection, Row};
-use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::models::{AuthConfig, Folder};
+use crate::storage::models::Folder;
 use crate::storage::now_iso;
-use crate::storage::repo::{bool_to_int, opt_text, parse_json_column, ORDER_BY_SORT};
+use crate::storage::repo::{bool_to_int, opt_text, ORDER_BY_SORT};
 
 const COLUMNS: &str = "id, workspace_id, parent_id, name, sort_order, is_token_source, is_system, \
-     auth, created_at, updated_at, deleted_at";
+     created_at, updated_at, deleted_at";
 
 /// 系统分类（「token刷新」）的名字。
 ///
@@ -31,8 +30,7 @@ pub const SYSTEM_FOLDER_NAME: &str = "token刷新";
 /// 撞上了就得靠 id 分胜负，而系统分类的 id 未必更小（存量库补建时它反而最大）。
 const SYSTEM_SORT_ORDER: i64 = -1;
 
-fn map_row(row: &Row<'_>) -> AppResult<Folder> {
-    let auth_raw: String = row.get("auth")?;
+fn map_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
     Ok(Folder {
         id: row.get("id")?,
         workspace_id: row.get("workspace_id")?,
@@ -41,8 +39,6 @@ fn map_row(row: &Row<'_>) -> AppResult<Folder> {
         sort_order: row.get("sort_order")?,
         is_token_source: row.get("is_token_source")?,
         is_system: row.get("is_system")?,
-        // 走宽松解析：`folder.auth` 的形状在 P4 才定稿，存量值是 `{}`
-        auth: AuthConfig::from_json(&parse_json_column::<Value>(&auth_raw, "folder.auth")?),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         deleted_at: opt_text(row, "deleted_at")?,
@@ -91,19 +87,18 @@ pub fn list_deleted(conn: &Connection, workspace_id: i64) -> AppResult<Vec<Folde
 
 /// 逐行收集。
 ///
-/// 为什么不用 `query_map`：`map_row` 要解析 `folder.auth` 这一 JSON 列，
-/// 而 `query_map` 的闭包只能返回 `rusqlite::Result` —— 解析失败得冒泡成
-/// 我们自己的错误类型（`AppResult`），所以只能自己 `rows.next()` 走。
+/// `map_row` 只做列类型转换（不做 JSON 解析了，见下），所以直接喂给 `query_map` 就行 ——
+/// 不必像 `repo::request` 那样手写 `rows.next()` 循环。
 fn collect(
     conn: &Connection,
     sql: &str,
     params: &[&dyn rusqlite::ToSql],
 ) -> AppResult<Vec<Folder>> {
     let mut stmt = conn.prepare(sql)?;
-    let mut rows = stmt.query(params)?;
+    let rows = stmt.query_map(params, map_row)?;
     let mut out = Vec::new();
-    while let Some(row) = rows.next()? {
-        out.push(map_row(row)?);
+    for row in rows {
+        out.push(row?);
     }
     Ok(out)
 }
@@ -114,7 +109,7 @@ pub fn get(conn: &Connection, id: i64) -> AppResult<Folder> {
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([id])?;
     match rows.next()? {
-        Some(row) => map_row(row),
+        Some(row) => Ok(map_row(row)?),
         None => Err(AppError::NotFound {
             entity: "folder",
             id,
@@ -124,8 +119,11 @@ pub fn get(conn: &Connection, id: i64) -> AppResult<Folder> {
 
 /// 从某个文件夹向上的完整链，**最近的在前**，含自身。
 ///
-/// 授权继承（design.md §4.4）与 Token 源查找都靠它。N+1 次查询，
-/// 但文件夹树的深度是个位数，用一条递归 SQL 换这点开销不划算 ——
+/// **只有 Token 源查找还在用它**。曾经的授权继承（design.md §4.4）已经被 007
+/// 迁移拆掉 —— 凭据现在落在 `request.headers` 里，分类不再持有任何授权配置，
+/// 所以「往上找授权」这件事在运行时根本没有第二处调用点。
+///
+/// N+1 次查询，但文件夹树的深度是个位数，用一条递归 SQL 换这点开销不划算 ——
 /// 而且递归 SQL 想把「按深度排序」和「防环」同时写对，比这里复杂得多。
 ///
 /// 防环：每走一级都要求 parent 没走过。SQL 侧的递归查询靠 `UNION` 去重，
@@ -151,23 +149,6 @@ pub fn ancestry(conn: &Connection, folder_id: i64) -> AppResult<Vec<Folder>> {
     }
 
     Ok(out)
-}
-
-/// 覆盖分组级授权配置（design.md §4.4 的「继承父级」靠它落数据）
-pub fn set_auth(conn: &Connection, id: i64, auth: &AuthConfig) -> AppResult<Folder> {
-    let raw =
-        serde_json::to_string(auth).map_err(|e| AppError::Internal(format!("folder.auth: {e}")))?;
-    let affected = conn.execute(
-        "UPDATE folder SET auth = ?2, updated_at = ?3 WHERE id = ?1",
-        rusqlite::params![id, raw, now_iso()],
-    )?;
-    if affected == 0 {
-        return Err(AppError::NotFound {
-            entity: "folder",
-            id,
-        });
-    }
-    get(conn, id)
 }
 
 pub fn create(
@@ -679,7 +660,7 @@ mod tests {
     #[test]
     fn token_source_flag_toggles() {
         let conn = db();
-        let f = create(&conn, 1, None, "auth").unwrap();
+        let f = create(&conn, 1, None, "草稿").unwrap();
         assert!(!f.is_token_source);
         assert!(set_token_source(&conn, f.id, true).unwrap().is_token_source);
         assert!(

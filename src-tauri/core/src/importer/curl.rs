@@ -27,9 +27,12 @@
 use serde_json::Value;
 
 use super::tokenizer::{self, Token};
-use super::{ImportBundle, ImportWarning, RequestDraft, WarningKind};
+use super::{
+    basic_auth_value, merge_auth_rows, AuthRows, ImportBundle, ImportWarning, RequestDraft,
+    WarningKind,
+};
 use crate::error::{codes, AppError, AppResult};
-use crate::storage::models::{AuthConfig, KeyValueItem};
+use crate::storage::models::KeyValueItem;
 
 pub fn parse(text: &str) -> AppResult<ImportBundle> {
     let commands = tokenizer::tokenize_commands(text).map_err(|err| {
@@ -379,20 +382,33 @@ impl Args {
             ..defaults
         };
 
-        let auth = match self.user.as_deref() {
+        // `-u user:pass` → 一条 `Authorization: Basic …` 请求头。
+        //
+        // 存的是**模板**而不是算好的 base64：展开发生在发送前一刻
+        // （见 `template::functions::basic`），所以界面上看得见用的是哪个账号，
+        // 而发出去的值与 curl 自己算的逐字节一致。
+        // 落点规则与 007 迁移、Postman 导入器共用同一份拼法（`basic_auth_value`）。
+        let auth_rows = match self.user.as_deref() {
             Some(user) => {
                 let (username, password) = match user.split_once(':') {
+                    // curl 的 `-u user` 等价于空密码（会往服务端发 `user:`）
                     Some((u, p)) => (u.to_string(), p.to_string()),
                     None => (user.to_string(), String::new()),
                 };
-                AuthConfig::Basic { username, password }
+                AuthRows {
+                    headers: vec![KeyValueItem::new(
+                        "Authorization",
+                        basic_auth_value(&username, &password),
+                    )],
+                    params: Vec::new(),
+                }
             }
-            None => AuthConfig::Inherit,
+            None => AuthRows::default(),
         };
 
         let (body_type, body) = assemble_body(&self, warnings);
 
-        Ok(RequestDraft {
+        let mut draft = RequestDraft {
             name,
             method,
             url,
@@ -400,11 +416,14 @@ impl Args {
             headers: self.headers,
             body_type,
             body,
-            auth,
             settings,
             pre_script: String::new(),
             test_script: String::new(),
-        })
+        };
+        // 手写的同名列优先：`-u` 与 `-H 'Authorization: …'` 同时给的时候，
+        // 用户显式写的那条赢（判据见 `merge_auth_rows`，与 Postman 那边同一份）
+        merge_auth_rows(&mut draft, &auth_rows);
+        Ok(draft)
     }
 }
 
@@ -734,16 +753,30 @@ mod tests {
     // 参数映射
     // ============================================================
 
+    /// `-u user:pass` 落成一条 `Authorization` 请求头 —— 凭据不再是一个独立字段。
+    ///
+    /// 值存成 `{{$basic …}}` 模板：展开发生在发送前一刻，算出来的
+    /// `Basic <base64>` 与 curl 自己发的逐字节一致；而界面上看得见账号。
+    /// 与 007 迁移、Postman 导入器同一条落点规则。
     #[test]
-    fn basic_auth_becomes_auth_config() {
+    fn basic_auth_becomes_an_authorization_header() {
         let draft = one("curl -u alice:s3cret 'https://x/y'");
         assert_eq!(
-            draft.auth,
-            AuthConfig::Basic {
-                username: "alice".to_string(),
-                password: "s3cret".to_string()
-            }
+            draft.headers.len(),
+            1,
+            "应当只有这一条头：{:?}",
+            draft.headers
         );
+        assert_eq!(draft.headers[0].key, "Authorization");
+        assert_eq!(draft.headers[0].value, r#"{{$basic "alice" "s3cret"}}"#);
+    }
+
+    /// 手写的 `Authorization` 优先于 `-u` —— 两条都发出去等于让服务端替我们挑
+    #[test]
+    fn a_handwritten_authorization_header_wins_over_the_user_flag() {
+        let draft = one("curl -u alice:s3cret -H 'Authorization: Bearer x' 'https://x/y'");
+        assert_eq!(draft.headers.len(), 1, "{:?}", draft.headers);
+        assert_eq!(draft.headers[0].value, "Bearer x");
     }
 
     #[test]

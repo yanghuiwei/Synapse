@@ -62,7 +62,9 @@ export const zhCN = {
   // 「有请求但一个分类都没有」时才用得上：那时候左栏只会平铺一串请求。
   // （正常情况下走不到 —— 系统分类「token刷新」始终存在，它是兜底文案）
   "collections.noFolders": "还没有分类",
-  "collections.noFoldersHint": "分类用来组织请求，授权继承也按分类链生效 —— 先建一个分类，再把请求存进去",
+  // 别提「授权继承」：那套机制已经不存在了（凭据就是请求头里的一行）。
+  // 分类链现在还能影响的只剩 Token 来源（后端 `find_token_source` 沿链向上找）。
+  "collections.noFoldersHint": "分类用来组织请求，Token 来源也按分类链生效 —— 先建一个分类，再把请求存进去",
   "collections.itemCount": "{count} 项",
   "collections.loadFailed": "集合加载失败",
   "collections.expand": "展开",
@@ -100,14 +102,13 @@ export const zhCN = {
   "request.cancel": "取消",
   "request.saveAs": "保存到分类…",
   "request.saveAsTitle": "保存到分类",
-  "request.saveAsHint": "Token 来源与授权都按分类链继承，所以要先把这条请求存进一个分类",
+  "request.saveAsHint": "Token 来源按分类链继承，所以要先把这条请求存进一个分类",
   "request.saveAsName": "名称",
   "request.saveAsNoFolder": "还没有分类。先建一个，再回来保存",
   "request.saveAsFailed": "保存失败",
   "request.tab.params": "参数",
   "request.tab.headers": "请求头",
   "request.tab.body": "请求体",
-  "request.tab.auth": "授权",
   "request.tab.scripts": "脚本",
   "request.tab.settings": "设置",
   "request.noSelection": "从左侧选择一个请求",
@@ -127,41 +128,58 @@ export const zhCN = {
   "request.proxy": "代理",
   "request.proxyNone": "不使用代理",
 
-  // ---- 授权（P4 起是真的了） ----
-  "auth.inherit": "继承上级分类",
-  "auth.inheritFrom": "继承自「{name}」",
-  "auth.inheritNone": "上级分类没有配置，等同于「无」",
-  "auth.inheritBroken": "上级配置读不出来，等同于「无」",
-  "auth.none": "无",
-  "auth.bearer": "Bearer Token",
-  "auth.basic": "Basic Auth",
-  "auth.apiKey": "API Key",
-  "auth.oauth2": "OAuth 2.0",
+  // ---- 请求头 / 凭据（007 起「授权」就是这里的一行） ----
+  //
+  // 只留下这 4 个还在用的 `auth.*`：
+  // `tokenSource`（分类树与回收站上的「Token 来源」徽标）、
+  // `tokenPlaceholder`（`{{token.access}}` 的**唯一定义**，插入面板与提示条都用它）、
+  // `tokenValid` / `tokenExpired`（Token 状态徽标的兜底文案）。
+  //
+  // 其余「继承上级分类」「Bearer / Basic / API Key 类型」「空 Bearer 警告」
+  // 随 AuthTab 一起删了 —— 它们描述的是一个已经不存在的模型。
   "auth.tokenSource": "Token 来源",
-  "auth.tokenSourceHint": "选一个标记为「授权源」的文件夹或请求",
-  "auth.tokenSourceNone": "未指定（不会自动刷新）",
   "auth.tokenPlaceholder": "{{token.access}}",
   "auth.tokenValid": "有效期至 {time}",
   "auth.tokenExpired": "已过期",
-  "auth.tokenRefreshing": "刷新中…",
-  "auth.refreshNow": "立即刷新",
-  "auth.username": "用户名",
-  "auth.password": "密码",
-  "auth.headerName": "Header 名称",
-  "auth.queryName": "Query 名称",
-  "auth.keyName": "键名",
-  "auth.keyValue": "键值",
-  "auth.addTo": "添加到",
-  "auth.addToHeader": "请求头",
-  "auth.addToQuery": "查询参数",
-  "auth.bearerPlaceholder": "{{token.access}} 或直接粘贴一段 Token",
-  "auth.typeHint": "改动会立刻生效，无需保存 —— 发送时读取的就是这里的内容",
-  // 空 Bearer 是「静默 401」的头号来源：请求照发、界面不红，而 401 能被太多
-  // 别的原因解释。文案要把**真相**说出来（带出去的是一条空凭据），
-  // 而不是只说「请填写」—— 后者会被读成「可选项」，然后被忽略
-  "auth.emptyBearerWarn": "值为空 —— 请求带着一条空凭据出去，服务端只会回 401",
-  "auth.emptyBearerNoSource": "值为空 —— 请求带着一条空凭据出去。工作区里还没有 Token 源，先在下面配一个",
-  "auth.useTokenSource": "用 Token 源",
+
+  "headers.insert.open": "插入凭据头",
+  "headers.insert.hint": "快捷插入不改变模型，只是替你写一行",
+  "headers.insert.title": "插入一个凭据头",
+  "headers.insert.insert": "插入",
+  "headers.insert.overwrite": "覆盖该行的值",
+  "headers.insert.name": "头名",
+  "headers.insert.nameCustom": "自定义…",
+  "headers.insert.nameCustomPlaceholder": "例如 X-Your-Token",
+  "headers.insert.shape": "值",
+  // 这五个是「往值那一格写什么字符串」的选择，**不是**授权类型 ——
+  // 选完就变成一条普通请求头，跟手打的一模一样
+  "headers.insert.shapeTokenSource": "引用 Token 源",
+  "headers.insert.shapePaste": "粘贴一段 token",
+  "headers.insert.shapeBasic": "Basic 用户名密码",
+  "headers.insert.shapeEnv": "引用环境变量",
+  "headers.insert.shapeEmpty": "空着，我自己填",
+  "headers.insert.pastePlaceholder": "粘一段 token（自带 Bearer 前缀也没关系）",
+  "headers.insert.envPlaceholder": "环境变量名，例如 API_TOKEN",
+  "headers.insert.username": "用户名",
+  "headers.insert.password": "密码",
+  "headers.insert.prefix": "补 {prefix} 前缀",
+  "headers.insert.prefixLocked": "{{$basic}} 展开后自带 Basic 前缀，不需要再补",
+  // 照实说：base64 与明文存储是两件事，不能让人以为编码过就等于安全了
+  "headers.insert.basicHint":
+    "密码会明文存进这条请求里 —— base64 发生在发送那一刻，库里存的是明文",
+  "headers.insert.tokenSourceMissing":
+    "工作区里还没有 Token 源 —— 这一行插进去也解析不出值，发送时会报「没有可用 Token 源」",
+
+  "headers.pasteDeduped": "粘进来的值自带 Bearer 前缀，已自动去重（结果只有一个前缀）",
+  "headers.notice.authMerged":
+    "原「授权」页已并入这里。Authorization 现在就是一条普通请求头 —— 快捷插入只是替你写一行，插完随时可以改。",
+  "headers.notice.dismiss": "知道了",
+  "headers.tokenSource.title": "{{token.access}} 的值从哪来",
+  // 手贴 token 的倒计时。⚠️ 只读不验：exp 来自 payload 明文，签名没校验过
+  "headers.credentials.expired": "已过期 {time}",
+  "headers.credentials.expiresIn": "{time}后过期",
+  "headers.credentials.useTokenSource": "改用 Token 源自动刷新",
+  "headers.credentials.configureTokenSource": "配一个 Token 源",
 
   // ---- 响应 ----
   "response.title": "响应",
@@ -193,11 +211,13 @@ export const zhCN = {
   // 这一组文案的核心任务是**区分「事实」与「推演」**：用户是拿它去解释
   // 一个已经发生的 401 的，看到一份按今天的环境算出来的命令会被误导。
   "curl.sourceSent": "本次真实发出",
-  "curl.sourceSentHint": "发送那一刻的形态：占位符已展开、Token 已注入、授权继承已解开",
+  // 别写「授权继承已解开」：扁平化之后没有可解开的继承了，凭据本身就是头里的一行，
+  // 「展开」这个动作已经把它完整覆盖了。
+  "curl.sourceSentHint": "发送那一刻的形态：占位符已展开、Token 已注入",
   // 「Token 已注入」在没用上 Token 源的那次是**假话**，而它恰好出现在用户
   // 最需要准确信息的时候（核对一个 401）。所以按 `tokenUsage` 有没有分化成两条：
   // 说实话比说漂亮话重要 —— 一句无条件成立的断言会把人送去找不存在的 bug
-  "curl.sourceSentHintNoToken": "发送那一刻的形态：占位符已展开、授权继承已解开 —— 这次没有用到 Token 源",
+  "curl.sourceSentHintNoToken": "发送那一刻的形态：占位符已展开 —— 这次没有用到 Token 源",
   "curl.sourceHistory": "上次执行 · {time}",
   "curl.sourceHistoryHint": "这一份就是当时发出去的东西，不是按现在的内容重算的",
   "curl.sourcePreview": "按当前编辑内容推演",
@@ -388,7 +408,7 @@ export const zhCN = {
   "token.gate.autoRefreshOff": "已关掉自动重新获取：过期后发送会直接报错，不会拿旧 Token 硬发",
   "token.gate.noSourceHint":
     "这条请求引用了 {{token.*}}，但它的分类链上没有 Token 来源 —— 发送时那些占位符会原样带出去。",
-  "token.gate.manageHint": "去「授权」页配置 Token 来源",
+  "token.gate.manageHint": "去「请求头」页配置 Token 来源",
 
   // ---- 响应区的「本次发送用了什么 Token」结果条 ----
   "token.usage.refreshed": "本次已刷新 Token",

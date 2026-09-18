@@ -513,7 +513,6 @@ mod tests {
             headers: Vec::new(),
             body_type: Default::default(),
             body: String::new(),
-            auth: Default::default(),
             settings: RequestSettings::default(),
             folder_id: None,
             form_fields: Vec::new(),

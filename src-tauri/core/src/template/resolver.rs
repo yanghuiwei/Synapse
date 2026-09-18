@@ -33,7 +33,7 @@ use chrono::{DateTime, Local};
 use serde_json::Value;
 
 use crate::http::execute::RequestSpec;
-use crate::storage::models::{AuthConfig, KeyValueItem};
+use crate::storage::models::KeyValueItem;
 use crate::template::functions::{self, Entropy};
 use crate::template::jsonpath;
 
@@ -328,14 +328,18 @@ pub struct UnresolvedPlaceholder {
 
 /// 扫描一份请求定义里**所有**可能含占位符的文本。
 ///
-/// 与 [`resolve_spec`] 共用同一批字段（经由各个 `text_fields` / 显式列举），
+/// 与 [`resolve_spec`] 共用同一批字段（经由 [`spec_text_fields`]），
 /// 漏一处就会出现「单飞锁以为用不上 token，解析时却发现用上了」。
+///
+/// 凭据头天然被覆盖：它就是 `headers` 里的一行，而 `spec_text_fields`
+/// 连每个键值行的 `key` / `value` / `file` 都扫。**这正是 007 迁移的收益之一** ——
+/// 旧代码要单独列一遍 `AuthConfig` 的文本字段，那条清单被漏改的后果
+/// 不是编译错误，而是「29 条请求一起静默降级」。
 pub fn scan_spec(spec: &RequestSpec) -> Vec<ScanHit> {
     let mut out = Vec::new();
     for text in spec_text_fields(spec) {
         out.extend(scan(text));
     }
-    out.extend(scan_auth_fields(&spec.auth));
     out
 }
 
@@ -347,7 +351,6 @@ pub fn resolve_spec(spec: &RequestSpec, ctx: &mut TemplateContext<'_>) -> Resolv
     let url = resolve_into(&spec.url, ctx, &mut acc);
     let body = resolve_into(&spec.body, ctx, &mut acc);
     let form_fields = resolve_rows(&spec.form_fields, ctx, &mut acc);
-    let auth = resolve_auth(&spec.auth, ctx, &mut acc);
 
     let resolved = RequestSpec {
         method: spec.method.clone(),
@@ -356,7 +359,6 @@ pub fn resolve_spec(spec: &RequestSpec, ctx: &mut TemplateContext<'_>) -> Resolv
         headers,
         body_type: spec.body_type,
         body,
-        auth,
         settings: spec.settings.clone(),
         folder_id: spec.folder_id,
         form_fields,
@@ -405,10 +407,6 @@ fn spec_text_fields(spec: &RequestSpec) -> Vec<&str> {
     out
 }
 
-fn scan_auth_fields(auth: &AuthConfig) -> Vec<ScanHit> {
-    auth.text_fields().into_iter().flat_map(scan).collect()
-}
-
 fn resolve_into(
     text: &str,
     ctx: &mut TemplateContext<'_>,
@@ -437,39 +435,12 @@ fn resolve_rows(
         .collect()
 }
 
-/// 显式逐个变体地解析，不用「递归走 JSON」的通用写法：
-/// 通用写法在加了字段之后**不会编译失败**，只会静默漏掉新字段。
-fn resolve_auth(
-    auth: &AuthConfig,
-    ctx: &mut TemplateContext<'_>,
-    acc: &mut Vec<ResolvedPlaceholder>,
-) -> AuthConfig {
-    match auth {
-        AuthConfig::Inherit | AuthConfig::None => auth.clone(),
-        AuthConfig::Bearer { token } => AuthConfig::Bearer {
-            token: resolve_into(token, ctx, acc),
-        },
-        AuthConfig::Basic { username, password } => AuthConfig::Basic {
-            username: resolve_into(username, ctx, acc),
-            password: resolve_into(password, ctx, acc),
-        },
-        AuthConfig::ApiKey {
-            key,
-            value,
-            location,
-        } => AuthConfig::ApiKey {
-            key: resolve_into(key, ctx, acc),
-            value: resolve_into(value, ctx, acc),
-            location: *location,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::models::{BodyType, RequestSettings};
     use chrono::TimeZone;
+    use std::path::PathBuf;
 
     fn clock() -> DateTime<Local> {
         Local
@@ -527,7 +498,6 @@ mod tests {
             )],
             body_type: BodyType::Json,
             body: r#"{"ts": {{$timestamp}}}"#.into(),
-            auth: AuthConfig::None,
             settings: RequestSettings::default(),
             folder_id: Some(3),
             form_fields: Vec::new(),
@@ -791,14 +761,18 @@ mod tests {
         });
     }
 
-    /// 扫描与解析必须覆盖**同一批**字段，否则单飞锁会漏判
+    /// 扫描与解析必须覆盖**同一批**字段，否则单飞锁会漏判。
+    ///
+    /// 007 迁移之后「凭据」不再是独立字段，而是 `headers` 里的一行 ——
+    /// 这条断言就是守那个挪动的：一条只靠 `Authorization: Bearer {{token.access}}`
+    /// 带 token 的请求，必须被认成「要用 token」。
     #[test]
     fn scan_spec_covers_the_same_fields_as_resolve_spec() {
         let mut s = spec();
-        s.auth = AuthConfig::Bearer {
-            token: "{{token.access}}".into(),
-        };
-        s.headers = Vec::new();
+        s.headers = vec![KeyValueItem::new(
+            "Authorization",
+            "Bearer {{token.access}}",
+        )];
         s.body = String::new();
 
         let hits = scan_spec(&s);
@@ -811,24 +785,91 @@ mod tests {
             .filter(|h| h.namespace == Namespace::Token)
             .count();
         assert_eq!(env_hits, 1, "url 里的 env 要扫到");
-        assert_eq!(token_hits, 1, "auth 里的 token 要扫到");
+        assert_eq!(token_hits, 1, "请求头里的 token 要扫到");
     }
 
+    /// 凭据头走的就是普通请求头那条解析路径 —— 没有第二条通道，
+    /// 所以这里断言的是「`Authorization` 的模板值被换成了真 token」，
+    /// 而不是某个 `auth` 字段发生了变化。
     #[test]
-    fn resolve_spec_resolves_auth_fields() {
+    fn resolve_spec_expands_a_credential_header() {
         let mut s = spec();
-        s.auth = AuthConfig::ApiKey {
-            key: "X-Key".into(),
-            value: "{{token.access}}".into(),
-            location: crate::storage::models::ApiKeyLocation::Header,
-        };
+        s.headers = vec![
+            KeyValueItem::new("Authorization", "Bearer {{token.access}}"),
+            KeyValueItem::new("X-Access-Token", "{{token.access}}"),
+        ];
 
         with_ctx(|ctx| {
             let out = resolve_spec(&s, ctx);
-            match out.spec.auth {
-                AuthConfig::ApiKey { value, .. } => assert_eq!(value, "t-abc"),
-                other => panic!("auth 被改坏了: {other:?}"),
-            }
+            let by_key = |k: &str| {
+                out.spec
+                    .headers
+                    .iter()
+                    .find(|h| h.key == k)
+                    .unwrap_or_else(|| panic!("{k} 必须还在"))
+                    .value
+                    .clone()
+            };
+            assert_eq!(by_key("Authorization"), "Bearer t-abc");
+            assert_eq!(by_key("X-Access-Token"), "t-abc");
+            assert!(out.unresolved.is_empty(), "两道头都能解析，不该有未解析项");
         });
+    }
+
+    /// 「这次要不要用 token」在两个地方各扫一遍：这里的 `scan_spec`，
+    /// 与前端 `RequestPane.tsx` 的 `draftWantsToken`。
+    ///
+    /// ⚠️ 漏改任意一处都**不是**编译错误。表现是：请求里写着的
+    /// `{{token.access}}` 不再触发刷新、发送键旁的 Token 状态条也不出现 ——
+    /// 也就是「发出去还是旧 token」，而界面上没有任何提示。
+    /// 007 之前最要命的那一处是 `auth`（它曾是 `{{token.access}}` 最常见的落点），
+    /// 实测当时有 29 条请求靠那次扫描才会去刷 token。
+    ///
+    /// 所以直接把两份字段清单对一遍。用 `CARGO_MANIFEST_DIR` 定位而不是相对
+    /// 路径：测试的工作目录不保证是 crate 根（前端那份的写法见
+    /// `src/external_changes.rs` 的事件名测试）。
+    #[test]
+    fn the_frontend_token_scan_covers_the_same_fields() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/features/request/RequestPane.tsx");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+
+        let body = extract_function(&source, "function draftWantsToken")
+            .unwrap_or_else(|| panic!("{} 里找不到 draftWantsToken", path.display()));
+
+        // 每一项都对应 `spec_text_fields` 里的一处。`bodyRows` 前端多扫了一个
+        // —— urlencoded 的行最终会拼进 `body`，而 `body` 本来就被扫，
+        // 所以多扫是冗余而**无害**的；漏扫才是有害的。
+        for field in [
+            "draft.url",
+            "draft.body",
+            "draft.params",
+            "draft.headers",
+            "draft.formFields",
+        ] {
+            assert!(
+                body.contains(field),
+                "前端的 draftWantsToken 里没有 {field} —— 它与 Rust 的 scan_spec \
+                 已经不一致，这类请求不会再触发 Token 刷新，而界面上看不出来"
+            );
+        }
+
+        assert!(
+            !body.contains("draft.auth"),
+            "draftWantsToken 里还在扫 `draft.auth` —— 007 已经删掉了那个字段，\
+             这里读到的是 undefined，等于白扫一遍还占着一行"
+        );
+    }
+
+    /// 从源码里截出一个函数体（从签名那一行到第一个顶格的 `}`）。
+    ///
+    /// 够用就行的实现：被测函数的内部没有顶格的 `}` —— JS 的箭头函数与
+    /// 对象字面量都带缩进。真要有那么一天，断言的报错会直接指出来。
+    fn extract_function<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+        let from = source.find(signature)?;
+        let rest = &source[from..];
+        let end = rest.find("\n}")?;
+        Some(&rest[..end])
     }
 }

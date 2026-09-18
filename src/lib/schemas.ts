@@ -46,35 +46,15 @@ export const httpVersionSchema = z.enum(["auto", "http1", "http2"]);
 
 export const expiryUnitSchema = z.enum(["seconds", "millis", "absolute"]);
 
-export const apiKeyLocationSchema = z.enum(["header", "query"]);
-
-/**
- * 授权配置。
- *
- * 用 `z.union` 而不是 `z.discriminatedUnion`：判别键 `type` 是**字符串字面量**，
- * 两者都行，但 union 在遇到未知变体时可以整体 `.catch()` 退化成 `inherit` ——
- * 而 discriminatedUnion 会直接把整份请求判为不合法。
- *
- * `inherit` 兜底是刻意的：老库里 `auth` 列存的是 `{}`，
- * 后端把它读成 `inherit`。前端这边读到任何认不出的形状也退回 `inherit`，
- * 而不是让一条字段读不出来的请求整个打不开。
- */
-export const authConfigSchema = z.union([
-  z.looseObject({ type: z.literal("inherit") }),
-  z.looseObject({ type: z.literal("none") }),
-  z.looseObject({ type: z.literal("bearer"), token: z.string() }),
-  z.looseObject({
-    type: z.literal("basic"),
-    username: z.string(),
-    password: z.string(),
-  }),
-  z.looseObject({
-    type: z.literal("apiKey"),
-    key: z.string(),
-    value: z.string(),
-    location: apiKeyLocationSchema,
-  }),
-]);
+// 🔴 这里**没有 `authConfigSchema`**。
+//
+// 迁移 007 把「授权」拍平成了请求头里的一行 —— 库里既没有 `auth` 列，
+// 线上也没有 `auth` 字段，所以没有任何东西需要校验。Bearer / Basic /
+// API Key 现在只是请求头页上三个快捷插入按钮产生的普通 `KeyValueItem`。
+//
+// 于是老库里的 `{"type":"bearer",...}` 会被当成一个不认识的额外键**丢掉**
+// （`z.looseObject` 只校验声明过的字段）—— 这是对的：那行的内容
+// 迁移时已经被搬进 `headers` 了，这里再解一次反而会重复。
 
 export const requestSettingsSchema = z.looseObject({
   followRedirects: z.boolean(),
@@ -108,17 +88,11 @@ export const folderSchema = z.looseObject({
   sortOrder: z.number(),
   isTokenSource: z.boolean(),
   /**
-   * 004 迁移新增的列。与 `auth` 同理带 `.catch()` 兜底：浏览器里开着旧
-   * dev server（或旧后端）时少这一个字段，不该让整棵集合树打不开 ——
+   * 004 迁移新增的列。带 `.catch()` 兜底：浏览器里开着旧 dev server
+   * （或旧后端）时少这一个字段，不该让整棵集合树打不开 ——
    * 退回「是普通分类」即可，表现与升级前一致。
    */
   isSystem: z.boolean().catch(false),
-  /**
-   * P4 新加的列。给 `.catch()` 兜底而不是要求必填：`folder.auth` 是 002 迁移
-   * 才加的列，而**前端可能先于后端更新**（比如浏览器里开着旧 dev server）——
-   * 那时少一个字段不该让整棵集合树打不开。
-   */
-  auth: authConfigSchema.catch({ type: "inherit" }),
   createdAt: z.string(),
   updatedAt: z.string(),
   deletedAt: z.string().nullable(),
@@ -136,16 +110,14 @@ export const apiRequestSchema = z.looseObject({
   bodyType: bodyTypeSchema,
   body: z.string(),
   /**
-   * 003 迁移新增的两列。与 `auth` 同理带 `.catch()` 兜底：**前端可能先于
-   * 后端更新**（浏览器里还开着旧 dev server），那时少这两个字段不该让
-   * 整个集合树打不开 —— 退回空快照即可，表现与升级前一致。
+   * 003 迁移新增的两列。带 `.catch()` 兜底：**前端可能先于后端更新**
+   * （浏览器里还开着旧 dev server），那时少这两个字段不该让整个集合树
+   * 打不开 —— 退回空快照即可，表现与升级前一致。
    */
   bodyByType: z.record(z.string(), z.string()).catch({}),
   bodyRows: z.array(keyValueItemSchema).catch([]),
   // 005 迁移新增的列，兜底理由同上
   formFields: z.array(keyValueItemSchema).catch([]),
-  // 老库里是 `{}`，Rust 侧宽松解析成 inherit；这里同样兜底（见 authConfigSchema）
-  auth: authConfigSchema.catch({ type: "inherit" }),
   settings: requestSettingsSchema,
   preScript: z.string(),
   testScript: z.string(),
@@ -315,7 +287,6 @@ export const requestSpecSchema = z.looseObject({
   bodyRows: z.array(keyValueItemSchema).catch([]),
   // multipart 的字段行。同理兜底 —— 它是本轮才加上的字段
   formFields: z.array(keyValueItemSchema).catch([]),
-  auth: authConfigSchema.catch({ type: "inherit" }),
   settings: requestSettingsSchema.catch(() => ({ ...DEFAULT_REQUEST_SETTINGS })),
   // 老快照里没有这个字段 —— 缺失按「无分类」处理，而不是整条记录打不开
   folderId: z.number().nullable().optional().catch(null),
