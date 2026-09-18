@@ -173,9 +173,13 @@ reqly_path_already:
 
 reqly_path_too_long:
   ; 宁可不动，也不写半截。用户拿到的是「没配上自动补全」，不是「一堆命令突然找不到」。
-  DetailPrint "reqly: 用户 PATH 过长或读不回来，未自动写入 —— 请手工把 $INSTDIR 加进 PATH"
+  ;
+  ; 提示写短一点是刻意的：NSIS 是短字符串，DetailPrint 那一行在状态栏会被截断，
+  ; 所以关键结论（「没改」「超上限」）必须排在最前面，$INSTDIR 反而排最后 —— 它长，
+  ; 且这时用户多半已经装过一遍、目录本来就在 PATH 里（见下条）。
+  DetailPrint "reqly: 未修改 PATH（已超 1023 字符上限）；如需命令行直接调用，请手工加入 $INSTDIR"
   IfSilent reqly_path_end
-  MessageBox MB_OK|MB_ICONINFORMATION "reqly 没有修改你的 PATH。$\r$\n$\r$\n它太长（或读不回来），自动追加有可能把它整条弄坏 —— 那会连带影响你其它命令。$\r$\n想让命令行直接敲 reqly-cli 的话，请手工把安装目录加进 PATH。"
+  MessageBox MB_OK|MB_ICONINFORMATION "reqly 未修改 PATH：它已超过 1023 字符上限，强改有弄坏整条 PATH 的风险。$\r$\n$\r$\n敲不到 reqly-cli 时，请手工把安装目录加进 PATH（MCP 不受影响）。"
 reqly_path_end:
 !macroend
 
@@ -234,7 +238,7 @@ reqly_unpath_already:
   Goto reqly_unpath_end
 
 reqly_unpath_too_long:
-  DetailPrint "reqly: 用户 PATH 过长或读不回来，未自动清理 —— 可以手工摘掉 $INSTDIR"
+  DetailPrint "reqly: 未修改 PATH（已超 1023 字符上限）；如需清理，请手工摘掉 $INSTDIR"
 reqly_unpath_end:
 !macroend
 
