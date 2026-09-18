@@ -1,9 +1,17 @@
 import { Snowflake, TriangleAlert } from "lucide-react";
 
 import { useI18n } from "@/lib/i18n";
-import type { LoadtestChart, LoadtestRunDetail, LoadtestRun, LoadtestSummary } from "@/lib/types";
+import type {
+  HttpVersion,
+  LoadtestChart,
+  LoadtestRunDetail,
+  LoadtestRun,
+  LoadtestSummary,
+} from "@/lib/types";
 import { ExportBar } from "./ExportBar";
+import { formatDuration } from "./format";
 import { HistogramChart } from "./HistogramChart";
+import { runConfigOf, runTargetOf } from "./runSnapshot";
 import { SampleTable } from "./SampleTable";
 import { Section, StatCard, BarRow, Notice } from "./primitives";
 import { TimelineChart } from "./TimelineChart";
@@ -41,6 +49,10 @@ export function ReportView({
         <Notice tone="warn">{t("loadtest.unfinished")}</Notice>
       ) : null}
 
+      {/* 这一轮**是怎么打的**。排在概要前面：后面每个数字都要靠它解读 ——
+          「P95 285 ms」对 8 并发和 50 并发是两件事 */}
+      <RunConfig run={run} />
+
       {summary !== null ? <SummaryBlocks summary={summary} sampleCount={detail.sampleCount} /> : null}
 
       <Section title={t("loadtest.charts")}>
@@ -76,7 +88,7 @@ export function ReportView({
 
 function RunHeader({ run, summary }: { run: LoadtestRun; summary: LoadtestSummary | null }) {
   const { t } = useI18n();
-  const target = targetOf(run);
+  const target = runTargetOf(run);
 
   return (
     <header className="flex flex-col gap-2">
@@ -120,6 +132,75 @@ function Tag({ children, className }: { children: string; className: string }) {
     <span className={`rounded-full border px-2 py-[1px] text-[10px] leading-4 ${className}`}>
       {children}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------
+// 这一轮的参数
+// ---------------------------------------------------------------
+
+/**
+ * 归档里存下来的那八项配置。
+ *
+ * 导出的 HTML 报告一直有这一节（`loadtest/report.rs` 的 `html_config`），
+ * 应用内的报告此前没有 —— 同一轮记录，导出到磁盘能看见「当时是多少并发打的」，
+ * 点开报告反而看不见。这一节就是补上那个缺口。
+ *
+ * 取值全部来自**归档的快照**（`run.config`），不是上方那个实时配置区：
+ * 历史轮次的意义正在于「当时配的是什么」，而上面那份随时会被改。
+ */
+function RunConfig({ run }: { run: LoadtestRun }) {
+  const { t } = useI18n();
+  const config = runConfigOf(run);
+
+  // 一个键都没认出来 = 这不是我们存的那份快照（老记录 / 库被手改过）。
+  // 整节不画，而不是画一排「—」：八行空值看起来像「这轮什么参数都没配」
+  if (Object.keys(config).length === 0) return null;
+
+  const httpVersionText = (v: HttpVersion) =>
+    v === "http1"
+      ? t("loadtest.httpVersionHttp1")
+      : v === "http2"
+        ? t("loadtest.httpVersionHttp2")
+        : t("loadtest.httpVersionAuto");
+
+  return (
+    <Section title={t("loadtest.runConfig")}>
+      <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-ink-faint">
+        {config.concurrency !== undefined ? (
+          <Meta label={t("loadtest.concurrency")} value={String(config.concurrency)} />
+        ) : null}
+        {config.total !== undefined ? (
+          <Meta label={t("loadtest.requests")} value={String(config.total)} />
+        ) : null}
+        {/* 超时与间隔给**原始毫秒**：与上面配置区那两个输入框同单位。
+            这一节回答的是「当时填的是几」，换个单位就得让人自己换算 */}
+        {config.timeoutMs !== undefined ? (
+          <Meta label={t("loadtest.timeout")} value={String(config.timeoutMs)} />
+        ) : null}
+        {config.thinkTimeMs !== undefined ? (
+          <Meta label={t("loadtest.thinkTime")} value={String(config.thinkTimeMs)} />
+        ) : null}
+        {config.warmupRequests !== undefined ? (
+          <Meta label={t("loadtest.warmup")} value={String(config.warmupRequests)} />
+        ) : null}
+        {config.httpVersion !== undefined ? (
+          <Meta label={t("loadtest.httpVersion")} value={httpVersionText(config.httpVersion)} />
+        ) : null}
+        {config.keepAlive !== undefined ? (
+          <Meta
+            label={t("loadtest.keepAlive")}
+            value={config.keepAlive ? t("loadtest.yes") : t("loadtest.no")}
+          />
+        ) : null}
+        {config.followRedirects !== undefined ? (
+          <Meta
+            label={t("loadtest.followRedirects")}
+            value={config.followRedirects ? t("loadtest.yes") : t("loadtest.no")}
+          />
+        ) : null}
+      </dl>
+    </Section>
   );
 }
 
@@ -283,21 +364,11 @@ function SummaryBlocks({ summary, sampleCount }: { summary: LoadtestSummary; sam
 // ---------------------------------------------------------------
 
 /**
- * 这一轮压的是哪个地址。
+ * 一个占比（`4 / 100` → `「4.0%」`）。
  *
- * 快照形状是 `{ target: { method, url }, config: {...} }`。
- * 读不到就退回 `requestName`，再退回 `#id` —— 老记录或库被手改过时，
- * 一个「缺失」比一个空字符串好定位。
+ * 与 [`formatPercent`] 不同：那个吃的是已经是小数的 `successRate`，
+ * 这个吃的是「几 / 共几」。两种入参混在一处最容易错，所以分成两个名字。
  */
-function targetOf(run: LoadtestRun): string {
-  const raw = run.config["target"];
-  if (typeof raw === "object" && raw !== null) {
-    const { method, url } = raw as Record<string, unknown>;
-    if (typeof method === "string" && typeof url === "string") return `${method} ${url}`;
-  }
-  return run.requestName !== "" ? run.requestName : `#${run.id}`;
-}
-
 function share(count: number, total: number): string {
   return total === 0 ? "—" : `${((count / total) * 100).toFixed(1)}%`;
 }
@@ -309,11 +380,6 @@ function formatTime(iso: string | null): string {
   if (Number.isNaN(at.getTime())) return iso;
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(at.getMonth() + 1)}-${p(at.getDate())} ${p(at.getHours())}:${p(at.getMinutes())}:${p(at.getSeconds())}`;
-}
-
-/** 毫秒 → 「1.24 s」/「820 ms」。与 `formatMs` 同口径，但压测里更常看秒 */
-function formatDuration(ms: number): string {
-  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 }
 
 /** 传输量：压测动辄上百 MB，比 `formatBytes` 多给一位有效数字 */

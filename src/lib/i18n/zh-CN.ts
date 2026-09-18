@@ -588,6 +588,9 @@ export const zhCN = {
 
   // 结果报告
   "loadtest.result": "压测报告",
+  // 「这一轮是怎么打的」。刻意不叫「压测配置」—— 那个名字已经被上方
+  // 那个实时配置区占了，两者在同一块屏幕上，重名会分不清哪个是历史、哪个是现在
+  "loadtest.runConfig": "这一轮的参数",
   "loadtest.summary": "概要",
   "loadtest.charts": "图表",
   "loadtest.totalRequests": "总请求数",
