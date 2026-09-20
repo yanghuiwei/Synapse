@@ -1,7 +1,6 @@
-import { Globe, Import, PanelLeft, PanelLeftClose } from "lucide-react";
+import { Import, PanelLeft, PanelLeftClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
-import { useEnvStore } from "@/store/env";
 import { tokenCounts, useTokenStore } from "@/store/token";
 import { useUiStore } from "@/store/ui";
 import { Button, IconButton } from "@/features/ui/Button";
@@ -42,13 +41,10 @@ export function TopBar() {
   const { t } = useI18n();
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  const setSection = useUiStore((s) => s.setSection);
   // 顶栏这个「导入」与侧栏标题区那个是**同一个动作的两个入口**：
   // 侧栏那个只在「集合」板块出现，而导入是全应用级的（往工作区里加东西），
   // 不该逼用户先切回集合板块才能点。对话框本体只有一份（`ConnectedImportDialog`）。
   const openImport = useUiStore((s) => s.openImport);
-  // 顶栏也读真源：真源是 `environment.is_active` 列（见 store/env.ts）
-  const environmentName = useEnvStore((s) => s.active?.name ?? null);
   const pendingTokens = useTokenStore((s) => tokenCounts(s).pending);
   const validTokens = useTokenStore((s) => tokenCounts(s).valid);
 
@@ -70,19 +66,6 @@ export function TopBar() {
       </IconButton>
 
       <div className="flex-1" />
-
-      {/* 环境指示：读的是真实激活环境（`environment.is_active`）。
-          点一下落到「环境」板块 —— 刻意**不做**下拉菜单：这里只该有一个动作，
-          挂个 chevron 会让人以为点开能切换，而实际上点开什么都没有 */}
-      <Button
-        size="sm"
-        variant="ghost"
-        icon={<Globe size={13} strokeWidth={2} />}
-        onClick={() => setSection("environments")}
-        title={t("topbar.openEnv")}
-      >
-        {environmentName ?? t("env.none")}
-      </Button>
 
       {/* Token 计数：和状态栏同一份数字（`tokenCounts`），
           有待刷新时显示待刷新数并转警示色，否则显示有效数 */}

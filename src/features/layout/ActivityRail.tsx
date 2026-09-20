@@ -1,4 +1,4 @@
-import { Clock, Gauge, Globe, Layers, Settings, Trash } from "lucide-react";
+import { Clock, Gauge, Layers, Settings, Trash } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
@@ -15,7 +15,6 @@ interface RailItem {
 const PRIMARY: readonly RailItem[] = [
   { section: "collections", icon: Layers, labelKey: "nav.collections" },
   { section: "history", icon: Clock, labelKey: "nav.history" },
-  { section: "environments", icon: Globe, labelKey: "nav.environments" },
   { section: "loadtest", icon: Gauge, labelKey: "nav.loadtest" },
 ];
 
