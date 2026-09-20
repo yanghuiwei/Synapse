@@ -6,7 +6,6 @@ import { watchExternalChanges } from "@/lib/externalChanges";
 import * as ipc from "@/lib/ipc";
 import { bootstrapSettings } from "@/lib/sync";
 import { useTheme } from "@/lib/useTheme";
-import { useEnvStore } from "@/store/env";
 import { useRequestStore } from "@/store/request";
 import { tokenCounts, useTokenStore } from "@/store/token";
 import { useUiStore } from "@/store/ui";
@@ -45,12 +44,11 @@ export function App() {
   const requestRunning = useRequestStore((s) => s.runId !== null);
 
   /**
-   * 状态栏的两个数字。
+   * 状态栏的两个数字（Token 计数）。
    *
    * `pendingTokenCount` 是**派生**的（`sources × statuses` 的函数），不在 store 里存一份 ——
    * 存一份就得在每次刷新后同步更新，而这种同步迟早会漏。
    */
-  const environmentName = useEnvStore((s) => s.active?.name ?? null);
   const pendingTokens = useTokenStore((s) => tokenCounts(s).pending);
   const validTokens = useTokenStore((s) => tokenCounts(s).valid);
 
@@ -103,15 +101,13 @@ export function App() {
   }, []);
 
   /**
-   * 环境与 Token 的启动加载。
+   * Token 的启动加载。
    *
    * ⚠️ 依赖必须是 `workspaceId`：首挂时 `workspace.load()` 还在路上，
-   * 两个 store 的 `load()` 拿到的 workspace 是 null 会直接返回 ——
-   * 那样状态栏会**永远**显示「不使用环境 / 0 个有效」，而且不报错。
+   * 拿到的 workspace 是 null 会直接返回 —— 那样状态栏会显示「0 个有效」且没报错。
    */
   useEffect(() => {
     if (workspaceId === undefined) return;
-    void useEnvStore.getState().load();
     void useTokenStore.getState().load();
   }, [workspaceId]);
 
@@ -239,7 +235,6 @@ export function App() {
               ? "sending"
               : "ready"
         }
-        environmentName={environmentName}
         pendingTokens={pendingTokens}
         validTokens={validTokens}
         offline={offline}

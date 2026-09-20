@@ -40,8 +40,6 @@ const STATUS_META: Record<AppStatus, StatusMeta> = {
 
 export interface StatusBarProps {
   status?: AppStatus;
-  /** 当前环境名；未选择时传 null */
-  environmentName?: string | null;
   /** 待刷新的 Token 数量 */
   pendingTokens?: number;
   /** 已判定有效的 Token 数量（没有待刷新时显示这个，别拿 0 冒充） */
@@ -62,7 +60,6 @@ export interface StatusBarProps {
  */
 export function StatusBar({
   status = "ready",
-  environmentName = null,
   pendingTokens = 0,
   validTokens = 0,
   offline = false,
@@ -93,11 +90,6 @@ export function StatusBar({
       </span>
 
       <span className="h-3 w-px bg-line" aria-hidden />
-
-      <span className="flex items-center gap-1">
-        {t("status.env")}
-        <span className="text-ink-muted">{environmentName ?? t("env.none")}</span>
-      </span>
 
       <span className="flex items-center gap-1">
         {t("status.tokens")}
