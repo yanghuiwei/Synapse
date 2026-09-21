@@ -10,7 +10,7 @@
 
 export const zhCN = {
   // ---- 通用 ----
-  "app.name": "Reqly",
+  "app.name": "Synapse",
   "common.ok": "确定",
   "common.cancel": "取消",
   "common.save": "保存",
@@ -838,7 +838,7 @@ export const zhCN = {
   "error.io": "本地文件读写失败",
   "error.internal": "内部错误",
   // ---- 前端自己产生的错误码（后端不会返回） ----
-  "error.notTauri": "本机服务未启动，请通过 Reqly 桌面应用打开",
+  "error.notTauri": "本机服务未启动，请通过 Synapse 桌面应用打开",
   "error.schemaDrift": "本机返回的数据与前端预期不一致，可能是版本不匹配",
   "error.workspaceMissing": "工作区还在加载，请稍候再试",
 
@@ -884,7 +884,7 @@ export const zhCN = {
   "mcp.entry": "连接 AI 客户端",
   "mcp.entryHint": "生成可直接粘贴的 MCP 配置片段",
   "mcp.title": "连接 AI 客户端",
-  "mcp.subtitle": "把 Reqly 暴露成 MCP 工具，让 AI 直接读写这里的接口集合",
+  "mcp.subtitle": "把 Synapse 暴露成 MCP 工具，让 AI 直接读写这里的接口集合",
   "mcp.loading": "正在读取配置…",
   "mcp.loadFailed": "读不到 MCP 配置信息",
   "mcp.missingBin": "没找到 reqly-mcp.exe。先在项目根目录跑一次 pnpm mcp:build —— 这段配置本身没错，但客户端会连不上。",

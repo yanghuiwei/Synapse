@@ -1,4 +1,4 @@
-# Reqly
+# Synapse
 
 > 轻量级 **Agent 原生** API 工作台 —— 安装包 5.2MB、本地优先、无账号、MCP Server + CLI 双通道的桌面 API 客户端。
 
