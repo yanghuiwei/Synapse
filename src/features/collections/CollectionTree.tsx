@@ -844,6 +844,9 @@ function flatten(
  * - 请求命中它的**名字**或**地址**（地址往往比名字更好认，「是我调过的那个 v2 接口」）
  * - 分类只命中名字，但它的**祖先链会被一起补上** ——
  *   否则结果里会出现一串没有父级的孤儿行，用户根本不知道它在哪一层
+ * - **命中的请求也会把它所在的分类连同祖先链一起补上** ——
+ *   少了这一步，「收入查询」这种「请求名命中、但它挂的『线上API』没命中」
+ *   的情况会整条消失：请求匹配上了，却没有任何一双眼睛能看到它。
  *
  * 筛选时**忽略折叠状态**：命中的东西必须看得见。
  * 「搜到了，但藏在收起的分类里」等于没搜到。
@@ -859,20 +862,24 @@ function flattenFiltered(
   for (const f of folders) {
     if (f.name.toLowerCase().includes(q)) hitFolders.add(f.id);
   }
-  // 补祖先。循环体本身在往集合里加元素，所以库里即使有环（导入来的脏数据）
-  // 也会停下来 —— 与后端 `UNION` 而非 `UNION ALL`、`folderSubtree` 的 `Set` 同理
-  for (const id of [...hitFolders]) {
-    let parent = byId.get(id)?.parentId ?? null;
-    while (parent !== null && !hitFolders.has(parent)) {
-      hitFolders.add(parent);
-      parent = byId.get(parent)?.parentId ?? null;
-    }
-  }
 
   const hitRequests = new Set<number>();
   for (const r of requests) {
     if (r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q)) {
       hitRequests.add(r.id);
+      // 命中请求的归属分类要跟着一起浮上来，否则 walk 根本走不到它
+      if (r.folderId !== null) hitFolders.add(r.folderId);
+    }
+  }
+
+  // 补祖先。循环体本身在往集合里加元素，所以库里即使有环（导入来的脏数据）
+  // 也会停下来 —— 与后端 `UNION` 而非 `UNION ALL`、`folderSubtree` 的 `Set` 同理。
+  // 必须放在**两轮命中都收集完之后**：命中请求补进来的分类同样需要祖先链。
+  for (const id of [...hitFolders]) {
+    let parent = byId.get(id)?.parentId ?? null;
+    while (parent !== null && !hitFolders.has(parent)) {
+      hitFolders.add(parent);
+      parent = byId.get(parent)?.parentId ?? null;
     }
   }
 
