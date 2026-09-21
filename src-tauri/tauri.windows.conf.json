@@ -3,7 +3,9 @@
     "targets": ["nsis"],
     "windows": {
       "nsis": {
-        "installerHooks": "nsis/path-hook.nsh"
+        "installerHooks": "nsis/path-hook.nsh",
+        "sidebarImage": "nsis/sidebar.bmp",
+        "headerImage": "nsis/header.bmp"
       }
     }
   }

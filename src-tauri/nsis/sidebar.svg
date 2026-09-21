@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 164 314" width="164" height="314">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0b1120"/>
+    </linearGradient>
+  </defs>
+  <rect width="164" height="314" fill="url(#bg)"/>
+  <!-- Logo: centered at y=100 -->
+  <g transform="translate(82, 105)">
+    <circle cx="-28" cy="0" r="14" fill="#22d3ee"/>
+    <circle cx="-32" cy="-4" r="4" fill="#ffffff" opacity="0.35"/>
+    <circle cx="28" cy="0" r="14" fill="#a78bfa"/>
+    <circle cx="24" cy="-4" r="4" fill="#ffffff" opacity="0.35"/>
+    <line x1="-14" y1="0" x2="2" y2="0" stroke="#22d3ee" stroke-width="5" stroke-linecap="round" opacity="0.9"/>
+    <line x1="6" y1="0" x2="14" y2="0" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" opacity="0.9"/>
+    <circle cx="4" cy="0" r="7" fill="#ffffff"/>
+  </g>
+  <!-- App name -->
+  <text x="82" y="170" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600" fill="#f1f5f9" letter-spacing="1">Synapse</text>
+  <!-- Tagline -->
+  <text x="82" y="195" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#64748b">Agent-native API workbench</text>
+  <!-- Bottom decorative line -->
+  <rect x="52" y="260" width="60" height="2" rx="1" fill="#22d3ee" opacity="0.6"/>
+</svg>
