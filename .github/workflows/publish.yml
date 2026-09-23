@@ -186,8 +186,9 @@ jobs:
           # package.json —— 少改一处的后果是「安装包文件名是一个版本、exe 属性里是另一个」。
           # （这三处 + 4 个 crate 已由 release-please 的 extra-files 自动同步。）
           tagName: v__VERSION__
-          # Release 标题
-          releaseName: 'reqly v__VERSION__'
+          # Release 标题与 tag 保持一致（不带旧品牌名前缀；项目对外品牌是
+          # Synapse，但标题里放品牌名会和 tag / release-please 风格不一致）
+          releaseName: 'v__VERSION__'
           releaseBody: |
             三平台安装包见下方 Assets：
             - Windows: `*-setup.exe`（NSIS）
