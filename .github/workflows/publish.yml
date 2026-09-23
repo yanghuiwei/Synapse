@@ -179,6 +179,11 @@ jobs:
           releaseDraft: true
           prerelease: false
 
+          # release-please 侧 skip-github-release: true 之后，Release 对象由本
+          # action 创建，notes 用 GitHub 自动生成的（按合并的 PR 归类），
+          # 会和上面的 releaseBody 拼接在一起。
+          generateReleaseNotes: true
+
           # 本仓库 package.json 没有 packageManager 字段，显式指定更稳，
           # 免得 action 自己探测包管理器时选到 npm。
           tauriScript: pnpm tauri
