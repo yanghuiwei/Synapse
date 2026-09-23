@@ -1,0 +1,54 @@
+# 发版编排流水线：合并 PR 到 main → 维护「release vX.Y.Z」PR → 合并后自动 push tag
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 与已有的 publish.yml 的分工
+#   release-please.yml （本文件）—— 只负责**版本号和 tag**：
+#     1) 每次 push main，扫描自上一版以来的 conventional commits
+#     2) 开/更新一个常驻 PR「chore: release vX.Y.Z」，里面同步 6 处版本号 + CHANGELOG
+#     3) 一旦这个 PR 被合并，自动 push 对应的 git tag
+#   publish.yml        —— 只负责**构建和发布**：
+#     监听 tag push，跑三平台 tauri-action，出 Draft Release
+#   两个 workflow 用 tag 作为接力棒，各干各的。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠️ token 的选择（决定这个流程能不能自动接力）
+#   用 secrets.GITHUB_TOKEN：release-please 能开 PR，但它 push 出来的 tag
+#     **不会**触发 publish.yml —— GitHub 有防递归规则，同一个 workflow run 里
+#     由 GITHUB_TOKEN 产生的事件不再启动别的 workflow。症状是：tag 推上去了，
+#     Release 页面却始终没有 Draft。
+#   用 secrets.RELEASE_PLEASE_TOKEN（fine-grained PAT）：走用户身份 push，
+#     tag 事件正常触发 publish.yml。这是官方文档明确推荐的做法。
+#   PAT 权限最小集：
+#     - Repository access: 只选 yanghuiwei/Synapse
+#     - Contents:         Read and write
+#     - Pull requests:    Read and write
+#     - Metadata:         Read（自动带）
+#   到期前记得续，或改用 release-please GitHub App（无需管过期）。
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# main 上短时间内连推几次，只跑最新一次：release PR 的状态是幂等重算的，
+# 老的 run 继续跑只会浪费分钟数、还可能把 tag 打乱。
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
