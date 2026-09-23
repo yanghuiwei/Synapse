@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/yanghuiwei/Synapse/compare/v0.2.0...v0.2.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **ci:** create release-please GitHub Releases as drafts ([4d9b675](https://github.com/yanghuiwei/Synapse/commit/4d9b6757c042ba7a853a67a4368ee238d64e14c4))
+* **ci:** create release-please GitHub Releases as drafts ([201104e](https://github.com/yanghuiwei/Synapse/commit/201104e442c5613c56d904e45f62f25a81bc10c6))
+
 ## [0.2.0](https://github.com/yanghuiwei/Synapse/compare/v0.1.0...v0.2.0) (2026-09-23)
 
 
