@@ -1,6 +1,6 @@
 [package]
 name = "reqly-mcp"
-version = "0.2.0" # x-release-please-version
+version = "0.2.1" # x-release-please-version
 edition = "2021"
 description = "Reqly 的 MCP Server：把本地 API 工作台暴露成 AI 客户端的工具集"
 
