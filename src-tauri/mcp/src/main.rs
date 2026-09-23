@@ -34,13 +34,13 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_FAILURE: u8 = 1;
 
 const USAGE: &str = "\
-reqly-mcp —— 把 Reqly 工作台暴露成 MCP 工具集
+reqly-mcp —— 把 Synapse 工作台暴露成 MCP 工具集
 
 用法：
   reqly-mcp --db <path> [--http] [--port <n>] [--read-only]
 
 参数：
-  --db <path>   必填。Reqly 的 SQLite 文件；桌面端「设置」页能直接看到它的绝对路径。
+  --db <path>   必填。Synapse 的 SQLite 文件；桌面端「设置」页能直接看到它的绝对路径。
                 文件不存在会新建一个空库（迁移会自动跑）。
   --http        走回环 HTTP 通道（默认是 stdio）。只绑 127.0.0.1，不对外。
   --port <n>    HTTP 端口，默认 7777。只有 --http 时有意义。

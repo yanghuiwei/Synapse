@@ -242,7 +242,7 @@ fn build(settings: &RequestSettings, profile: PoolProfile) -> AppResult<Client> 
 }
 
 fn user_agent() -> String {
-    format!("Reqly/{}", env!("CARGO_PKG_VERSION"))
+    format!("Synapse/{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]
@@ -251,6 +251,18 @@ mod tests {
 
     fn settings() -> RequestSettings {
         RequestSettings::default()
+    }
+
+    #[test]
+    fn user_agent_carries_the_brand_and_version() {
+        // 这条以前只被 `tests/http_live.rs` 的联网用例覆盖，而那个文件默认 ignored ——
+        // 于是「UA 里的品牌名」在改名时是最容易漏掉、且漏了不会被任何测试拦下的一处。
+        let ua = user_agent();
+        assert!(
+            ua.starts_with("Synapse/"),
+            "UA 的品牌前缀必须是 Synapse，实际：{ua}"
+        );
+        assert_eq!(ua, format!("Synapse/{}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

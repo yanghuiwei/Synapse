@@ -96,7 +96,7 @@ async fn get_against_httpbin_succeeds() {
     assert_eq!(json["args"]["x"], "1", "响应体：{}", out.body);
     // 我们的 UA 也应当出现在回显里
     assert!(
-        find_header(&json["headers"], "user-agent").starts_with("Reqly/"),
+        find_header(&json["headers"], "user-agent").starts_with("Synapse/"),
         "响应体：{}",
         out.body
     );

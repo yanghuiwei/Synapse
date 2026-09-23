@@ -24,6 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Synapse",
     "externalBin": [
       "binaries/reqly-mcp",
       "binaries/reqly-cli"

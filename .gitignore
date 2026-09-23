@@ -28,6 +28,25 @@ src-tauri/binaries/*.sig
 # NSIS 安装钩子的自测脚本编译产物（源文件在 src-tauri/nsis/，每次跑测试重新生成）
 src-tauri/nsis/*.exe
 
+# 三平台安装包产物。`pnpm tauri build` 默认把 result 放在 src-tauri/target/ 下（已被忽略），
+# 但手工取出来验证、或换个 --out 目录放到仓库根时就会露在外面 —— 三平台各一套，
+# 全是几十 MB 的二进制，进了仓库就再也删不干净（历史里会一直留着）。
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*-setup.exe
+
+# 本地 SQLite 库。本项目的定位就是「数据只留在本机」，调试时把库拷进仓库
+# 是最常见的误提交 —— 而它里面装着用户真实的接口凭据与历史。
+# WAL 兄弟文件是「原文件名 + 后缀」（reqly.db-wal），所以必须分开写。
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+!src-tauri/core/migrations/*.sql
+
 # 凭据类文件一律不进仓库 —— 远端是公开仓库，而 Reqly 的定位就是
 # 「凭据只留在本机」（secret 存本地库、token 从接口取），
 # 真出现这类文件基本都是调试时随手丢下的，不该被提交。

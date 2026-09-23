@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      桌面端里这个引号是摆设：Tauri 的窗口标题来自 tauri.conf.json 的 app.windows[].title，
+      这里的 <title> 只在 `pnpm dev` 用浏览器直接看页面时才可见。
+      两处写同一个品牌名，改的时候一起改。
+    -->
+    <meta name="description" content="Synapse — 本地优先的 Agent 原生 API 工作台" />
     <meta name="color-scheme" content="light dark" />
     <title>Synapse</title>
 

@@ -76,11 +76,11 @@ CLI 的 stdout 是干净文本或 JSON，适合管道、脚本、以及把大响
 #[command(
     name = "reqly-cli",
     version,
-    about = "Reqly 的命令行入口：同一个本地工作台，给脚本和 AI 用",
+    about = "Synapse 的命令行入口：同一个本地工作台，给脚本和 AI 用",
     after_help = EXAMPLES
 )]
 struct Cli {
-    /// Reqly 的 SQLite 文件路径（也可以设环境变量 REQLY_DB）。
+    /// Synapse 的 SQLite 文件路径（也可以设环境变量 REQLY_DB）。
     /// 桌面端「设置」页能直接看到它的绝对路径。
     /// 文件不存在会新建一个空库（迁移会自动跑）—— 抄示例里的路径前先确认它真在那儿。
     #[arg(long, global = true, env = "REQLY_DB", value_name = "PATH")]
