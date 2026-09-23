@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/yanghuiwei/Synapse/compare/v0.4.0...v0.5.0) (2026-09-23)
+
+
+### Features
+
+* **brand:** 全面更名为 Synapse，重写 README 并补齐忽略规则 ([afcc79d](https://github.com/yanghuiwei/Synapse/commit/afcc79d78ad0b06a000739a6fa8bc75b1d93ef8c))
+* **brand:** 全面更名为 Synapse，重写 README 并补齐忽略规则 ([79b23be](https://github.com/yanghuiwei/Synapse/commit/79b23be5af0097ffce2ace68731348f585f2cdb5))
+
+
+### Bug Fixes
+
+* **ci:** drop stale brand prefix from Release titles ([2f84a18](https://github.com/yanghuiwei/Synapse/commit/2f84a1815125817a3cf37b05f404ae31184c48f6))
+* **ci:** drop stale brand prefix from Release titles ([1dae4d4](https://github.com/yanghuiwei/Synapse/commit/1dae4d4ab49966172c6896efdeee7e2db8353d20))
+
 ## [0.4.0](https://github.com/yanghuiwei/Synapse/compare/v0.3.0...v0.4.0) (2026-09-23)
 
 
