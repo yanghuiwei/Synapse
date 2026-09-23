@@ -1,6 +1,6 @@
 [package]
 name = "reqly-core"
-version = "0.2.1" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 edition = "2021"
 description = "Reqly 的核心层：存储 / HTTP 执行 / 模板 / 压测 / 导入器（不含 Tauri）"
 # 刻意不写 authors / license：那是对外发布的元数据，归桌面 package。
