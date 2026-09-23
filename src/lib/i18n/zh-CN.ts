@@ -473,7 +473,7 @@ export const zhCN = {
   "import.sourceApipost": "ApiPost 导出文件",
   "import.sourceOpenapi": "OpenAPI / Swagger",
   "import.sourcePostman": "Postman 集合",
-  "import.sourceReqly": "Reqly 导出文件",
+  "import.sourceReqly": "Synapse 导出文件",
   "import.sourceHar": "HAR（浏览器 / Charles 抓包导出）",
   "import.curlPlaceholder": "把 curl 命令粘贴到这里，可粘多条",
   "import.pickFile": "选择文件…",
@@ -487,7 +487,7 @@ export const zhCN = {
   "import.done": "已导入 {count} 个接口",
   "import.committing": "正在导入…",
   "import.empty": "还没有内容",
-  "import.emptyHint": "粘贴 cURL 命令，或选一个 Postman / ApiPost / HAR / Reqly 导出的文件",
+  "import.emptyHint": "粘贴 cURL 命令，或选一个 Postman / ApiPost / HAR / Synapse 导出的文件",
   "import.nothingToImport": "这份内容里没有可导入的接口",
 
   // 冲突模式
@@ -797,7 +797,7 @@ export const zhCN = {
   "request.bodyPlaceholder": "在这里粘贴或输入请求体…",
   "request.bodyJsonHint": "发送前会在本地校验一次 JSON，不合法的写法不用白跑一趟网络",
   "request.bodyUrlencodedHint": "这些键值对会拼成 a=1&b=2 发出去，{{…}} 占位符原样保留",
-  "request.bodyFormHint": "文件字段填的是本机路径，发送时才读盘；表单边界由 reqly 生成",
+  "request.bodyFormHint": "文件字段填的是本机路径，发送时才读盘；表单边界由 Synapse 生成",
   "request.placeholderHint": "{{…}} 是占位符，发送前解析",
   "request.unsupportedBody": "{type} 暂未支持，P2 只做 JSON / 文本",
   "request.sendShortcut": "发送（Ctrl+Enter）",

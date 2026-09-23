@@ -262,7 +262,7 @@ impl ReqlyMcp {
 #[tool_handler(
     router = Self::tool_router(),
     name = "reqly",
-    instructions = "Reqly 是一个本地优先的 API 调试工作台。你操作的是用户本机上同一个 SQLite 库，桌面端打开着的话会实时刷新。推荐顺序：先用 list_requests（可按名模糊搜）或 list_folders 找到目标请求的 requestId；再 get_request 看完整定义；想先试一下就直接 send_request（内联覆盖几个字段即可，不必先保存），确认无误再用 update_request 落库；要压测用 run_load_test（阻塞到跑完，上限 120 秒）；新建用 create_request，整理位置用 move_request，不要了用 delete_request（进回收站可还原）；从浏览器 DevTools 复制的 curl 直接交给 import_curl。约束：isSecret 为真的环境变量值一律返回 ••••，原文不会经过 MCP 通道，要用它请在请求里写 {{env.KEY}} 占位符；send_request 的响应体超 64KB 会截断（bodyTruncated/bodySize 会如实标记），set-cookie 与 authorization 响应头会打码；environment 参数目前只接受用户当前激活的那个环境名，传别的会返回 E_NOT_IMPLEMENTED；只读模式下所有写类 tool 返回 permission_denied。"
+    instructions = "Synapse 是一个本地优先的 API 调试工作台。你操作的是用户本机上同一个 SQLite 库，桌面端打开着的话会实时刷新。推荐顺序：先用 list_requests（可按名模糊搜）或 list_folders 找到目标请求的 requestId；再 get_request 看完整定义；想先试一下就直接 send_request（内联覆盖几个字段即可，不必先保存），确认无误再用 update_request 落库；要压测用 run_load_test（阻塞到跑完，上限 120 秒）；新建用 create_request，整理位置用 move_request，不要了用 delete_request（进回收站可还原）；从浏览器 DevTools 复制的 curl 直接交给 import_curl。约束：isSecret 为真的环境变量值一律返回 ••••，原文不会经过 MCP 通道，要用它请在请求里写 {{env.KEY}} 占位符；send_request 的响应体超 64KB 会截断（bodyTruncated/bodySize 会如实标记），set-cookie 与 authorization 响应头会打码；environment 参数目前只接受用户当前激活的那个环境名，传别的会返回 E_NOT_IMPLEMENTED；只读模式下所有写类 tool 返回 permission_denied。"
 )]
 impl ServerHandler for ReqlyMcp {}
 
