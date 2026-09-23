@@ -183,8 +183,10 @@ jobs:
           # 免得 action 自己探测包管理器时选到 npm。
           tauriScript: pnpm tauri
 
-          # 没接 updater 时这项不会产出任何资产；显式写出来是当文档用（默认值本来就是 true）
-          uploadUpdaterJson: true
+          # 没接 updater 时这项不会产出任何资产；显式写出来是当文档用（默认值本来就是 true）。
+          # 注意 action 的入参名是 includeUpdaterJson —— 之前写成 uploadUpdaterJson
+          # 会被 tauri-action 当未知输入忽略，并在每次运行的 Annotations 里留一条警告。
+          includeUpdaterJson: true
           # Windows 侧 bundle.targets 被 tauri.windows.conf.json 收窄成了 ["nsis"]，
           # 只有 setup.exe 一种。显式 prefer-nsis 保证将来 updater 的 latest.json 指向 .exe
           updaterJsonPreferNsis: true

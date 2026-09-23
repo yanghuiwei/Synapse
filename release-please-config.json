@@ -14,13 +14,13 @@
       "extra-files": [
         {
           "type": "json",
-          "path": "version",
-          "file": "package.json"
+          "path": "package.json",
+          "jsonpath": "$.version"
         },
         {
           "type": "json",
-          "path": "version",
-          "file": "src-tauri/tauri.conf.json"
+          "path": "src-tauri/tauri.conf.json",
+          "jsonpath": "$.version"
         },
         {
           "type": "generic",
