@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "draft": false,
+  "prerelease": false,
+  "packages": {
+    ".": {
+      "package-name": "Synapse",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "version",
+          "file": "package.json"
+        },
+        {
+          "type": "json",
+          "path": "version",
+          "file": "src-tauri/tauri.conf.json"
+        },
+        {
+          "type": "generic",
+          "path": "src-tauri/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "src-tauri/core/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "src-tauri/mcp/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "src-tauri/cli/Cargo.toml"
+        }
+      ]
+    }
+  }
+}
