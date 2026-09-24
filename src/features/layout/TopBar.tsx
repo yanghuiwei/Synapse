@@ -94,6 +94,9 @@ export function TopBar() {
         {t("sidebar.import")}
       </Button>
 
+      {/* 顶栏**没有** Token 解析栏的开关：工具现在是「工具」板块的主视图，
+          而左栏的活动栏本身就是那块的路由。在顶栏再开一个入口，
+          会让人以为它是个跟板块无关的浮层 —— 而它并不是 */}
       <ThemeToggle />
     </header>
   );

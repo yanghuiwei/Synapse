@@ -1,4 +1,4 @@
-import { Clock, Copy, CornerUpLeft, Eye, LoaderCircle, SearchX, Trash } from "lucide-react";
+import { Clock, Copy, CornerUpLeft, LoaderCircle, SearchX, Trash } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -12,23 +12,23 @@ import { zhCN } from "@/lib/i18n/zh-CN";
 import type { HistoryEntry, RequestSpec } from "@/lib/types";
 import { ContextMenu, type MenuItem } from "@/features/ui/ContextMenu";
 import { EmptyState } from "@/features/ui/EmptyState";
-import { HistoryResponseDialog, hasResponse } from "./HistoryResponseDialog";
 import { useHistoryStore } from "@/store/history";
 import { useRequestStore } from "@/store/request";
 import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 
 /**
- * 历史记录列表。
+ * 历史记录列表（现在住在**历史主视图的左侧**那一列）。
  *
  * 三条实现选择：
  *
- * 1. **列表是「流」不是「页」**：时间倒序往下滚，滚到底自动续一页。
+ * 1. **左键只选中**，详情由右侧主视图显示。回填编辑器移到右键菜单第一项 ——
+ *    那个动作会把中间区从「历史」切走、换掉请求草稿，不该是单击的副作用。
+ *    第一版是「左键回填」，那在侧栏里说得通（因为没有别处能显示内容）；
+ *    搬进主视图之后就成了「点一下，右边还是空的」。
+ * 2. **列表是「流」不是「页」**：时间倒序往下滚，滚到底自动续一页。
  *    也保留一个显式的「加载更多」按钮 —— 自动加载依赖滚动事件，
  *    而内容比视口短的时候不会触发滚动，那时按钮是唯一的出路。
- * 2. **点一下回填编辑器**，而不是「打开那条记录」。历史存的是**快照**，
- *    它对应用户当时发出去的那一份内容；回填之后源请求可能早就改了，
- *    所以回填出来的草稿是「未保存」的（`sourceId = null`）。
  * 3. **分组标题用相对时间**（今天 / 昨天 / 更早）而不是逐条显示完整时间戳：
  *    一列毫秒时间戳没人在读，而「今天 / 昨天」是扫一眼就能用的定位信息。
  */
@@ -42,12 +42,13 @@ export function HistoryList() {
   const keyword = useHistoryStore((s) => s.keyword);
   const loadingMore = useHistoryStore((s) => s.loadingMore);
   const load = useHistoryStore((s) => s.load);
+  /** 当前选中的那一条 —— 详情在主视图右侧渲染，所以选中态在 store 里 */
+  const selectedId = useHistoryStore((s) => s.selectedId);
+  const select = useHistoryStore((s) => s.select);
 
   const [menu, setMenu] = useState<{ x: number; y: number; entry: HistoryEntry } | null>(
     null,
   );
-  /** 正在查看「当时的响应」的那一条；`null` = 没开着 */
-  const [responseEntry, setResponseEntry] = useState<HistoryEntry | null>(null);
 
   // 首次挂载拉第一页。
   //
@@ -88,12 +89,23 @@ export function HistoryList() {
   // 回填 / 删除
   // ---------------------------------------------------------------
 
+  /**
+   * 把这一条快照灌进请求编辑器。
+   *
+   * ⚠️ 只在**右键菜单**里调用，不做单击的副作用。
+   *
+   * 历史存的是快照，回填出来的草稿没有归属（`sourceId = null`）；
+   * 而且这个动作必须离开「历史」板块才看得见结果 —— 也就是说，
+   * 单击它等于「用户想看一眼响应，结果被切走了」。所以一并切到「集合」，
+   * 让结果出现在用户眼前，而不是在背后悄悄改掉一份草稿。
+   */
   const fill = useCallback((entry: HistoryEntry) => {
     const spec = specOf(entry);
     if (!spec) return;
     // 快照和树上任何一行都不对应，别让树高亮着上一个请求 ——
     // 否则会出现「左边选中 A，右边编辑的是另一种内容」
     useUiStore.getState().setActiveRequestId(null);
+    useUiStore.getState().setSection("collections");
     useRequestStore.getState().openSpec(spec, entry.requestName);
   }, []);
 
@@ -101,15 +113,6 @@ export function HistoryList() {
     if (!menu) return [];
     const { entry } = menu;
     return [
-      {
-        key: "view-response",
-        label: t("history.viewResponse"),
-        icon: Eye,
-        // 没响应可看时置灰而不是藏起来：藏起来用户既不知道有这个功能，
-        // 也不知道「这条为什么没有」—— 而失败的那几条恰恰最想让人点开看
-        disabled: !hasResponse(entry),
-        onSelect: () => setResponseEntry(entry),
-      },
       {
         key: "fill",
         label: t("history.fill"),
@@ -209,7 +212,8 @@ export function HistoryList() {
               <li key={entry.id}>
                 <HistoryRow
                   entry={entry}
-                  onOpen={() => fill(entry)}
+                  selected={entry.id === selectedId}
+                  onSelect={() => select(entry.id)}
                   onMenu={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -252,15 +256,6 @@ export function HistoryList() {
           onClose={() => setMenu(null)}
         />
       ) : null}
-
-      {/* 查看「当时的响应」。菜单不用在这里手动关 —— `ContextMenu` 的点击处理
-          是 `onSelect()` 紧跟着 `onClose()`，同一拍里菜单就收掉了，不会两个浮层叠着 */}
-      {responseEntry ? (
-        <HistoryResponseDialog
-          entry={responseEntry}
-          onClose={() => setResponseEntry(null)}
-        />
-      ) : null}
     </>
   );
 }
@@ -278,11 +273,13 @@ function Loading() {
 
 function HistoryRow({
   entry,
-  onOpen,
+  selected,
+  onSelect,
   onMenu,
 }: {
   entry: HistoryEntry;
-  onOpen: () => void;
+  selected: boolean;
+  onSelect: () => void;
   onMenu: (e: React.MouseEvent) => void;
 }) {
   const { t } = useI18n();
@@ -290,18 +287,23 @@ function HistoryRow({
   const url = urlOf(entry);
   const point = timePoint(entry.executedAt);
 
-  // 悬停给全：地址 + 出错原因（如果有）+ 「点击能做什么」
-  const hint = [url, statusTitleOf(entry), t("history.fillHint")]
+  // 悬停给全：地址 + 出错原因（如果有）+「右键能做什么」。
+  // 不再说「点击回填」—— 那已经不是单击的行为了
+  const hint = [url, statusTitleOf(entry), t("history.rightClickHint")]
     .filter((line): line is string => line !== undefined && line !== "")
     .join("\n");
 
   return (
     <button
       type="button"
-      onClick={onOpen}
+      onClick={onSelect}
       onContextMenu={onMenu}
       title={hint}
-      className="flex w-full flex-col gap-0.5 rounded-sm px-1.5 py-1 text-left transition-colors duration-75 hover:bg-surface-hover"
+      aria-current={selected ? "true" : undefined}
+      className={cn(
+        "flex w-full flex-col gap-0.5 rounded-sm px-1.5 py-1 text-left transition-colors duration-75",
+        selected ? "bg-brand/12" : "hover:bg-surface-hover",
+      )}
     >
       <span className="flex w-full items-center gap-1.5">
         <span
@@ -337,18 +339,18 @@ function HistoryRow({
 // ---------------------------------------------------------------
 
 /** 快照 → 可信的 `RequestSpec`；快照坏了（或没有地址）返回 null */
-function specOf(entry: HistoryEntry): RequestSpec | null {
+export function specOf(entry: HistoryEntry): RequestSpec | null {
   const parsed = requestSpecSchema.safeParse(entry.snapshot);
   if (!parsed.success) return null;
   return parsed.data.url.trim() === "" ? null : parsed.data;
 }
 
-function methodOf(entry: HistoryEntry): string {
+export function methodOf(entry: HistoryEntry): string {
   const raw = entry.snapshot["method"];
   return typeof raw === "string" && raw !== "" ? raw : "GET";
 }
 
-function urlOf(entry: HistoryEntry): string {
+export function urlOf(entry: HistoryEntry): string {
   const raw = entry.snapshot["url"];
   return typeof raw === "string" ? raw : "";
 }
@@ -362,7 +364,7 @@ function urlOf(entry: HistoryEntry): string {
  * 塞进 10px 的状态位会把整行撑开、时间列全部错位。
  * 完整原因放 `statusTitleOf()`，挂在行的 `title` 上。
  */
-function statusLabelOf(entry: HistoryEntry, t: TranslateFn): string {
+export function statusLabelOf(entry: HistoryEntry, t: TranslateFn): string {
   if (entry.status !== null) return String(entry.status);
   return t("history.failed");
 }
@@ -382,7 +384,7 @@ function statusTitleOf(entry: HistoryEntry): string | undefined {
   return template.includes("{") ? entry.error : template;
 }
 
-function statusClassOf(entry: HistoryEntry): string {
+export function statusClassOf(entry: HistoryEntry): string {
   if (entry.status !== null) return statusTextClass(entry.status);
   return "text-err";
 }

@@ -25,6 +25,7 @@ import {
   SquareX,
   SunMoon,
   Trash,
+  Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -124,6 +125,19 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
     group: "go",
     icon: Gauge,
     run: () => goToSection("loadtest"),
+  },
+  {
+    id: "go.tools",
+    titleKey: "palette.goTools",
+    keywords: ["tools", "jwt", "token", "decode", "工具", "解析"],
+    group: "go",
+    icon: Wrench,
+    // 「前往工具」顺带把 Token 解析打开 —— 切到板块却不打开那个工具，
+    // 中间会是一片空态，用户会以为这个功能没做
+    run: () => {
+      goToSection("tools");
+      useUiStore.getState().setTokenToolOpen(true);
+    },
   },
   {
     id: "go.trash",

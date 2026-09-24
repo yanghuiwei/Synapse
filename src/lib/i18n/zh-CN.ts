@@ -26,6 +26,7 @@ export const zhCN = {
   "common.empty": "暂无数据",
   "common.search": "搜索",
   "common.retry": "重试",
+  "common.clear": "清除",
   "common.unsaved": "未保存",
   "common.comingSoon": "功能开发中",
   "common.skeletonHint": "界面骨架已就绪，交互逻辑随后接入",
@@ -45,6 +46,7 @@ export const zhCN = {
   "nav.history": "历史",
   "nav.environments": "环境",
   "nav.loadtest": "压测",
+  "nav.tools": "工具",
   "nav.settings": "设置",
   "nav.trash": "回收站",
   "sidebar.new": "新建",
@@ -251,7 +253,6 @@ export const zhCN = {
   "history.total": "共 {count} 条",
   "history.filteredTotal": "匹配 {count} 条",
   "history.failed": "失败",
-  "history.fillHint": "点击可回填到编辑器",
   "history.fillMissing": "这个请求已被删除，只能回填内容",
   "history.clearConfirmTitle": "清空历史？",
   "history.deleteTitle": "删除这条历史",
@@ -263,8 +264,10 @@ export const zhCN = {
   "history.moveToTrash": "移入回收站",
   "history.noMatchHint": "换个关键字试试（当前是「{keyword}」）",
   "history.rightClickHint": "右键管理",
-  "history.viewResponse": "查看响应",
   "history.responseTitle": "「{name}」的响应",
+  "history.detailEmpty": "选一条历史看内容",
+  "history.detailEmptyHint": "左边点一下，这里会显示当时发出去的内容和拿回来的响应。",
+  "history.requestName": "请求名",
   "history.responseSnapshotHint":
     "这是当时那一次的响应快照：状态、响应头与响应体都在写库时留了下来。首字节与下载两段耗时没有留存，所以这里没有时间线页签。",
   "history.responseBodyMissing":
@@ -564,6 +567,8 @@ export const zhCN = {
   "loadtest.minDuration": "按当前请求间隔，这一轮至少 {value} 秒",
   "loadtest.defaultHint": "默认 {concurrency} 并发 / {total} 请求",
   "loadtest.start": "开始压测",
+  "loadtest.pickRun": "选一轮看报告",
+  "loadtest.pickRunHint": "左边点一下，这里会显示那一轮的参数、概要、延迟分布与图表。",
   "loadtest.stop": "停止",
   "loadtest.stopping": "正在停止…",
   "loadtest.running": "压测中",
@@ -649,7 +654,6 @@ export const zhCN = {
   "loadtest.noHistogram": "没有延迟分布数据",
   "loadtest.percent": "占比",
   "loadtest.cancelledTag": "已取消",
-  "loadtest.reportFor": "第 #{id} 轮",
   "loadtest.elapsedShort": "总耗时",
   "loadtest.notes": "说明",
   "loadtest.histogramHint": "{count} 个桶，按 2 的幂划分（左端包含、右端不包含）",
@@ -669,8 +673,11 @@ export const zhCN = {
   "loadtest.reveal": "打开所在目录",
 
   // 历史
-  "loadtest.historyRuns": "历史压测",
   "loadtest.noRuns": "还没有压测记录",
+  "loadtest.historyTitle": "历史压测",
+  // 侧栏与主视图都能用的通用文案：这些板块的列表整份搬进主视图了
+  "sidebar.inMainView": "内容在主视图里",
+  "sidebar.inMainViewHint": "这一块的内容已经整份放进主视图 —— 那里宽度够，地址不用截断。",
   "loadtest.sampleCount": "{count} 条明细",
   "loadtest.samplesPrunedShort": "明细已清理",
   "loadtest.unfinished": "未完成",
@@ -730,6 +737,7 @@ export const zhCN = {
   "palette.goHistory": "前往历史",
   "palette.goEnvironments": "前往环境",
   "palette.goLoadtest": "前往压测",
+  "palette.goTools": "前往工具",
   "palette.goTrash": "前往回收站",
   "palette.goSettings": "前往设置",
   "palette.newRequest": "新建请求",
@@ -901,6 +909,41 @@ export const zhCN = {
   "mcp.readonly": "加 --read-only 启动，所有写操作会被拒 —— AI 只能看，不能改",
   "mcp.toolsTitle": "13 个工具",
   "mcp.tools": "只读 4 个：文件夹 / 请求 / 详情 / 环境变量。可写 9 个：新建 / 修改 / 删除 / 移动 / 发送 / 压测 / 刷新 Token / 写变量 / 导入 curl。",
+
+  // ---- 工具 ----
+  // Token 解析。⚠️ 文案的分寸：这里**只解码，不验签** ——
+  // 不要说「验证通过」「安全」，也不要暗示它能判断这个 token 能不能用
+  "tools.token": "Token 解析",
+  "tools.tokenDesc": "把 JWT 拆开看明文",
+  "tools.emptyWorkspace": "Token 解析已关掉 —— 点左侧的「Token 解析」重新打开",
+  "tools.close": "关闭 Token 解析",
+  "tools.tokenEmpty": "粘一段 token 进来看里面写了什么",
+  "tools.tokenHint":
+    "JWT 的头部与载荷是 base64url 明文，本地就能解开 —— 不用找在线解码网站，也就等于没把它发出去",
+  "tools.inputLabel": "token",
+  "tools.inputPlaceholder": "粘一段 token，自带 Bearer 前缀也没关系",
+  "tools.decode": "解析",
+  "tools.clear": "清空",
+  "tools.header": "头部（Header）",
+  "tools.payload": "载荷（Payload）",
+  "tools.signature": "签名（Signature）",
+  "tools.signatureNote": "签名是二进制，这里只显示长度，不做解码",
+  "tools.signatureEmpty": "这一段的签名是空的 —— alg 多半是 none",
+  "tools.signatureLength": "{count} 个字符",
+  "tools.claim": "字段",
+  "tools.claimMeaning": "含义",
+  "tools.claimValue": "值",
+  // 表头那一列已经写着「含义」，所以格子里放一个破折号就够 ——
+  // 之前这里写的是「未收录的字段」，一屏四个未收录 claim 就是四遍同样的字，
+  // 挤在 18% 宽的列里比破折号难扫得多
+  "tools.claimUnknown": "—",
+  "tools.notAToken": "这段文本里没有认出 token",
+  "tools.notATokenHint":
+    "认的形状是三段 base64url（`aa.bb.cc`），且载荷能解出 JSON。认不出时这里不会猜 —— 猜错的值比没有值更容易让人误判。",
+  "tools.expired": "已过期",
+  "tools.valid": "未过期",
+  "tools.notYetValid": "还没生效",
+  "tools.noVerify": "只解码，不验签：上面的内容出自这段文本自己，签名有没有效这里看不出来",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

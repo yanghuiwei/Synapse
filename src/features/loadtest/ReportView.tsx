@@ -86,23 +86,34 @@ export function ReportView({
 // 头部：这一轮是什么
 // ---------------------------------------------------------------
 
+/**
+ * 报告头部：这一轮的地址与时间。
+ *
+ * ⚠️ **不再重复「第 #N 轮」那个标题**。报告区原来是请求面板里的一个页签，
+ * 那时左侧没有列表，标题是唯一能说明「这是哪一轮」的东西。搬进压测主视图后，
+ * 左边 `RunList` 里选中的那一行已经高亮了，再写一遍编号就成了同一句话两次。
+ *
+ * 保留下来的三样（地址、起止时间、状态标签）左侧列表**都没有** ——
+ * 列表给的是方法 + 耗时 + P95 这类用来比较的量，而「这一轮是什么时候打的」
+ * 只有在这里能看到。
+ */
 function RunHeader({ run, summary }: { run: LoadtestRun; summary: LoadtestSummary | null }) {
   const { t } = useI18n();
   const target = runTargetOf(run);
 
   return (
     <header className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="font-mono text-[13px] font-semibold text-ink">
-          {t("loadtest.reportFor", { id: run.id })}
-        </h2>
-        {run.finishedAt === null ? (
-          <Tag className="border-warn/40 bg-warn/10 text-warn">{t("loadtest.unfinished")}</Tag>
-        ) : null}
-        {summary?.cancelled === true ? (
-          <Tag className="border-err/40 bg-err/10 text-err">{t("loadtest.cancelledTag")}</Tag>
-        ) : null}
-      </div>
+      {/* 标签行只在真有时才出现 —— 否则会留下一个空的 flex 容器占 20px */}
+      {run.finishedAt === null || summary?.cancelled === true ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {run.finishedAt === null ? (
+            <Tag className="border-warn/40 bg-warn/10 text-warn">{t("loadtest.unfinished")}</Tag>
+          ) : null}
+          {summary?.cancelled === true ? (
+            <Tag className="border-err/40 bg-err/10 text-err">{t("loadtest.cancelledTag")}</Tag>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 地址是这个头部里唯一「必须能选中复制」的东西 */}
       <p className="select-text break-all font-mono text-[11px] text-ink-muted">{target}</p>

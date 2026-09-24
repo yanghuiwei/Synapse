@@ -10,11 +10,12 @@ import { useLoadtestStore, type LoadtestPhase } from "@/store/loadtest";
 import { useRequestStore } from "@/store/request";
 import { ConfigForm } from "./ConfigForm";
 import { LiveStats } from "./LiveStats";
-import { ReportView } from "./ReportView";import { ScopeNote } from "./ScopeNote";
+import { ReportView } from "./ReportView";
+import { ScopeNote } from "./ScopeNote";
 import { Notice, Section } from "./primitives";
 
 /**
- * 「压测」页签的根。
+ * 「压测」页签的内容（住在请求区的 `RequestPane` 里）。
  *
  * 一块屏幕从上到下只有三段：**打什么 → 怎么打 → 打出来什么**。
  * 不做子页签（配置/结果/图表）：压测的价值在于「改一个数字，重跑，看数字怎么动」，
@@ -23,6 +24,14 @@ import { Notice, Section } from "./primitives";
  * 一句话说清一个设计选择：**配置区在跑的时候不隐藏，只禁用**。
  * 隐藏会让人在等结果的时候忘记「这一轮打的是什么参数」，
  * 而那份参数恰恰是解读数字的前提。
+ *
+ * ⚠️ 这个面板**必须待在请求区**，不能做成独立板块。它压的是**当前编辑器里的
+ * 草稿**（`store/loadtest.ts` 的 `start()` 直接读 `request.draft`）：入口和它
+ * 作用的对象必须在同一个地方，否则会出现「在压测页改不了要打的请求」。
+ * 曾经把它搬到「压测」板块的「新压测」页，那一步是错的，已撤回。
+ *
+ * 报告**就地渲染**：跑完一轮立刻能看见数字。板块那边的「历史压测」
+ * 只是给回头对比用的第二份。
  */
 export function LoadTestPanel({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -33,7 +42,6 @@ export function LoadTestPanel({ className }: { className?: string }) {
   const livePoints = useLoadtestStore((s) => s.livePoints);
   const detail = useLoadtestStore((s) => s.detail);
   const chart = useLoadtestStore((s) => s.chart);
-  const detailLoading = useLoadtestStore((s) => s.detailLoading);
   const cancelling = useLoadtestStore((s) => s.cancelling);
   const error = useLoadtestStore((s) => s.error);
   const start = useLoadtestStore((s) => s.start);
@@ -66,54 +74,54 @@ export function LoadTestPanel({ className }: { className?: string }) {
 
   return (
     <section className={cn("flex h-full min-h-0 flex-col bg-canvas", className)}>
-      {/* 顶部：目标 + 唯一的那个动作 */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2.5">
-        <Gauge size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
+        {/* 顶部：目标 + 唯一的那个动作 */}
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2.5">
+          <Gauge size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
 
-        <span className="flex min-w-0 flex-1 items-center gap-1.5" title={t("loadtest.targetHint")}>
-          <span
-            className={cn(
-              "shrink-0 font-mono text-[11px] font-semibold",
-              methodTextClass(draft.method),
-            )}
-          >
-            {draft.method}
+          <span className="flex min-w-0 flex-1 items-center gap-1.5" title={t("loadtest.targetHint")}>
+            <span
+              className={cn(
+                "shrink-0 font-mono text-[11px] font-semibold",
+                methodTextClass(draft.method),
+              )}
+            >
+              {draft.method}
+            </span>
+            <span className="min-w-0 truncate font-mono text-[11px] text-ink-muted">
+              {draft.url.trim() === "" ? t("loadtest.needUrl") : draft.url}
+            </span>
           </span>
-          <span className="min-w-0 truncate font-mono text-[11px] text-ink-muted">
-            {draft.url.trim() === "" ? t("loadtest.needUrl") : draft.url}
-          </span>
-        </span>
 
-        <PhaseTag phase={phase} />
+          <PhaseTag phase={phase} />
 
-        {running ? (
-          <Button
-            variant="danger"
-            size="md"
-            className="shrink-0"
-            icon={<Ban size={13} strokeWidth={2.2} />}
-            disabled={cancelling}
-            // 取消语义挂在这里而不是实时面板里：用户真正需要这句话的一刻，
-            // 就是鼠标移到「停止」上的那一刻。放在下面既占地方又赶不上时候
-            title={t("loadtest.stoppingHint")}
-            onClick={() => void cancel()}
-          >
-            {cancelling ? t("loadtest.stopping") : t("loadtest.stop")}
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            size="md"
-            className="shrink-0"
-            disabled={!canStart}
-            title={canStart ? undefined : t("loadtest.needUrl")}
-            icon={<Play size={13} strokeWidth={2.2} />}
-            onClick={() => void start()}
-          >
-            {t("loadtest.start")}
-          </Button>
-        )}
-      </div>
+          {running ? (
+            <Button
+              variant="danger"
+              size="md"
+              className="shrink-0"
+              icon={<Ban size={13} strokeWidth={2.2} />}
+              disabled={cancelling}
+              // 取消语义挂在这里而不是实时面板里：用户真正需要这句话的一刻，
+              // 就是鼠标移到「停止」上的那一刻。放在下面既占地方又赶不上时候
+              title={t("loadtest.stoppingHint")}
+              onClick={() => void cancel()}
+            >
+              {cancelling ? t("loadtest.stopping") : t("loadtest.stop")}
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              size="md"
+              className="shrink-0"
+              disabled={!canStart}
+              title={canStart ? undefined : t("loadtest.needUrl")}
+              icon={<Play size={13} strokeWidth={2.2} />}
+              onClick={() => void start()}
+            >
+              {t("loadtest.start")}
+            </Button>
+          )}
+        </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-auto px-3 py-3">
         <Section
@@ -153,25 +161,10 @@ export function LoadTestPanel({ className }: { className?: string }) {
           </Notice>
         ) : null}
 
-        {/* 打开历史轮次失败。与上面那条分开，因为语义不同：
-            一条是「刚才那一轮没能跑起来」，一条是「这条记录读不出来」*/}
-        {phase !== "failed" && error !== null ? (
-          <Notice tone="err">{error.localized}</Notice>
-        ) : null}
-
-        {detailLoading ? (
-          <p className="flex items-center justify-center gap-2 py-4 text-[11px] text-ink-faint">
-            <LoaderCircle size={12} strokeWidth={2.2} className="animate-spin" />
-            {t("common.loading")}
-          </p>
-        ) : detail === null ? (
-          // 没有报告时**什么都不画**，而不是放一个「还没有报告」的空态。
-          // 那个空态和侧栏「还没有压测记录」说的是同一件事，而且它会占掉
-          // 150px —— 正好把下面那块「能力边界」顶出可视区。而能力边界
-          // （design.md §7.5）是**必须在这个界面上看得见**的东西：
-          // 用户正要配 500 并发的时候，最该知道这工具做不到分布式加压。
-          null
-        ) : (
+        {/* 报告**就地显示**（③）。跑完一轮立刻能看见数字，不用跳板块 ——
+            这正是把它放回请求页签的理由：压的是这一份草稿，
+            结果就该出现在它旁边。历史里再留一份给回头对比 */}
+        {detail !== null ? (
           <>
             {/* 图表是**第二个**请求（概要先到）。这段间隙里图表还是空的，
                 不说明的话「暂无数据」会被读成「这一轮没采到数据」*/}
@@ -183,7 +176,7 @@ export function LoadTestPanel({ className }: { className?: string }) {
             ) : null}
             <ReportView detail={detail} chart={chart} />
           </>
-        )}
+        ) : null}
 
         <ScopeNote />
       </div>

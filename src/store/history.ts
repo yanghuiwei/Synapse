@@ -21,9 +21,19 @@ export interface HistoryState {
   /** 正在续页（与首屏 loading 分开，避免续页时整个列表变成加载态） */
   loadingMore: boolean;
 
+  /**
+   * 当前选中的那一条历史。
+   *
+   * 放在 store 而不是 `HistoryList` 的局部 state：详情现在由**主视图右侧**渲染，
+   * 而列表住在左侧那一列 —— 两棵子树隔着一层，共享字段比提状态直接。
+   * `null` = 还没选中任何一条（详情区显示空态）。
+   */
+  selectedId: number | null;
+
   load: () => Promise<void>;
   loadMore: () => Promise<void>;
   setKeyword: (keyword: string) => void;
+  select: (id: number | null) => void;
 
   record: (entry: NewHistoryEntry) => Promise<void>;
   remove: (id: number) => Promise<void>;
@@ -47,6 +57,7 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   total: 0,
   keyword: "",
   loadingMore: false,
+  selectedId: null,
 
   load: async () => {
     const workspaceId = currentWorkspaceId();
@@ -105,6 +116,12 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
     // 搜索本身就是「重新开始一次列表」，直接重置到第一页
     void get().load();
   },
+
+  /**
+   * 选中一条。**不动 `load`**，也**不回填编辑器** ——
+   * 选中只决定右侧显示哪一条的详情。
+   */
+  select: (id) => set({ selectedId: id }),
 
   /**
    * 写一条历史。

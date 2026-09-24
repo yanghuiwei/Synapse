@@ -13,6 +13,7 @@ import {
   Settings,
   Trash,
   TriangleAlert,
+  Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useRef, useState } from "react";
@@ -29,9 +30,8 @@ import { EmptyState } from "@/features/ui/EmptyState";
 import { CollectionTree } from "@/features/collections/CollectionTree";
 import { EnvManager } from "@/features/env/EnvManager";
 import { ConnectedImportDialog } from "@/features/import/ImportDialog";
-import { HistoryList } from "@/features/history/HistoryList";
-import { RunList } from "@/features/loadtest/RunList";
 import { McpSetupPanel } from "@/features/mcp/McpSetupPanel";
+import { ToolsPanel } from "@/features/tools/ToolsPanel";
 import { TrashBin } from "@/features/trash/TrashBin";
 
 /**
@@ -106,9 +106,10 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Clock,
     emptyTitleKey: "common.empty",
     emptyDescKey: "sidebar.emptyHistory",
-    actions: [{ id: "clearHistory", labelKey: "history.clearAll", icon: Trash }],
-    searchable: true,
-    searchPlaceholderKey: "history.searchPlaceholder",
+    // 「清空历史」与搜索框都搬到主视图的标题行去了（侧栏在这个板块不显示）——
+    // 见 `HistoryWorkspace`
+    actions: [],
+    searchable: false,
   },
   environments: {
     titleKey: "nav.environments",
@@ -123,6 +124,15 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Gauge,
     emptyTitleKey: "common.empty",
     emptyDescKey: "loadtest.noRuns",
+    actions: [],
+    searchable: false,
+  },
+  tools: {
+    titleKey: "nav.tools",
+    emptyIcon: Wrench,
+    emptyTitleKey: "common.empty",
+    // 实体在 `ToolsPanel` 里（一行入口 → 对话框），所以这里不挂任何标题区动作；
+    // 工具列表本身不长，也不值得一个搜索框
     actions: [],
     searchable: false,
   },
@@ -422,11 +432,25 @@ export function Sidebar() {
         {section === "collections" ? (
           <CollectionsBody />
         ) : section === "history" ? (
-          <HistoryList />
+          // 列表整体在主视图里（`HistoryWorkspace`），侧栏在这个板块不显示
+          <EmptyState
+            icon={Clock}
+            title={t("sidebar.inMainView")}
+            description={t("sidebar.inMainViewHint")}
+            className="mt-8"
+          />
         ) : section === "environments" ? (
           <EnvManager />
         ) : section === "loadtest" ? (
-          <RunList />
+          // 轮次列表整体在主视图里（`LoadtestWorkspace`），同上
+          <EmptyState
+            icon={meta.emptyIcon}
+            title={t("sidebar.inMainView")}
+            description={t("sidebar.inMainViewHint")}
+            className="mt-8"
+          />
+        ) : section === "tools" ? (
+          <ToolsPanel />
         ) : section === "trash" ? (
           <TrashBin />
         ) : (

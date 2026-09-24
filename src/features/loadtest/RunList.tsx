@@ -77,10 +77,13 @@ export function RunList() {
 
   return (
     <>
+      {/* 计数行。**不再写「历史压测」** —— 页签上已经有了，再说一遍是同一句话两次。
+          左边留空则整行只剩「右键管理」右对齐，所以保留计数、只换文案 */}
       <div className="flex items-baseline gap-2 px-1.5 pb-1 pt-0.5">
         <span className="text-[10px] text-ink-faint">
-          {t("loadtest.historyRuns")} · {runs.length}
+          {t("history.total", { count: runs.length })}
         </span>
+        {/* 右键菜单没有任何视觉痕迹，得明说一句 —— 否则这个功能等于不存在 */}
         <span className="ml-auto shrink-0 text-[10px] text-ink-faint/70">
           {t("history.rightClickHint")}
         </span>
