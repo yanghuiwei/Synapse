@@ -184,12 +184,21 @@ function BodyView({
   const [preview, setPreview] = useState(false);
 
   const file = response.bodyFile;
+  /** 超过阈值就别碰这段文本了，美化一定会卡住主线程 */
   const tooBig = response.bodySize > PRETTY_LIMIT;
-  const pretty = useMemo(
-    () => (raw || tooBig ? null : tryPrettyJson(response.body)),
-    [response.body, raw, tooBig],
+  /**
+   * 能不能美化，跟用户当前选了哪边无关 —— 只看这段 body 是不是合法 JSON、体积过不过阈值。
+   * 之前这里把 `raw` 也算进条件，于是点一下「原文」`pretty` 就变 `null`，
+   * 下面的开关组跟着被整块换成静态文字，**「美化」按钮自己没了**：
+   * 用户看原文之后就再也切不回来。开关的显隐不能依赖开关自己的状态。
+   */
+  const prettied = useMemo(
+    () => (tooBig ? null : tryPrettyJson(response.body)),
+    [response.body, tooBig],
   );
+  const canToggle = prettied !== null;
 
+  const pretty = raw ? null : prettied;
   const text = pretty ?? response.body;
   const highlight = pretty !== null && text.length <= HIGHLIGHT_LIMIT;
   const tokens = useMemo(
@@ -234,7 +243,7 @@ function BodyView({
   return (
     <div className={cn("flex min-h-0 flex-col", className)}>
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line px-1.5">
-        {pretty !== null ? (
+        {canToggle ? (
           <div className="flex items-center gap-0.5 rounded-sm bg-canvas-subtle p-0.5">
             <FormatToggle active={!raw} onClick={() => setRaw(false)}>
               {t("response.pretty")}
