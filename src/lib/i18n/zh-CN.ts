@@ -252,7 +252,6 @@ export const zhCN = {
   "history.total": "共 {count} 条",
   "history.filteredTotal": "匹配 {count} 条",
   "history.failed": "失败",
-  "history.fillHint": "点击可回填到编辑器",
   "history.fillMissing": "这个请求已被删除，只能回填内容",
   "history.clearConfirmTitle": "清空历史？",
   "history.deleteTitle": "删除这条历史",
@@ -264,8 +263,10 @@ export const zhCN = {
   "history.moveToTrash": "移入回收站",
   "history.noMatchHint": "换个关键字试试（当前是「{keyword}」）",
   "history.rightClickHint": "右键管理",
-  "history.viewResponse": "查看响应",
   "history.responseTitle": "「{name}」的响应",
+  "history.detailEmpty": "选一条历史看内容",
+  "history.detailEmptyHint": "左边点一下，这里会显示当时发出去的内容和拿回来的响应。",
+  "history.requestName": "请求名",
   "history.responseSnapshotHint":
     "这是当时那一次的响应快照：状态、响应头与响应体都在写库时留了下来。首字节与下载两段耗时没有留存，所以这里没有时间线页签。",
   "history.responseBodyMissing":
@@ -909,8 +910,8 @@ export const zhCN = {
   // 不要说「验证通过」「安全」，也不要暗示它能判断这个 token 能不能用
   "tools.token": "Token 解析",
   "tools.tokenDesc": "把 JWT 拆开看明文",
-  "tools.openPanel": "打开 Token 解析栏",
-  "tools.closePanel": "关闭 Token 解析栏",
+  "tools.emptyWorkspace": "Token 解析已关掉 —— 点左侧的「Token 解析」重新打开",
+  "tools.close": "关闭 Token 解析",
   "tools.tokenEmpty": "粘一段 token 进来看里面写了什么",
   "tools.tokenHint":
     "JWT 的头部与载荷是 base64url 明文，本地就能解开 —— 不用找在线解码网站，也就等于没把它发出去",

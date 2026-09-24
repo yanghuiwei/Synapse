@@ -132,8 +132,8 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
     keywords: ["tools", "jwt", "token", "decode", "工具", "解析"],
     group: "go",
     icon: Wrench,
-    // 「前往工具」顺带把右边那栏打开 —— 切到板块却不打开栏，用户会以为
-    // 这个功能没做（栏在右侧，与板块不是同一个地方）
+    // 「前往工具」顺带把 Token 解析打开 —— 切到板块却不打开那个工具，
+    // 中间会是一片空态，用户会以为这个功能没做
     run: () => {
       goToSection("tools");
       useUiStore.getState().setTokenToolOpen(true);

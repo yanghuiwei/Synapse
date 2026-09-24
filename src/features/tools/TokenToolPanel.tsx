@@ -30,7 +30,7 @@ import { Button, IconButton } from "@/features/ui/Button";
  * 签名可能无效、`alg` 可能是 `none`、`exp` 可能是伪造的 —— 判据在服务端。
  * 所以界面上不出现「有效 / 安全」这类结论性的字眼。
  */
-export function TokenToolPanel() {
+export function TokenToolPanel({ className }: { className?: string }) {
   const { t } = useI18n();
   const setOpen = useUiStore((s) => s.setTokenToolOpen);
   const [input, setInput] = useState("");
@@ -43,14 +43,21 @@ export function TokenToolPanel() {
   );
 
   return (
-    <section className="flex h-full min-h-0 min-w-[300px] flex-col border-l border-line bg-canvas-subtle">
+    <section
+      className={cn(
+        // 铺满主视图时不再画左边框（左边没有东西可分隔），
+        // 也不再设 min-w —— 主视图的宽度由布局给，不该被这里顶出横向滚动
+        "flex h-full min-h-0 flex-col bg-canvas-subtle",
+        className,
+      )}
+    >
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line pl-2.5 pr-1.5">
         <h2 className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-ink">
           {t("tools.token")}
         </h2>
         <IconButton
           size="sm"
-          label={t("tools.closePanel")}
+          label={t("tools.close")}
           onClick={() => setOpen(false)}
         >
           <X size={14} strokeWidth={2} />

@@ -1,4 +1,4 @@
-import { Ban, Braces, ChevronDown, Gauge, KeyRound, ListTree, Save, Send, Settings2, Terminal } from "lucide-react";
+import { Ban, Braces, ChevronDown, KeyRound, ListTree, Save, Send, Settings2, Terminal } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -12,7 +12,6 @@ import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
-import { LoadTestPanel } from "@/features/loadtest/LoadTestPanel";
 import { parsePlaceholders } from "@/lib/placeholder";
 import { TokenGate } from "./TokenGate";
 import { BodyEditor } from "./BodyEditor";
@@ -21,7 +20,7 @@ import { KeyValueTable } from "./KeyValueTable";
 import { SaveDraftDialog } from "./SaveDraftDialog";
 import { UrlBar } from "./UrlBar";
 
-type RequestTab = "params" | "headers" | "body" | "scripts" | "settings" | "loadtest";
+type RequestTab = "params" | "headers" | "body" | "scripts" | "settings";
 
 const TAB_LABEL: Record<RequestTab, MessageKey> = {
   params: "request.tab.params",
@@ -29,7 +28,6 @@ const TAB_LABEL: Record<RequestTab, MessageKey> = {
   body: "request.tab.body",
   scripts: "request.tab.scripts",
   settings: "request.tab.settings",
-  loadtest: "loadtest.tab",
 };
 
 const TAB_ICON: Record<RequestTab, typeof ListTree> = {
@@ -40,7 +38,6 @@ const TAB_ICON: Record<RequestTab, typeof ListTree> = {
   body: Braces,
   scripts: Terminal,
   settings: Settings2,
-  loadtest: Gauge,
 };
 
 /**
@@ -49,20 +46,14 @@ const TAB_ICON: Record<RequestTab, typeof ListTree> = {
  * 「请求体」排在最前：粘一份 JSON 就发是这个工具最高频的用法，而它默认要落在
  * 第一个页签上（`DEFAULT_TAB`），否则每次打开请求都得先点一下才能开始打字。
  *
- * 「压测」排在最后，因为它**不是**在编辑请求 —— 它是拿当前草稿去打一轮。
- * 插在 body/headers 中间会让人以为它也是请求定义的一部分。
- *
  * ⚠️ 这里**没有「授权」页**了（007）：授权就是请求头里的一行，
  * 独立的页签只会让「我配的 token 到底生效没有」这个问题多一层要翻的地方。
+ *
+ * ⚠️ 这里**也没有「压测」页**了（工具板块那一轮）：「压测」现在是**板块**，
+ * 有自己的主视图（左侧历史轮次 + 右侧配置与报告）。留在请求页签里就是
+ * 两处入口、两套状态 —— 而且页签形态下报告和历史列表从来没能同屏出现过。
  */
-const TAB_ORDER: readonly RequestTab[] = [
-  "body",
-  "params",
-  "headers",
-  "scripts",
-  "settings",
-  "loadtest",
-];
+const TAB_ORDER: readonly RequestTab[] = ["body", "params", "headers", "scripts", "settings"];
 
 /** 打开一份内容时先展示哪个页签 —— 见 `TAB_ORDER` 上的理由 */
 const DEFAULT_TAB: RequestTab = "body";
@@ -333,11 +324,7 @@ export function RequestPane() {
       </div>
 
       {/* 内容区 */}
-      {tab === "loadtest" ? (
-        // 压测面板自带滚动与内边距（它的内容比一个表格复杂得多），
-        // 所以不像其它页签那样再套一层 overflow 容器
-        <LoadTestPanel className="min-h-0 flex-1" />
-      ) : tab === "body" ? (
+      {tab === "body" ? (
         <BodyEditor
           className="min-h-0 flex-1"
           bodyType={draft.bodyType}

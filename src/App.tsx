@@ -17,9 +17,11 @@ import { Sidebar } from "@/features/layout/Sidebar";
 import { SplitHandle, SplitPane } from "@/features/layout/SplitPane";
 import { StatusBar } from "@/features/layout/StatusBar";
 import { TopBar } from "@/features/layout/TopBar";
+import { HistoryWorkspace } from "@/features/history/HistoryWorkspace";
+import { LoadtestWorkspace } from "@/features/loadtest/LoadtestWorkspace";
 import { RequestPane } from "@/features/request/RequestPane";
 import { ResponsePane } from "@/features/response/ResponsePane";
-import { TokenToolPanel } from "@/features/tools/TokenToolPanel";
+import { ToolsWorkspace } from "@/features/tools/ToolsWorkspace";
 
 /**
  * 应用骨架。
@@ -29,24 +31,23 @@ import { TokenToolPanel } from "@/features/tools/TokenToolPanel";
  *   ├─ ActivityRail（固定 56px）
  *   └─ SplitPane#main（横向可拖）
  *      ├─ Panel#sidebar  → Sidebar
- *      ├─ Panel#workspace
- *      │  └─ SplitPane#workspace（纵向可拖）
- *      │     ├─ Panel#request  → RequestPane
- *      │     └─ Panel#response → ResponsePane
- *      └─ Panel#tokenTool → TokenToolPanel（仅 `tokenToolOpen` 时挂载）
+ *      └─ Panel#workspace → **跟着左侧板块切**：
+ *         ├─ 「历史」 → HistoryWorkspace（左列表 / 右详情）
+ *         ├─ 「压测」 → LoadtestWorkspace（左历史轮次 / 右配置与报告）
+ *         ├─ 「工具」 → ToolsWorkspace
+ *         └─ 其余     → SplitPane#workspace（请求 / 响应）
  *   StatusBar
  *
- * 最右那栏是**条件挂载**的，所以它的 Panel 也只在那时存在 ——
- * 不展开时布局与没有这个功能时完全一致（`SplitPane#main` 里只有两个子节点），
- * 不必给「隐藏」再造一种状态。挂载后由分隔条调整宽度，位置会被
- * `SplitPane` 的布局记忆持久化。
+ * 中间那块是这一版唯一随板块切换的区域 —— 它曾经写死成请求/响应，
+ * 于是点进「历史」「压测」「工具」什么也没变，各板块的内容只能挤在侧栏
+ * 或某个请求页签里。回收站 / 设置的主视图是后续单独一轮的事。
  */
 export function App() {
   const { toggle: toggleTheme } = useTheme();
 
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const setSidebarCollapsed = useUiStore((s) => s.setSidebarCollapsed);
-  const tokenToolOpen = useUiStore((s) => s.tokenToolOpen);
+  const section = useUiStore((s) => s.section);
   const workspaceStatus = useWorkspaceStore((s) => s.status);
   const workspaceId = useWorkspaceStore((s) => s.workspace?.id);
   const requestRunning = useRequestStore((s) => s.runId !== null);
@@ -220,30 +221,33 @@ export function App() {
           <SplitHandle orientation="horizontal" />
 
           <Panel id="workspace" minSize="35%">
-            <SplitPane id="workspace" orientation="vertical">
-              <Panel id="request" defaultSize="56%" minSize={140}>
-                <RequestPane />
-              </Panel>
+            {/*
+              中间那块**跟着左侧板块切**。
+              已经各自有主视图的板块：历史、压测、工具。
+              其余（集合 / 回收站 / 设置）暂时共用请求/响应 ——
+              那些板块的主视图是后续单独一轮的事，每个都要按自己的需要重排，
+              不是照搬。
+            */}
+            {section === "history" ? (
+              <HistoryWorkspace />
+            ) : section === "loadtest" ? (
+              <LoadtestWorkspace />
+            ) : section === "tools" ? (
+              <ToolsWorkspace />
+            ) : (
+              <SplitPane id="workspace" orientation="vertical">
+                <Panel id="request" defaultSize="56%" minSize={140}>
+                  <RequestPane />
+                </Panel>
 
-              <SplitHandle orientation="vertical" />
+                <SplitHandle orientation="vertical" />
 
-              <Panel id="response" minSize={120}>
-                <ResponsePane />
-              </Panel>
-            </SplitPane>
+                <Panel id="response" minSize={120}>
+                  <ResponsePane />
+                </Panel>
+              </SplitPane>
+            )}
           </Panel>
-
-          {/* Token 解析栏。条件挂载 —— 不展开时这个 Panel 连同分隔条都不存在，
-              主区宽度与没有这个功能时一模一样 */}
-          {tokenToolOpen ? (
-            <>
-              <SplitHandle orientation="horizontal" />
-
-              <Panel id="tokenTool" defaultSize={340} minSize={300} maxSize={620}>
-                <TokenToolPanel />
-              </Panel>
-            </>
-          ) : null}
         </SplitPane>
       </div>
 

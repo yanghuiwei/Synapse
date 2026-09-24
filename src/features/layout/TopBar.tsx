@@ -1,4 +1,4 @@
-import { Import, PanelLeft, PanelLeftClose, Wrench } from "lucide-react";
+import { Import, PanelLeft, PanelLeftClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import { tokenCounts, useTokenStore } from "@/store/token";
@@ -41,10 +41,6 @@ export function TopBar() {
   // 侧栏那个只在「集合」板块出现，而导入是全应用级的（往工作区里加东西），
   // 不该逼用户先切回集合板块才能点。对话框本体只有一份（`ConnectedImportDialog`）。
   const openImport = useUiStore((s) => s.openImport);
-  // 右侧 Token 解析栏的开关。放顶栏而不是塞进「工具」板块：那栏是**常驻**的，
-  // 用户需要在任意板块下都能开关它（在历史里翻到一个 token 时也是）
-  const tokenToolOpen = useUiStore((s) => s.tokenToolOpen);
-  const toggleTokenTool = useUiStore((s) => s.toggleTokenTool);
   const pendingTokens = useTokenStore((s) => tokenCounts(s).pending);
   const validTokens = useTokenStore((s) => tokenCounts(s).valid);
 
@@ -98,18 +94,9 @@ export function TopBar() {
         {t("sidebar.import")}
       </Button>
 
-      {/* 开着的时候给品牌色：栏在右侧，与侧栏折叠那个图标离得远，
-          不复用它的「面板」图标族 —— 换个扳手，与侧栏活动栏上的「工具」同源 */}
-      <IconButton
-        size="sm"
-        label={t(tokenToolOpen ? "tools.closePanel" : "tools.openPanel")}
-        aria-pressed={tokenToolOpen}
-        onClick={toggleTokenTool}
-        className={tokenToolOpen ? "text-brand" : undefined}
-      >
-        <Wrench size={15} strokeWidth={2} />
-      </IconButton>
-
+      {/* 顶栏**没有** Token 解析栏的开关：工具现在是「工具」板块的主视图，
+          而左栏的活动栏本身就是那块的路由。在顶栏再开一个入口，
+          会让人以为它是个跟板块无关的浮层 —— 而它并不是 */}
       <ThemeToggle />
     </header>
   );
