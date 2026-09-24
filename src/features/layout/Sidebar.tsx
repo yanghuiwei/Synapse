@@ -13,6 +13,7 @@ import {
   Settings,
   Trash,
   TriangleAlert,
+  Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useRef, useState } from "react";
@@ -32,6 +33,7 @@ import { ConnectedImportDialog } from "@/features/import/ImportDialog";
 import { HistoryList } from "@/features/history/HistoryList";
 import { RunList } from "@/features/loadtest/RunList";
 import { McpSetupPanel } from "@/features/mcp/McpSetupPanel";
+import { ToolsPanel } from "@/features/tools/ToolsPanel";
 import { TrashBin } from "@/features/trash/TrashBin";
 
 /**
@@ -123,6 +125,15 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Gauge,
     emptyTitleKey: "common.empty",
     emptyDescKey: "loadtest.noRuns",
+    actions: [],
+    searchable: false,
+  },
+  tools: {
+    titleKey: "nav.tools",
+    emptyIcon: Wrench,
+    emptyTitleKey: "common.empty",
+    // 实体在 `ToolsPanel` 里（一行入口 → 对话框），所以这里不挂任何标题区动作；
+    // 工具列表本身不长，也不值得一个搜索框
     actions: [],
     searchable: false,
   },
@@ -427,6 +438,8 @@ export function Sidebar() {
           <EnvManager />
         ) : section === "loadtest" ? (
           <RunList />
+        ) : section === "tools" ? (
+          <ToolsPanel />
         ) : section === "trash" ? (
           <TrashBin />
         ) : (

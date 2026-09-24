@@ -19,6 +19,7 @@ import { StatusBar } from "@/features/layout/StatusBar";
 import { TopBar } from "@/features/layout/TopBar";
 import { RequestPane } from "@/features/request/RequestPane";
 import { ResponsePane } from "@/features/response/ResponsePane";
+import { TokenToolPanel } from "@/features/tools/TokenToolPanel";
 
 /**
  * 应用骨架。
@@ -28,17 +29,24 @@ import { ResponsePane } from "@/features/response/ResponsePane";
  *   ├─ ActivityRail（固定 56px）
  *   └─ SplitPane#main（横向可拖）
  *      ├─ Panel#sidebar  → Sidebar
- *      └─ Panel#workspace
- *         └─ SplitPane#workspace（纵向可拖）
- *            ├─ Panel#request  → RequestPane
- *            └─ Panel#response → ResponsePane
+ *      ├─ Panel#workspace
+ *      │  └─ SplitPane#workspace（纵向可拖）
+ *      │     ├─ Panel#request  → RequestPane
+ *      │     └─ Panel#response → ResponsePane
+ *      └─ Panel#tokenTool → TokenToolPanel（仅 `tokenToolOpen` 时挂载）
  *   StatusBar
+ *
+ * 最右那栏是**条件挂载**的，所以它的 Panel 也只在那时存在 ——
+ * 不展开时布局与没有这个功能时完全一致（`SplitPane#main` 里只有两个子节点），
+ * 不必给「隐藏」再造一种状态。挂载后由分隔条调整宽度，位置会被
+ * `SplitPane` 的布局记忆持久化。
  */
 export function App() {
   const { toggle: toggleTheme } = useTheme();
 
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const setSidebarCollapsed = useUiStore((s) => s.setSidebarCollapsed);
+  const tokenToolOpen = useUiStore((s) => s.tokenToolOpen);
   const workspaceStatus = useWorkspaceStore((s) => s.status);
   const workspaceId = useWorkspaceStore((s) => s.workspace?.id);
   const requestRunning = useRequestStore((s) => s.runId !== null);
@@ -224,6 +232,18 @@ export function App() {
               </Panel>
             </SplitPane>
           </Panel>
+
+          {/* Token 解析栏。条件挂载 —— 不展开时这个 Panel 连同分隔条都不存在，
+              主区宽度与没有这个功能时一模一样 */}
+          {tokenToolOpen ? (
+            <>
+              <SplitHandle orientation="horizontal" />
+
+              <Panel id="tokenTool" defaultSize={340} minSize={300} maxSize={620}>
+                <TokenToolPanel />
+              </Panel>
+            </>
+          ) : null}
         </SplitPane>
       </div>
 

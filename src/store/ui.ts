@@ -6,6 +6,7 @@ export type SidebarSection =
   | "history"
   | "environments"
   | "loadtest"
+  | "tools"
   | "trash"
   | "settings";
 
@@ -85,6 +86,16 @@ export interface UiState {
    */
   saveDraftOpen: boolean;
 
+  /**
+   * 右侧的 Token 解析栏是否展开。
+   *
+   * 放在 store 而不是 `App` 的局部 state：打开它的入口有两处 ——
+   * 顶栏那个开关按钮、以及「工具」板块里点「Token 解析」，
+   * 而栏体本身挂在 `App` 的布局里。两棵子树隔着一层，
+   * 共享字段比一路传 props 直接（与 `paletteOpen` 同一个理由）。
+   */
+  tokenToolOpen: boolean;
+
   setSection: (section: SidebarSection) => void;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -101,6 +112,8 @@ export interface UiState {
   togglePalette: () => void;
   openSaveDraft: () => void;
   closeSaveDraft: () => void;
+  toggleTokenTool: () => void;
+  setTokenToolOpen: (open: boolean) => void;
 }
 
 /**
@@ -117,6 +130,7 @@ export const useUiStore = create<UiState>((set) => ({
   importOpen: false,
   saveDraftOpen: false,
   paletteOpen: false,
+  tokenToolOpen: false,
 
   setSection: (section) => set({ section }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -134,4 +148,6 @@ export const useUiStore = create<UiState>((set) => ({
   togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
   openSaveDraft: () => set({ saveDraftOpen: true }),
   closeSaveDraft: () => set({ saveDraftOpen: false }),
+  toggleTokenTool: () => set((s) => ({ tokenToolOpen: !s.tokenToolOpen })),
+  setTokenToolOpen: (tokenToolOpen) => set({ tokenToolOpen }),
 }));

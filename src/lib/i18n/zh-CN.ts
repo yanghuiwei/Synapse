@@ -45,6 +45,7 @@ export const zhCN = {
   "nav.history": "历史",
   "nav.environments": "环境",
   "nav.loadtest": "压测",
+  "nav.tools": "工具",
   "nav.settings": "设置",
   "nav.trash": "回收站",
   "sidebar.new": "新建",
@@ -730,6 +731,7 @@ export const zhCN = {
   "palette.goHistory": "前往历史",
   "palette.goEnvironments": "前往环境",
   "palette.goLoadtest": "前往压测",
+  "palette.goTools": "前往工具",
   "palette.goTrash": "前往回收站",
   "palette.goSettings": "前往设置",
   "palette.newRequest": "新建请求",
@@ -901,6 +903,41 @@ export const zhCN = {
   "mcp.readonly": "加 --read-only 启动，所有写操作会被拒 —— AI 只能看，不能改",
   "mcp.toolsTitle": "13 个工具",
   "mcp.tools": "只读 4 个：文件夹 / 请求 / 详情 / 环境变量。可写 9 个：新建 / 修改 / 删除 / 移动 / 发送 / 压测 / 刷新 Token / 写变量 / 导入 curl。",
+
+  // ---- 工具 ----
+  // Token 解析。⚠️ 文案的分寸：这里**只解码，不验签** ——
+  // 不要说「验证通过」「安全」，也不要暗示它能判断这个 token 能不能用
+  "tools.token": "Token 解析",
+  "tools.tokenDesc": "把 JWT 拆开看明文",
+  "tools.openPanel": "打开 Token 解析栏",
+  "tools.closePanel": "关闭 Token 解析栏",
+  "tools.tokenEmpty": "粘一段 token 进来看里面写了什么",
+  "tools.tokenHint":
+    "JWT 的头部与载荷是 base64url 明文，本地就能解开 —— 不用找在线解码网站，也就等于没把它发出去",
+  "tools.inputLabel": "token",
+  "tools.inputPlaceholder": "粘一段 token，自带 Bearer 前缀也没关系",
+  "tools.decode": "解析",
+  "tools.clear": "清空",
+  "tools.header": "头部（Header）",
+  "tools.payload": "载荷（Payload）",
+  "tools.signature": "签名（Signature）",
+  "tools.signatureNote": "签名是二进制，这里只显示长度，不做解码",
+  "tools.signatureEmpty": "这一段的签名是空的 —— alg 多半是 none",
+  "tools.signatureLength": "{count} 个字符",
+  "tools.claim": "字段",
+  "tools.claimMeaning": "含义",
+  "tools.claimValue": "值",
+  // 表头那一列已经写着「含义」，所以格子里放一个破折号就够 ——
+  // 之前这里写的是「未收录的字段」，一屏四个未收录 claim 就是四遍同样的字，
+  // 挤在 18% 宽的列里比破折号难扫得多
+  "tools.claimUnknown": "—",
+  "tools.notAToken": "这段文本里没有认出 token",
+  "tools.notATokenHint":
+    "认的形状是三段 base64url（`aa.bb.cc`），且载荷能解出 JSON。认不出时这里不会猜 —— 猜错的值比没有值更容易让人误判。",
+  "tools.expired": "已过期",
+  "tools.valid": "未过期",
+  "tools.notYetValid": "还没生效",
+  "tools.noVerify": "只解码，不验签：上面的内容出自这段文本自己，签名有没有效这里看不出来",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;
