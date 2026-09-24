@@ -1,4 +1,4 @@
-import { Ban, Gauge, LoaderCircle, Play, TriangleAlert } from "lucide-react";
+import { Ban, Gauge, Play, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -8,13 +8,14 @@ import type { MessageKey } from "@/lib/i18n";
 import { Button } from "@/features/ui/Button";
 import { useLoadtestStore, type LoadtestPhase } from "@/store/loadtest";
 import { useRequestStore } from "@/store/request";
+import { useUiStore } from "@/store/ui";
 import { ConfigForm } from "./ConfigForm";
 import { LiveStats } from "./LiveStats";
-import { ReportView } from "./ReportView";import { ScopeNote } from "./ScopeNote";
+import { ScopeNote } from "./ScopeNote";
 import { Notice, Section } from "./primitives";
 
 /**
- * 压测板块右侧那一半：**打一轮** + **看报告**。
+ * 「新压测」页签：配参数、打一轮、看实时统计。
  *
  * 一块屏幕从上到下只有三段：**打什么 → 怎么打 → 打出来什么**。
  * 不做子页签（配置/结果/图表）：压测的价值在于「改一个数字，重跑，看数字怎么动」，
@@ -24,16 +25,10 @@ import { Notice, Section } from "./primitives";
  * 隐藏会让人在等结果的时候忘记「这一轮打的是什么参数」，
  * 而那份参数恰恰是解读数字的前提。
  *
- * ## 顶栏的两种状态（主视图那一轮之后）
- *
- * 这个面板从「请求区的一个页签」搬到了压测主视图的右侧，于是它有了两个用途：
- *
- * - **选中了某一轮**（`detail !== null`，左边列表点出来的）：顶栏那条
- *   「目标 + 开始压测」讲的是**当前草稿**，与正在看的这一轮无关 ——
- *   挂在那里既占地方又误导（左边显示 #5，顶栏却在说「先在地址栏填一个地址」）。
- *   所以那时**只留一个「打新一轮」的动作**，把整条目标行让出来。
- * - **没选中**（刚进板块、或删掉了正在看的那轮）：顶栏就是它本来的样子 ——
- *   目标 + 开始，因为此刻用户确实是来打一轮的。
+ * ⚠️ 这里**不显示历史轮次的报告**。报告归「历史压测」页签（`RunReport`）——
+ * 曾经复用过一段时间，结果是两页共享同一份 `detail`：切回「新压测」时
+ * 这块面板还顶着「正在看第 #5 轮」和一份别人的报告，还得靠 `viewing`
+ * 去收配置区、换按钮文案才勉强自圆其说。分开之后这一页只管「打新一轮」。
  */
 export function LoadTestPanel({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -43,8 +38,6 @@ export function LoadTestPanel({ className }: { className?: string }) {
   const progress = useLoadtestStore((s) => s.progress);
   const livePoints = useLoadtestStore((s) => s.livePoints);
   const detail = useLoadtestStore((s) => s.detail);
-  const chart = useLoadtestStore((s) => s.chart);
-  const detailLoading = useLoadtestStore((s) => s.detailLoading);
   const cancelling = useLoadtestStore((s) => s.cancelling);
   const error = useLoadtestStore((s) => s.error);
   const start = useLoadtestStore((s) => s.start);
@@ -55,13 +48,6 @@ export function LoadTestPanel({ className }: { className?: string }) {
   const draft = useRequestStore((s) => s.draft);
   const running = phase === "running";
   const canStart = draft.url.trim() !== "" && !running;
-  /**
-   * 正在看某一轮（历史点出来的，或刚跑完的）。
-   *
-   * 判据用 `detail !== null` 而不是「有没有在跑」：报告已经打开时，
-   * 顶栏那条目标行说的是当前草稿，跟眼前这份报告没关系。
-   */
-  const viewing = detail !== null && !running;
 
   /**
    * 配置区的展开态。
@@ -84,20 +70,11 @@ export function LoadTestPanel({ className }: { className?: string }) {
 
   return (
     <section className={cn("flex h-full min-h-0 flex-col bg-canvas", className)}>
-      {/* 顶部：目标 + 唯一的那个动作。
-          `viewing`（正在看某一轮历史）时这条目标行与眼前的内容无关，让位给报告 */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2.5">
-        <Gauge size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
+        {/* 顶部：目标 + 唯一的那个动作 */}
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2.5">
+          <Gauge size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
 
-        {viewing ? (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-ink-muted">
-            {t("loadtest.viewingRun", { id: detail.run.id })}
-          </span>
-        ) : (
-          <span
-            className="flex min-w-0 flex-1 items-center gap-1.5"
-            title={t("loadtest.targetHint")}
-          >
+          <span className="flex min-w-0 flex-1 items-center gap-1.5" title={t("loadtest.targetHint")}>
             <span
               className={cn(
                 "shrink-0 font-mono text-[11px] font-semibold",
@@ -110,40 +87,37 @@ export function LoadTestPanel({ className }: { className?: string }) {
               {draft.url.trim() === "" ? t("loadtest.needUrl") : draft.url}
             </span>
           </span>
-        )}
 
-        <PhaseTag phase={phase} />
+          <PhaseTag phase={phase} />
 
-        {running ? (
-          <Button
-            variant="danger"
-            size="md"
-            className="shrink-0"
-            icon={<Ban size={13} strokeWidth={2.2} />}
-            disabled={cancelling}
-            // 取消语义挂在这里而不是实时面板里：用户真正需要这句话的一刻，
-            // 就是鼠标移到「停止」上的那一刻。放在下面既占地方又赶不上时候
-            title={t("loadtest.stoppingHint")}
-            onClick={() => void cancel()}
-          >
-            {cancelling ? t("loadtest.stopping") : t("loadtest.stop")}
-          </Button>
-        ) : (
-          <Button
-            variant={viewing ? "secondary" : "primary"}
-            size="md"
-            className="shrink-0"
-            disabled={!canStart}
-            title={canStart ? undefined : t("loadtest.needUrl")}
-            icon={<Play size={13} strokeWidth={2.2} />}
-            onClick={() => void start()}
-          >
-            {/* 正在看历史时说「打新一轮」而不是「开始压测」——
-                否则左边显示 #5、按钮却说「开始」，像是要重跑它 */}
-            {viewing ? t("loadtest.startNew") : t("loadtest.start")}
-          </Button>
-        )}
-      </div>
+          {running ? (
+            <Button
+              variant="danger"
+              size="md"
+              className="shrink-0"
+              icon={<Ban size={13} strokeWidth={2.2} />}
+              disabled={cancelling}
+              // 取消语义挂在这里而不是实时面板里：用户真正需要这句话的一刻，
+              // 就是鼠标移到「停止」上的那一刻。放在下面既占地方又赶不上时候
+              title={t("loadtest.stoppingHint")}
+              onClick={() => void cancel()}
+            >
+              {cancelling ? t("loadtest.stopping") : t("loadtest.stop")}
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              size="md"
+              className="shrink-0"
+              disabled={!canStart}
+              title={canStart ? undefined : t("loadtest.needUrl")}
+              icon={<Play size={13} strokeWidth={2.2} />}
+              onClick={() => void start()}
+            >
+              {t("loadtest.start")}
+            </Button>
+          )}
+        </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-auto px-3 py-3">
         <Section
@@ -183,37 +157,19 @@ export function LoadTestPanel({ className }: { className?: string }) {
           </Notice>
         ) : null}
 
-        {/* 打开历史轮次失败。与上面那条分开，因为语义不同：
-            一条是「刚才那一轮没能跑起来」，一条是「这条记录读不出来」*/}
-        {phase !== "failed" && error !== null ? (
-          <Notice tone="err">{error.localized}</Notice>
+        {/* 刚跑完那一轮的提示：报告在「历史压测」页，这里只指路。
+            不把报告搬过来 —— 那正是两页共享 `detail` 的老问题 */}
+        {detail !== null && phase === "done" ? (
+          <Notice tone="info">
+            <button
+              type="button"
+              className="text-left underline decoration-dotted underline-offset-2 hover:text-ink"
+              onClick={() => useUiStore.getState().setSection("loadtest")}
+            >
+              {t("loadtest.reportInHistory", { id: detail.run.id })}
+            </button>
+          </Notice>
         ) : null}
-
-        {detailLoading ? (
-          <p className="flex items-center justify-center gap-2 py-4 text-[11px] text-ink-faint">
-            <LoaderCircle size={12} strokeWidth={2.2} className="animate-spin" />
-            {t("common.loading")}
-          </p>
-        ) : detail === null ? (
-          // 没有报告时**什么都不画**，而不是放一个「还没有报告」的空态。
-          // 那个空态和侧栏「还没有压测记录」说的是同一件事，而且它会占掉
-          // 150px —— 正好把下面那块「能力边界」顶出可视区。而能力边界
-          // （design.md §7.5）是**必须在这个界面上看得见**的东西：
-          // 用户正要配 500 并发的时候，最该知道这工具做不到分布式加压。
-          null
-        ) : (
-          <>
-            {/* 图表是**第二个**请求（概要先到）。这段间隙里图表还是空的，
-                不说明的话「暂无数据」会被读成「这一轮没采到数据」*/}
-            {chart === null ? (
-              <p className="flex items-center gap-2 text-[11px] text-ink-faint">
-                <LoaderCircle size={12} strokeWidth={2.2} className="animate-spin" />
-                {t("loadtest.chartLoading")}
-              </p>
-            ) : null}
-            <ReportView detail={detail} chart={chart} />
-          </>
-        )}
 
         <ScopeNote />
       </div>

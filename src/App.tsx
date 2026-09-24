@@ -8,7 +8,7 @@ import { bootstrapSettings } from "@/lib/sync";
 import { useTheme } from "@/lib/useTheme";
 import { useRequestStore } from "@/store/request";
 import { tokenCounts, useTokenStore } from "@/store/token";
-import { useUiStore } from "@/store/ui";
+import { useUiStore, type SidebarSection } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { CommandPalette } from "@/features/command/CommandPalette";
 import { goToSection, openCreate } from "@/features/command/registry";
@@ -22,6 +22,19 @@ import { LoadtestWorkspace } from "@/features/loadtest/LoadtestWorkspace";
 import { RequestPane } from "@/features/request/RequestPane";
 import { ResponsePane } from "@/features/response/ResponsePane";
 import { ToolsWorkspace } from "@/features/tools/ToolsWorkspace";
+
+/**
+ * 哪些板块**不显示侧栏**。
+ *
+ * 「压测」是第一个：它原本该放在侧栏里的东西（历史轮次列表）现在全在板块
+ * 自己的「历史压测」页签里，侧栏留下来就是一条空栏 —— 白占 240px，
+ * 还让人以为有内容没加载出来。整块让给主视图之后，历史列表能铺满，
+ * 地址不用再截断成认不出来的样子。
+ *
+ * 写成模块级常量而不是放 `useUiStore`：这不是用户能切换的状态，是布局常量。
+ * 放进 store 会让人以为它可以在运行时变。
+ */
+const SIDEBAR_LESS: readonly SidebarSection[] = ["loadtest"];
 
 /**
  * 应用骨架。
@@ -48,6 +61,7 @@ export function App() {
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const setSidebarCollapsed = useUiStore((s) => s.setSidebarCollapsed);
   const section = useUiStore((s) => s.section);
+  const hasSidebar = !SIDEBAR_LESS.includes(section);
   const workspaceStatus = useWorkspaceStore((s) => s.status);
   const workspaceId = useWorkspaceStore((s) => s.workspace?.id);
   const requestRunning = useRequestStore((s) => s.runId !== null);
@@ -200,55 +214,36 @@ export function App() {
       <div className="flex min-h-0 flex-1">
         <ActivityRail />
 
-        <SplitPane
-          id="main"
-          orientation="horizontal"
-          className="min-w-0 flex-1"
-        >
-          <Panel
-            id="sidebar"
-            defaultSize={260}
-            minSize={180}
-            maxSize={480}
-            collapsible
-            collapsedSize={0}
-            onResize={handleSidebarResize}
-            panelRef={sidebarRef}
-          >
-            <Sidebar />
-          </Panel>
+        {/* 「压测」板块没有侧栏 —— 它该放的东西已经全在板块自己的页签里了。
+            留着那条空栏白占 240px，还让人以为有内容没加载出来。
+            整块让给主视图，历史列表因此能铺满（地址不用再截断） */}
+        {hasSidebar ? (
+          <SplitPane id="main" orientation="horizontal" className="min-w-0 flex-1">
+            <Panel
+              id="sidebar"
+              defaultSize={260}
+              minSize={180}
+              maxSize={480}
+              collapsible
+              collapsedSize={0}
+              onResize={handleSidebarResize}
+              panelRef={sidebarRef}
+            >
+              <Sidebar />
+            </Panel>
 
-          <SplitHandle orientation="horizontal" />
+            <SplitHandle orientation="horizontal" />
 
-          <Panel id="workspace" minSize="35%">
-            {/*
-              中间那块**跟着左侧板块切**。
-              已经各自有主视图的板块：历史、压测、工具。
-              其余（集合 / 回收站 / 设置）暂时共用请求/响应 ——
-              那些板块的主视图是后续单独一轮的事，每个都要按自己的需要重排，
-              不是照搬。
-            */}
-            {section === "history" ? (
-              <HistoryWorkspace />
-            ) : section === "loadtest" ? (
-              <LoadtestWorkspace />
-            ) : section === "tools" ? (
-              <ToolsWorkspace />
-            ) : (
-              <SplitPane id="workspace" orientation="vertical">
-                <Panel id="request" defaultSize="56%" minSize={140}>
-                  <RequestPane />
-                </Panel>
-
-                <SplitHandle orientation="vertical" />
-
-                <Panel id="response" minSize={120}>
-                  <ResponsePane />
-                </Panel>
-              </SplitPane>
-            )}
-          </Panel>
-        </SplitPane>
+            <Panel id="workspace" minSize="35%">
+              <Workspace section={section} />
+            </Panel>
+          </SplitPane>
+        ) : (
+          // `min-w-0` 不能少：主视图里有长 URL 与图表，没有它这一块会被顶宽
+          <div className="min-w-0 flex-1">
+            <Workspace section={section} />
+          </div>
+        )}
       </div>
 
       <StatusBar
@@ -269,6 +264,33 @@ export function App() {
           放在最后只是为了「读 JSX 时先看到布局、再看到浮层」 */}
       <CommandPalette />
     </div>
+  );
+}
+
+/**
+ * 主视图，**跟着左侧板块切**。
+ *
+ * 已经各自有主视图的板块：历史、压测、工具。
+ * 其余（集合 / 回收站 / 设置）暂时共用请求/响应 —— 那些板块的主视图是
+ * 后续单独一轮的事，每个都要按自己的需要重排，不是照搬。
+ */
+function Workspace({ section }: { section: SidebarSection }) {
+  if (section === "history") return <HistoryWorkspace />;
+  if (section === "loadtest") return <LoadtestWorkspace />;
+  if (section === "tools") return <ToolsWorkspace />;
+
+  return (
+    <SplitPane id="workspace" orientation="vertical">
+      <Panel id="request" defaultSize="56%" minSize={140}>
+        <RequestPane />
+      </Panel>
+
+      <SplitHandle orientation="vertical" />
+
+      <Panel id="response" minSize={120}>
+        <ResponsePane />
+      </Panel>
+    </SplitPane>
   );
 }
 
