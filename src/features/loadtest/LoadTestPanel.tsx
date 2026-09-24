@@ -1,4 +1,4 @@
-import { Ban, Gauge, Play, TriangleAlert } from "lucide-react";
+import { Ban, Gauge, LoaderCircle, Play, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -8,14 +8,14 @@ import type { MessageKey } from "@/lib/i18n";
 import { Button } from "@/features/ui/Button";
 import { useLoadtestStore, type LoadtestPhase } from "@/store/loadtest";
 import { useRequestStore } from "@/store/request";
-import { useUiStore } from "@/store/ui";
 import { ConfigForm } from "./ConfigForm";
 import { LiveStats } from "./LiveStats";
+import { ReportView } from "./ReportView";
 import { ScopeNote } from "./ScopeNote";
 import { Notice, Section } from "./primitives";
 
 /**
- * 「新压测」页签：配参数、打一轮、看实时统计。
+ * 「压测」页签的内容（住在请求区的 `RequestPane` 里）。
  *
  * 一块屏幕从上到下只有三段：**打什么 → 怎么打 → 打出来什么**。
  * 不做子页签（配置/结果/图表）：压测的价值在于「改一个数字，重跑，看数字怎么动」，
@@ -25,10 +25,13 @@ import { Notice, Section } from "./primitives";
  * 隐藏会让人在等结果的时候忘记「这一轮打的是什么参数」，
  * 而那份参数恰恰是解读数字的前提。
  *
- * ⚠️ 这里**不显示历史轮次的报告**。报告归「历史压测」页签（`RunReport`）——
- * 曾经复用过一段时间，结果是两页共享同一份 `detail`：切回「新压测」时
- * 这块面板还顶着「正在看第 #5 轮」和一份别人的报告，还得靠 `viewing`
- * 去收配置区、换按钮文案才勉强自圆其说。分开之后这一页只管「打新一轮」。
+ * ⚠️ 这个面板**必须待在请求区**，不能做成独立板块。它压的是**当前编辑器里的
+ * 草稿**（`store/loadtest.ts` 的 `start()` 直接读 `request.draft`）：入口和它
+ * 作用的对象必须在同一个地方，否则会出现「在压测页改不了要打的请求」。
+ * 曾经把它搬到「压测」板块的「新压测」页，那一步是错的，已撤回。
+ *
+ * 报告**就地渲染**：跑完一轮立刻能看见数字。板块那边的「历史压测」
+ * 只是给回头对比用的第二份。
  */
 export function LoadTestPanel({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -38,6 +41,7 @@ export function LoadTestPanel({ className }: { className?: string }) {
   const progress = useLoadtestStore((s) => s.progress);
   const livePoints = useLoadtestStore((s) => s.livePoints);
   const detail = useLoadtestStore((s) => s.detail);
+  const chart = useLoadtestStore((s) => s.chart);
   const cancelling = useLoadtestStore((s) => s.cancelling);
   const error = useLoadtestStore((s) => s.error);
   const start = useLoadtestStore((s) => s.start);
@@ -157,18 +161,21 @@ export function LoadTestPanel({ className }: { className?: string }) {
           </Notice>
         ) : null}
 
-        {/* 刚跑完那一轮的提示：报告在「历史压测」页，这里只指路。
-            不把报告搬过来 —— 那正是两页共享 `detail` 的老问题 */}
-        {detail !== null && phase === "done" ? (
-          <Notice tone="info">
-            <button
-              type="button"
-              className="text-left underline decoration-dotted underline-offset-2 hover:text-ink"
-              onClick={() => useUiStore.getState().setSection("loadtest")}
-            >
-              {t("loadtest.reportInHistory", { id: detail.run.id })}
-            </button>
-          </Notice>
+        {/* 报告**就地显示**（③）。跑完一轮立刻能看见数字，不用跳板块 ——
+            这正是把它放回请求页签的理由：压的是这一份草稿，
+            结果就该出现在它旁边。历史里再留一份给回头对比 */}
+        {detail !== null ? (
+          <>
+            {/* 图表是**第二个**请求（概要先到）。这段间隙里图表还是空的，
+                不说明的话「暂无数据」会被读成「这一轮没采到数据」*/}
+            {chart === null ? (
+              <p className="flex items-center gap-2 text-[11px] text-ink-faint">
+                <LoaderCircle size={12} strokeWidth={2.2} className="animate-spin" />
+                {t("loadtest.chartLoading")}
+              </p>
+            ) : null}
+            <ReportView detail={detail} chart={chart} />
+          </>
         ) : null}
 
         <ScopeNote />

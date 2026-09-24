@@ -31,7 +31,6 @@ import { CollectionTree } from "@/features/collections/CollectionTree";
 import { EnvManager } from "@/features/env/EnvManager";
 import { ConnectedImportDialog } from "@/features/import/ImportDialog";
 import { HistoryList } from "@/features/history/HistoryList";
-import { RunList } from "@/features/loadtest/RunList";
 import { McpSetupPanel } from "@/features/mcp/McpSetupPanel";
 import { ToolsPanel } from "@/features/tools/ToolsPanel";
 import { TrashBin } from "@/features/trash/TrashBin";
@@ -437,7 +436,15 @@ export function Sidebar() {
         ) : section === "environments" ? (
           <EnvManager />
         ) : section === "loadtest" ? (
-          <RunList />
+          // 「压测」板块的轮次列表**住在主视图左边**（`LoadtestWorkspace`），
+          // 侧栏不再放第二份 —— 同一份列表出现两次是上一版遗留的问题，
+          // 而且窄栏里 URL 只能截断成认不出来的样子
+          <EmptyState
+            icon={meta.emptyIcon}
+            title={t("loadtest.inMainView")}
+            description={t("loadtest.inMainViewHint")}
+            className="mt-8"
+          />
         ) : section === "tools" ? (
           <ToolsPanel />
         ) : section === "trash" ? (
