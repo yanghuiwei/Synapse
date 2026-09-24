@@ -14,7 +14,7 @@ import { ReportView } from "./ReportView";import { ScopeNote } from "./ScopeNote
 import { Notice, Section } from "./primitives";
 
 /**
- * 「压测」页签的根。
+ * 压测板块右侧那一半：**打一轮** + **看报告**。
  *
  * 一块屏幕从上到下只有三段：**打什么 → 怎么打 → 打出来什么**。
  * 不做子页签（配置/结果/图表）：压测的价值在于「改一个数字，重跑，看数字怎么动」，
@@ -23,6 +23,17 @@ import { Notice, Section } from "./primitives";
  * 一句话说清一个设计选择：**配置区在跑的时候不隐藏，只禁用**。
  * 隐藏会让人在等结果的时候忘记「这一轮打的是什么参数」，
  * 而那份参数恰恰是解读数字的前提。
+ *
+ * ## 顶栏的两种状态（主视图那一轮之后）
+ *
+ * 这个面板从「请求区的一个页签」搬到了压测主视图的右侧，于是它有了两个用途：
+ *
+ * - **选中了某一轮**（`detail !== null`，左边列表点出来的）：顶栏那条
+ *   「目标 + 开始压测」讲的是**当前草稿**，与正在看的这一轮无关 ——
+ *   挂在那里既占地方又误导（左边显示 #5，顶栏却在说「先在地址栏填一个地址」）。
+ *   所以那时**只留一个「打新一轮」的动作**，把整条目标行让出来。
+ * - **没选中**（刚进板块、或删掉了正在看的那轮）：顶栏就是它本来的样子 ——
+ *   目标 + 开始，因为此刻用户确实是来打一轮的。
  */
 export function LoadTestPanel({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -44,6 +55,13 @@ export function LoadTestPanel({ className }: { className?: string }) {
   const draft = useRequestStore((s) => s.draft);
   const running = phase === "running";
   const canStart = draft.url.trim() !== "" && !running;
+  /**
+   * 正在看某一轮（历史点出来的，或刚跑完的）。
+   *
+   * 判据用 `detail !== null` 而不是「有没有在跑」：报告已经打开时，
+   * 顶栏那条目标行说的是当前草稿，跟眼前这份报告没关系。
+   */
+  const viewing = detail !== null && !running;
 
   /**
    * 配置区的展开态。
@@ -66,23 +84,33 @@ export function LoadTestPanel({ className }: { className?: string }) {
 
   return (
     <section className={cn("flex h-full min-h-0 flex-col bg-canvas", className)}>
-      {/* 顶部：目标 + 唯一的那个动作 */}
+      {/* 顶部：目标 + 唯一的那个动作。
+          `viewing`（正在看某一轮历史）时这条目标行与眼前的内容无关，让位给报告 */}
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2.5">
         <Gauge size={13} strokeWidth={2.2} aria-hidden className="shrink-0 text-ink-faint" />
 
-        <span className="flex min-w-0 flex-1 items-center gap-1.5" title={t("loadtest.targetHint")}>
+        {viewing ? (
+          <span className="min-w-0 flex-1 truncate text-[11px] text-ink-muted">
+            {t("loadtest.viewingRun", { id: detail.run.id })}
+          </span>
+        ) : (
           <span
-            className={cn(
-              "shrink-0 font-mono text-[11px] font-semibold",
-              methodTextClass(draft.method),
-            )}
+            className="flex min-w-0 flex-1 items-center gap-1.5"
+            title={t("loadtest.targetHint")}
           >
-            {draft.method}
+            <span
+              className={cn(
+                "shrink-0 font-mono text-[11px] font-semibold",
+                methodTextClass(draft.method),
+              )}
+            >
+              {draft.method}
+            </span>
+            <span className="min-w-0 truncate font-mono text-[11px] text-ink-muted">
+              {draft.url.trim() === "" ? t("loadtest.needUrl") : draft.url}
+            </span>
           </span>
-          <span className="min-w-0 truncate font-mono text-[11px] text-ink-muted">
-            {draft.url.trim() === "" ? t("loadtest.needUrl") : draft.url}
-          </span>
-        </span>
+        )}
 
         <PhaseTag phase={phase} />
 
@@ -102,7 +130,7 @@ export function LoadTestPanel({ className }: { className?: string }) {
           </Button>
         ) : (
           <Button
-            variant="primary"
+            variant={viewing ? "secondary" : "primary"}
             size="md"
             className="shrink-0"
             disabled={!canStart}
@@ -110,7 +138,9 @@ export function LoadTestPanel({ className }: { className?: string }) {
             icon={<Play size={13} strokeWidth={2.2} />}
             onClick={() => void start()}
           >
-            {t("loadtest.start")}
+            {/* 正在看历史时说「打新一轮」而不是「开始压测」——
+                否则左边显示 #5、按钮却说「开始」，像是要重跑它 */}
+            {viewing ? t("loadtest.startNew") : t("loadtest.start")}
           </Button>
         )}
       </div>

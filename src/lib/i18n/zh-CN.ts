@@ -566,6 +566,9 @@ export const zhCN = {
   "loadtest.minDuration": "按当前请求间隔，这一轮至少 {value} 秒",
   "loadtest.defaultHint": "默认 {concurrency} 并发 / {total} 请求",
   "loadtest.start": "开始压测",
+  // 正在看某一轮历史时，这个按钮是「再打一轮新的」，不是「重跑面板里这一轮」
+  "loadtest.startNew": "打新一轮",
+  "loadtest.viewingRun": "正在看第 #{id} 轮",
   "loadtest.stop": "停止",
   "loadtest.stopping": "正在停止…",
   "loadtest.running": "压测中",
@@ -651,7 +654,6 @@ export const zhCN = {
   "loadtest.noHistogram": "没有延迟分布数据",
   "loadtest.percent": "占比",
   "loadtest.cancelledTag": "已取消",
-  "loadtest.reportFor": "第 #{id} 轮",
   "loadtest.elapsedShort": "总耗时",
   "loadtest.notes": "说明",
   "loadtest.histogramHint": "{count} 个桶，按 2 的幂划分（左端包含、右端不包含）",
