@@ -30,7 +30,6 @@ import { EmptyState } from "@/features/ui/EmptyState";
 import { CollectionTree } from "@/features/collections/CollectionTree";
 import { EnvManager } from "@/features/env/EnvManager";
 import { ConnectedImportDialog } from "@/features/import/ImportDialog";
-import { HistoryList } from "@/features/history/HistoryList";
 import { McpSetupPanel } from "@/features/mcp/McpSetupPanel";
 import { ToolsPanel } from "@/features/tools/ToolsPanel";
 import { TrashBin } from "@/features/trash/TrashBin";
@@ -107,9 +106,10 @@ const SECTION_META: Record<SidebarSection, SectionMeta> = {
     emptyIcon: Clock,
     emptyTitleKey: "common.empty",
     emptyDescKey: "sidebar.emptyHistory",
-    actions: [{ id: "clearHistory", labelKey: "history.clearAll", icon: Trash }],
-    searchable: true,
-    searchPlaceholderKey: "history.searchPlaceholder",
+    // 「清空历史」与搜索框都搬到主视图的标题行去了（侧栏在这个板块不显示）——
+    // 见 `HistoryWorkspace`
+    actions: [],
+    searchable: false,
   },
   environments: {
     titleKey: "nav.environments",
@@ -432,17 +432,21 @@ export function Sidebar() {
         {section === "collections" ? (
           <CollectionsBody />
         ) : section === "history" ? (
-          <HistoryList />
+          // 列表整体在主视图里（`HistoryWorkspace`），侧栏在这个板块不显示
+          <EmptyState
+            icon={Clock}
+            title={t("sidebar.inMainView")}
+            description={t("sidebar.inMainViewHint")}
+            className="mt-8"
+          />
         ) : section === "environments" ? (
           <EnvManager />
         ) : section === "loadtest" ? (
-          // 「压测」板块的轮次列表**住在主视图左边**（`LoadtestWorkspace`），
-          // 侧栏不再放第二份 —— 同一份列表出现两次是上一版遗留的问题，
-          // 而且窄栏里 URL 只能截断成认不出来的样子
+          // 轮次列表整体在主视图里（`LoadtestWorkspace`），同上
           <EmptyState
             icon={meta.emptyIcon}
-            title={t("loadtest.inMainView")}
-            description={t("loadtest.inMainViewHint")}
+            title={t("sidebar.inMainView")}
+            description={t("sidebar.inMainViewHint")}
             className="mt-8"
           />
         ) : section === "tools" ? (

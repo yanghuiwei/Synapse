@@ -26,12 +26,15 @@ import { ToolsWorkspace } from "@/features/tools/ToolsWorkspace";
 /**
  * 哪些板块**不显示侧栏**。
  *
- * 目前是空的 —— 曾经用过一次（「压测」板块），但那个板块被改回
- * 「历史轮次列表放主视图」之后，它和别的板块没有区别了，不需要特殊对待。
- * 留着这个常量是为了让「侧栏可以按板块关掉」这件事有个明确的落点，
- * 而不是散在 JSX 里的条件判断。
+ * 「历史」与「压测」都在这里：它们的列表已经**整份**住在主视图里
+ * （`HistoryWorkspace` / `LoadtestWorkspace`），侧栏再放一份就是同一份数据
+ * 出现两次 —— 用户会以为是两个不同的列表，而且窄栏里地址只能截断。
+ * 撤掉侧栏之后主视图能铺满，那两页里该有的搜索与操作也搬进了它们自己的标题行。
+ *
+ * 写成模块级常量而不是放 `useUiStore`：这不是用户能切换的状态，是布局常量。
+ * 放进 store 会让人以为它可以在运行时变。
  */
-const SIDEBAR_LESS: readonly SidebarSection[] = [];
+const SIDEBAR_LESS: readonly SidebarSection[] = ["history", "loadtest"];
 
 /**
  * 应用骨架。

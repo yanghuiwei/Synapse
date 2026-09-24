@@ -26,6 +26,7 @@ export const zhCN = {
   "common.empty": "暂无数据",
   "common.search": "搜索",
   "common.retry": "重试",
+  "common.clear": "清除",
   "common.unsaved": "未保存",
   "common.comingSoon": "功能开发中",
   "common.skeletonHint": "界面骨架已就绪，交互逻辑随后接入",
@@ -674,8 +675,9 @@ export const zhCN = {
   // 历史
   "loadtest.noRuns": "还没有压测记录",
   "loadtest.historyTitle": "历史压测",
-  "loadtest.inMainView": "列表在右边的主视图里",
-  "loadtest.inMainViewHint": "轮次列表与报告都放在主视图里了 —— 那里宽度够，地址不用截断。",
+  // 侧栏与主视图都能用的通用文案：这些板块的列表整份搬进主视图了
+  "sidebar.inMainView": "内容在主视图里",
+  "sidebar.inMainViewHint": "这一块的内容已经整份放进主视图 —— 那里宽度够，地址不用截断。",
   "loadtest.sampleCount": "{count} 条明细",
   "loadtest.samplesPrunedShort": "明细已清理",
   "loadtest.unfinished": "未完成",
