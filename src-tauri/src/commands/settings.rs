@@ -15,6 +15,15 @@ use crate::AppState;
 pub mod keys {
     /// 主题：light | dark | system
     pub const THEME: &str = "theme";
+    /// 配色：indigo | azure | violet | clay | teal
+    ///
+    /// ⚠️ 与 `THEME` **正交**，是两个键而不是一个枚举。
+    /// 后加的键：老库里没有这一行，读出来是 None，
+    /// 前端据此判定「用户没选过配色」并保留 localStorage 里的值
+    /// （见 `src/lib/sync.ts` 的 `bootstrapSettings`）。
+    /// 白名单校验仍然只在前端（`toAccent`）—— 与 THEME 同一条理由：
+    /// 不因为加一个键就改 Rust 再重新编译。
+    pub const ACCENT: &str = "accent";
     /// 界面语言：zh-CN
     pub const LOCALE: &str = "locale";
     /// 回收站保留天数

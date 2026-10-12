@@ -51,25 +51,44 @@
   --z-toast: 300;
 }
 
-/* ---------------- Light ---------------- */
+/* ------------------------------------------------------------
+   ⚠️ `:root` 里的这些色值**不是**「无 accent 时的样子」，而是
+   「data-accent 缺失或非法时的兜底」。
+
+   正常路径永远命中 `[data-accent]`（applyTheme 与 index.html 内联脚本
+   都会打上，且后者做了白名单校验）。所以这里的值只需要在**异常路径**
+   下成立 —— 那时的正确表现是「显示一个能用的主题」，而不是回退到
+   一套**与默认 accent 不一致**的色。
+
+   曾经把这里写成 slate 蓝（#2563eb），代价是：`data-accent="toString"`
+   这类非法值会静默显示成旧的 slate 蓝，而 `ACCENTS.indigo` 的色板
+   仍然显示靛青 —— 用户看到的和点下去的结果对不上，且没有任何报错。
+   现在这儿的 brand 刻意等于 `[data-accent=indigo]` 的 brand。
+   改这儿的 brand 时请连着改 indigo 块。
+------------------------------------------------------------ */
 :root,
 .light {
-  --canvas: #ffffff;
-  --canvas-subtle: #f8fafc;
+  --canvas: #fafbfc;
+  --canvas-subtle: #f3f6f9;
   --surface: #ffffff;
-  --surface-hover: #f1f5f9;
+  --surface-hover: #ecf1f7;
 
-  --line: #e2e8f0;
-  --line-strong: #cbd5e1;
+  --line: #dde5ee;
+  --line-strong: #c4d1e0;
 
-  --ink: #0f172a;
-  --ink-muted: #475569;
-  --ink-faint: #94a3b8;
+  --ink: #141d2b;
+  --ink-muted: #4a5b74;
+  --ink-faint: #8494a8;
 
-  --brand: #2563eb;
-  --brand-hover: #1d4ed8;
+  /* 与 [data-accent=indigo] 保持一致（见上方注释） */
+  --brand: #184695;
+  --brand-hover: #0f336e;
   --brand-fg: #ffffff;
 
+  /* ↓ 以下都是**语义色**，刻意不带accent 的色相。
+     HTTP 方法色是业界约定（GET 蓝 / POST 绿 / PUT 橙 / PATCH 紫 / DELETE 红），
+     语法高亮同理。让它们跟随配色主题，界面上就会出现「藕粉主题里的
+     DELETE 按钮不是红的」这种反直觉画面，用户要重新学一遍方法色。 */
   --ok: #16a34a;
   --warn: #d97706;
   --err: #dc2626;
@@ -91,34 +110,39 @@
   --syn-null: #64748b;
   --syn-punct: #64748b;
 
-  --scrollbar: #cbd5e1;
-  --scrollbar-hover: #94a3b8;
+  --scrollbar: #c4d1e0;
+  --scrollbar-hover: #8494a8;
 
-  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-2: 0 4px 16px rgba(15, 23, 42, 0.08);
-  --focus: rgba(37, 99, 235, 0.35);
+  --shadow-1: 0 1px 2px rgba(20, 29, 43, 0.05);
+  --shadow-2: 0 4px 16px rgba(20, 29, 43, 0.09);
+  --focus: rgba(24, 70, 149, 0.35);
   /* 模态遮罩。刻意**不**用 bg-ink/xx 代替：深色主题里 --ink 是浅色，
      拿它当遮罩会得到一层白雾。遮罩的语义是「压暗」，与文字色无关。 */
   --scrim: rgba(15, 23, 42, 0.42);
 }
 
-/* ---------------- Dark ---------------- */
+/* ---------------- Dark ----------------
+   同样，这个块是「非法 accent 的兜底」，不是「无accent 的样子」。
+   理由与上方 :root 块完全一致，这里只说差异：
+   深色下品牌色是**亮**的，且 `brand-fg` 相应改成深色 —— 亮底配白字是糊的。
+   这不是疏忽，是深色主题的主按钮该有的样子（Vercel / GitHub 都这么干）。*/
 .dark {
-  --canvas: #0f172a;
-  --canvas-subtle: #0b1220;
-  --surface: #161b2b;
-  --surface-hover: #1e2637;
+  --canvas: #121821;
+  --canvas-subtle: #0d1219;
+  --surface: #1b2431;
+  --surface-hover: #27323f;
 
-  --line: #273349;
-  --line-strong: #334155;
+  --line: #2b3648;
+  --line-strong: #3a4759;
 
-  --ink: #f1f5f9;
-  --ink-muted: #94a3b8;
-  --ink-faint: #64748b;
+  --ink: #eef2f7;
+  --ink-muted: #9dabbf;
+  --ink-faint: #6a788e;
 
-  --brand: #3b82f6;
-  --brand-hover: #2563eb;
-  --brand-fg: #ffffff;
+  /* 与 .dark[data-accent=indigo] 保持一致 */
+  --brand: #7ba8e8;
+  --brand-hover: #9cc0f2;
+  --brand-fg: #0b1017;
 
   --ok: #4ade80;
   --warn: #fbbf24;
@@ -139,13 +163,253 @@
   --syn-null: #94a3b8;
   --syn-punct: #94a3b8;
 
-  --scrollbar: #334155;
-  --scrollbar-hover: #475569;
+  --scrollbar: #3a4759;
+  --scrollbar-hover: #6a788e;
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
   --focus: rgba(59, 130, 246, 0.45);
   --scrim: rgba(0, 0, 0, 0.55);
+}
+
+/* ------------------------------------------------------------
+   配色主题（accent）—— 与 light/dark **正交**的第二个维度
+   ------------------------------------------------------------
+   为什么要正交而不是「5 套 × 2 模式 = 10 个类」：
+   10 套意味着 accent 块要重复写两遍中性色，改一个值得改两处，
+   而且迟早只改一处 —— 那种 bug 在 CSS 里看不出来，只表现为「深色下偏色了」。
+   现在 light/dark 负责**明度**（整套中性色），accent 只覆写**色相**，
+   两组选择器叠加出最终值。
+
+   取值方法：不是把配色图上的端点色直接搬进来。
+   端点色是给「大面积渐变背景」调的，当 UI 主色时白字对比度普遍不达标
+   （实测 #30A9FF 白字仅 2.55、#BA8D8E 2.88，AA 要 4.5）。
+   所以只**借它的色相 H**，S/L 全部重新反推到对比度达标为止。
+   中性色带 12~24% 的同色相微染 —— 纯灰在有色背景下会显脏。
+
+   ⚠️ 以下每族的 --brand 都已验过 WCAG 对比度（白字 / 品牌字）：
+      靛青 8.94　治愈蓝 6.60　蓝紫 11.87　藕粉 7.25　墨绿 4.75
+   改任何一族的 brand 时，把这两个数一起重算，别只看着顺眼就改。
+   ------------------------------------------------------------ */
+
+/* ---------------- 靛青 Indigo（默认） ---------------- */
+[data-accent="indigo"] {
+  --canvas: #fafbfc;
+  --canvas-subtle: #f3f6f9;
+  --surface: #ffffff;
+  --surface-hover: #ecf1f7;
+
+  --line: #dde5ee;
+  --line-strong: #c4d1e0;
+
+  --ink: #141d2b;
+  --ink-muted: #4a5b74;
+  --ink-faint: #8494a8;
+
+  --brand: #184695;
+  --brand-hover: #0f336e;
+  --brand-fg: #ffffff;
+
+  --focus: rgba(24, 70, 149, 0.35);
+  --shadow-1: 0 1px 2px rgba(20, 29, 43, 0.05);
+  --shadow-2: 0 4px 16px rgba(20, 29, 43, 0.09);
+}
+.dark[data-accent="indigo"] {
+  --canvas: #121821;
+  --canvas-subtle: #0d1219;
+  --surface: #1b2431;
+  --surface-hover: #27323f;
+
+  --line: #2b3648;
+  --line-strong: #3a4759;
+
+  --ink: #eef2f7;
+  --ink-muted: #9dabbf;
+  --ink-faint: #6a788e;
+
+  --brand: #7ba8e8;
+  --brand-hover: #9cc0f2;
+  --brand-fg: #0b1017;
+
+  --focus: rgba(123, 168, 232, 0.45);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------------- 治愈蓝 Azure ---------------- */
+[data-accent="azure"] {
+  --canvas: #fafcfd;
+  --canvas-subtle: #f2f7fa;
+  --surface: #ffffff;
+  --surface-hover: #e9f2f8;
+
+  --line: #dae7f0;
+  --line-strong: #bed3e2;
+
+  --ink: #12242e;
+  --ink-muted: #46606f;
+  --ink-faint: #7f95a3;
+
+  --brand: #186195;
+  --brand-hover: #10476f;
+  --brand-fg: #ffffff;
+
+  --focus: rgba(24, 97, 149, 0.35);
+  --shadow-1: 0 1px 2px rgba(18, 36, 46, 0.05);
+  --shadow-2: 0 4px 16px rgba(18, 36, 46, 0.09);
+}
+.dark[data-accent="azure"] {
+  --canvas: #101b21;
+  --canvas-subtle: #0b1418;
+  --surface: #18262e;
+  --surface-hover: #23343e;
+
+  --line: #2a3d49;
+  --line-strong: #374e5c;
+
+  --ink: #eef4f7;
+  --ink-muted: #9aafbd;
+  --ink-faint: #667f8f;
+
+  --brand: #6bb3de;
+  --brand-hover: #8bc8ea;
+  --brand-fg: #08151b;
+
+  --focus: rgba(107, 179, 222, 0.45);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------------- 蓝紫 Violet ---------------- */
+[data-accent="violet"] {
+  --canvas: #fafafc;
+  --canvas-subtle: #f3f2f8;
+  --surface: #ffffff;
+  --surface-hover: #eeeaf7;
+
+  --line: #e0dbee;
+  --line-strong: #c7bfe0;
+
+  --ink: #1e1733;
+  --ink-muted: #584a78;
+  --ink-faint: #8f86a8;
+
+  --brand: #3e1895;
+  --brand-hover: #2a0f6b;
+  --brand-fg: #ffffff;
+
+  --focus: rgba(62, 24, 149, 0.35);
+  --shadow-1: 0 1px 2px rgba(30, 23, 51, 0.05);
+  --shadow-2: 0 4px 16px rgba(30, 23, 51, 0.09);
+}
+.dark[data-accent="violet"] {
+  --canvas: #171325;
+  --canvas-subtle: #100d1a;
+  --surface: #231d34;
+  --surface-hover: #302943;
+
+  --line: #372f4d;
+  --line-strong: #473d62;
+
+  --ink: #f0eef6;
+  --ink-muted: #aaa2c0;
+  --ink-faint: #7a7195;
+
+  --brand: #a385f0;
+  --brand-hover: #bda6f5;
+  --brand-fg: #150f26;
+
+  --focus: rgba(163, 133, 240, 0.45);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------------- 藕粉 Clay ---------------- */
+[data-accent="clay"] {
+  --canvas: #fdfbfa;
+  --canvas-subtle: #f8f3f1;
+  --surface: #ffffff;
+  --surface-hover: #f4ece9;
+
+  --line: #ebdfda;
+  --line-strong: #d8c5bd;
+
+  --ink: #2e1e17;
+  --ink-muted: #6d5348;
+  --ink-faint: #a08d84;
+
+  --brand: #953a18;
+  --brand-hover: #712a0e;
+  --brand-fg: #ffffff;
+
+  --focus: rgba(149, 58, 24, 0.35);
+  --shadow-1: 0 1px 2px rgba(46, 30, 23, 0.05);
+  --shadow-2: 0 4px 16px rgba(46, 30, 23, 0.09);
+}
+.dark[data-accent="clay"] {
+  --canvas: #1f1613;
+  --canvas-subtle: #16100e;
+  --surface: #2c201c;
+  --surface-hover: #3c2c26;
+
+  --line: #46342d;
+  --line-strong: #5a433a;
+
+  --ink: #f5efec;
+  --ink-muted: #bfaea7;
+  --ink-faint: #937f77;
+
+  --brand: #e08a63;
+  --brand-hover: #eda586;
+  --brand-fg: #1e1109;
+
+  --focus: rgba(224, 138, 99, 0.45);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------------- 墨绿 Teal ---------------- */
+[data-accent="teal"] {
+  --canvas: #fafcfc;
+  --canvas-subtle: #f0f6f4;
+  --surface: #ffffff;
+  --surface-hover: #e6f0ed;
+
+  --line: #d7e6e2;
+  --line-strong: #b8d3cc;
+
+  --ink: #102a23;
+  --ink-muted: #466a60;
+  --ink-faint: #7d968f;
+
+  --brand: #176f5b;
+  --brand-hover: #0d5344;
+  --brand-fg: #ffffff;
+
+  --focus: rgba(23, 111, 91, 0.35);
+  --shadow-1: 0 1px 2px rgba(16, 42, 35, 0.05);
+  --shadow-2: 0 4px 16px rgba(16, 42, 35, 0.09);
+}
+.dark[data-accent="teal"] {
+  --canvas: #0f1f1b;
+  --canvas-subtle: #0a1614;
+  --surface: #172c26;
+  --surface-hover: #213c34;
+
+  --line: #2c453d;
+  --line-strong: #39584e;
+
+  --ink: #eef5f3;
+  --ink-muted: #9fb9b2;
+  --ink-faint: #6a857d;
+
+  --brand: #5cbea4;
+  --brand-hover: #7cd2ba;
+  --brand-fg: #07130f;
+
+  --focus: rgba(92, 190, 164, 0.45);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
 /* 主题切换过渡：只过渡颜色，不做 scale/位移，避免布局抖动 */

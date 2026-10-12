@@ -18,6 +18,7 @@ import {
   Globe,
   Import,
   Layers,
+  Palette,
   PanelLeftOpen,
   Plus,
   Send,
@@ -31,9 +32,28 @@ import type { LucideIcon } from "lucide-react";
 
 import type { ShortcutName } from "@/lib/constants";
 import type { MessageKey } from "@/lib/i18n";
-import { toggleTheme } from "@/lib/theme";
+import { ACCENTS, ACCENT_ORDER, setAccent, toggleTheme, type Accent } from "@/lib/theme";
 import { useRequestStore } from "@/store/request";
 import { useUiStore, type SidebarSection } from "@/store/ui";
+
+/**
+ * 命令面板里每套配色的标题键。
+ *
+ * 为什么单独一张表，而不是 `ACCENTS[accent].labelKey`：
+ * 色板上显示裸色名（「靛青」）是对的 —— 它就一个色块，旁边没有别的信息；
+ * 命令面板里孤零零一个「靛青」，用户看不出这是要切配色还是改别的东西。
+ * 同一个概念在两个语境下需要两种措辞，那就分开写，别在渲染时凑。
+ *
+ * ⚠️ 新增配色时这里也要加一行 —— 漏了的话 TS 会在
+ * `Record<Accent, MessageKey>` 上报错（这是刻意的，见下）。
+ */
+const PALETTE_ACCENT_TITLES: Record<Accent, MessageKey> = {
+  indigo: "palette.accentIndigo",
+  azure: "palette.accentAzure",
+  violet: "palette.accentViolet",
+  clay: "palette.accentClay",
+  teal: "palette.accentTeal",
+};
 
 /** 命令归组。只影响视觉分组，不影响排序 */
 export type PaletteGroup = "go" | "action" | "app";
@@ -218,6 +238,23 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
       toggleTheme();
     },
   },
+  // ---- 配色 ----
+  //
+  // 五条命令而不是一条「切换配色」：配色是「选某一档」而不是「在两者间翻」，
+  // 没有「下一个」这种东西。命令面板是键盘用户唯一能碰到配色的入口 ——
+  // 色板按钮只能点，而 Ctrl+K 的持有者恰恰是最不想用鼠标的那批人。
+  ...ACCENT_ORDER.map((accent) => ({
+    id: `app.accent.${accent}`,
+    // ⚠️ 不能直接用 `ACCENTS[accent].labelKey`（那是色板上的裸色名）。
+    // 命令面板里孤零零一个「靛青」，用户看不出这是切配色还是改别的东西。
+    titleKey: PALETTE_ACCENT_TITLES[accent],
+    keywords: ["accent", "配色", "颜色", ACCENTS[accent].labelKey],
+    group: "app" as const,
+    icon: Palette,
+    run: () => {
+      setAccent(accent);
+    },
+  })),
   {
     id: "app.toggleSidebar",
     titleKey: "palette.toggleSidebar",

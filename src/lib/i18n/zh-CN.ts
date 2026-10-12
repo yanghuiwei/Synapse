@@ -40,6 +40,15 @@ export const zhCN = {
   "theme.system": "跟随系统",
   "theme.toggle": "切换主题",
 
+  // ---- 配色 ----
+  "accent.picker": "配色",
+  "accent.picker.label": "选择配色",
+  "accent.indigo": "靛青",
+  "accent.azure": "治愈蓝",
+  "accent.violet": "蓝紫",
+  "accent.clay": "藕粉",
+  "accent.teal": "墨绿",
+
   // ---- 导航 / 侧栏 ----
   "nav.primary": "主导航",
   "nav.collections": "集合",
@@ -111,7 +120,6 @@ export const zhCN = {
   "request.tab.params": "参数",
   "request.tab.headers": "请求头",
   "request.tab.body": "请求体",
-  "request.tab.scripts": "脚本",
   "request.tab.settings": "设置",
   "request.noSelection": "从左侧选择一个请求",
   "request.noSelectionHint": "或按 Ctrl+N 新建一个",
@@ -746,6 +754,11 @@ export const zhCN = {
   "palette.cancel": "取消当前请求",
   "palette.import": "导入接口",
   "palette.toggleTheme": "切换主题",
+  "palette.accentIndigo": "切换到靛青配色",
+  "palette.accentAzure": "切换到治愈蓝配色",
+  "palette.accentViolet": "切换到蓝紫配色",
+  "palette.accentClay": "切换到藕粉配色",
+  "palette.accentTeal": "切换到墨绿配色",
   "palette.toggleSidebar": "折叠 / 展开侧栏",
   "palette.empty": "没有匹配的接口或命令",
   "palette.unfiled": "未归档",

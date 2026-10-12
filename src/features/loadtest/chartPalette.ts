@@ -10,8 +10,8 @@ import { useTheme } from "@/lib/useTheme";
  * 所以只能读 `theme.css` 里那些自定义属性的**实际值**。
  * 色值的唯一来源仍然是 `theme.css`，下面这些只是运行时把它们取出来。
  *
- * 由此带来一个后果：**画布不会跟着 CSS 变量自动重绘**。主题一变，
- * 画布上还是旧颜色 —— 所以 `useChartPalette` 会订阅主题，
+ * 由此带来一个后果：**画布不会跟着CSS 变量自动重绘**。主题一变，
+ * 画布上还是旧颜色 —— 所以 `useChartPalette` 会订阅主题（明暗 **与** 配色），
  * 让调用方带着新的 palette 重建图表（见 `TimelineChart` 的 effect 依赖）。
  */
 export interface ChartPalette {
@@ -69,18 +69,21 @@ function readToken(name: string, fallback: string): string {
 /**
  * 当前主题下的画布调色板。
  *
- * 依赖 `resolved`（而不是 `mode`）：`mode === "system"` 时切换系统主题，
- * 画布也得跟着换 —— 只盯 mode 是盯不住的。
+ * 依赖 `resolved` **与** `accent`：
+ * 前者是因为 `mode === "system"` 时切系统主题画布也得跟着换；
+ * 后者是因为配色（accent）是与明暗正交的第二个维度 —— 只盯 resolved
+ * 会漏掉「深色下把靛青换成藕粉」这种情况，而画布上还是旧颜色。
+ * 少一个依赖的表现是**颜色不对但不报错**：图表照画，只是配色像上一套。
  */
 export function useChartPalette(): ChartPalette {
-  const { resolved } = useTheme();
+  const { resolved, accent } = useTheme();
   return useMemo(() => {
     const out = {} as ChartPalette;
     for (const key of Object.keys(TOKENS) as (keyof ChartPalette)[]) {
       out[key] = readToken(TOKENS[key], FALLBACK[key]);
     }
     return out;
-  }, [resolved]);
+  }, [resolved, accent]);
 }
 
 /**

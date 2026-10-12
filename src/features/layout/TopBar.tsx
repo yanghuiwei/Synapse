@@ -4,6 +4,7 @@ import { useI18n } from "@/lib/i18n";
 import { tokenCounts, useTokenStore } from "@/store/token";
 import { useUiStore } from "@/store/ui";
 import { Button, IconButton } from "@/features/ui/Button";
+import { AccentPicker } from "@/features/ui/AccentPicker";
 import { ThemeToggle } from "@/features/ui/ThemeToggle";
 
 /** 应用标识：一个方块 + 字标。刻意做得克制，别跟工具栏抢注意力 */
@@ -97,6 +98,11 @@ export function TopBar() {
       {/* 顶栏**没有** Token 解析栏的开关：工具现在是「工具」板块的主视图，
           而左栏的活动栏本身就是那块的路由。在顶栏再开一个入口，
           会让人以为它是个跟板块无关的浮层 —— 而它并不是 */}
+      {/* 配色与明暗是两个正交的维度，所以是两个控件：
+          ThemeToggle 管亮/暗/跟随，AccentPicker 管色相。
+          合成一个「主题」下拉会让人以为选一个就够了 ——
+          而实际有 3×5=15 种组合，下拉里得列 15 行。 */}
+      <AccentPicker />
       <ThemeToggle />
     </header>
   );
