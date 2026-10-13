@@ -267,9 +267,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 与标签步骤同源，避免两个步骤各读一遍读出不一致的版本号
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          # 版本号的权威来源是 tauri.conf.json —— 它就是上面 tagName 里
+          # 版本号由上一步读出并经 env 注入（GitHub 表达式够不到 run 内算出的变量）
           # __VERSION__ 被替换成的那份，读它才不会与实际构建产物脱节。
           TAG="v${VERSION}"
 
