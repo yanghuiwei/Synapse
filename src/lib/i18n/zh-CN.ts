@@ -38,16 +38,28 @@ export const zhCN = {
   "theme.light": "浅色",
   "theme.dark": "深色",
   "theme.system": "跟随系统",
-  "theme.toggle": "切换主题",
 
   // ---- 配色 ----
-  "accent.picker": "配色",
-  "accent.picker.label": "选择配色",
   "accent.indigo": "靛青",
   "accent.azure": "治愈蓝",
   "accent.violet": "蓝紫",
   "accent.clay": "藕粉",
   "accent.teal": "墨绿",
+
+  // ---- 外观（明暗 × 配色，一个入口两个分区）----
+  //「主题」这个说法在面板里会与「配色」混（两者都在讲外观），
+  // 所以分区标题一律用「明暗模式」/「配色」，把两个维度说清楚。
+  "appearance.label": "外观",
+  "appearance.theme": "明暗模式",
+  "appearance.accent": "配色",
+
+  // ---- 窗口按钮（自绘，替代系统标题栏）----
+  // 「还原」而不是「最大化」：同一个按钮两种状态，
+  // 图标与文案都要跟着最大化态翻转（见 WindowControls）
+  "window.minimize": "最小化",
+  "window.maximize": "最大化",
+  "window.restore": "向下还原",
+  "window.close": "关闭",
 
   // ---- 导航 / 侧栏 ----
   "nav.primary": "主导航",

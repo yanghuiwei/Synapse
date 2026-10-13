@@ -14,7 +14,11 @@
       {
         "title": "Synapse",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "decorations": false,
+        "shadow": true,
+        "minWidth": 768,
+        "minHeight": 420
       }
     ],
     "security": {
