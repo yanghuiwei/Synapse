@@ -52,3 +52,36 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🔴🔴 本仓库踩过的 release-please 死锁（2026-10-13 才解开，附在文件头免得重蹈）
+#
+# 症状：workflow 显示 `success`，日志里却有
+#     ⚠ There are untagged, merged release PRs outstanding - aborting
+# 于是**永远不开新的版本 PR**。2026-09-24 起连续 4 次 push main，
+# 连带把 `publish.yml` 也一起卡死（它的 `if` 要求 commits 里含 release commit）。
+#
+# 🔴 **根因不是 tag 缺失，而是 `autorelease: pending` 这个标签没翻掉。**
+# release-please 的状态机全在这对标签上：
+#     release PR 合并 → 打上 `autorelease: pending`
+#     流程跑完打 tag/release → 翻成 `autorelease: tagged`
+# 只要有任何一个合并过的 release PR 还停在 `pending`，
+# **release-please 就会 abort，连带卡住之后所有的版本 PR**。
+#
+# 本仓库为什么会卡住：`release-please-config.json` 里
+#     "draft": true  +  "skip-github-release": true
+# 这两个组合起来，release-please **自己不会去建 tag**，所以那个
+# `pending` → `tagged` 的翻转永远不会发生 ⇒ 死锁。
+# （社区已知问题，见 googleapis/release-please-action#1205：
+#   `include-component-in-tag: false` + `skip-github-release: true` 同类组合会卡住。）
+#
+# ✅ **解法**：给 release PR 补上那个翻转。本仓库用
+#     `scripts/fix-autorelease-label.py`（把 `autorelease: pending`
+#      换成 `autorelease: tagged`）一次性修复了 PR #12。
+#     今后每发一版，合并 release PR 后要么跑那个脚本，要么在网页上改标签。
+#
+# ⚠️ **排查这类问题的正确姿势**（我为此绕了大弯）：
+#     看 **PR 的标签**，别只看 tag 在不在。
+#     `GET /repos/<owner>/<repo>/pulls/<n>` → 看 labels 数组里有没有 `autorelease: pending`。
+#     有它 ⇒ 就是这个死锁，与 tag / draft / immutable 都无关。
+```
