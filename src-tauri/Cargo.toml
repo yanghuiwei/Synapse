@@ -1,6 +1,6 @@
 [package]
 name = "reqly"
-version = "0.6.0" # x-release-please-version
+version = "0.7.0" # x-release-please-version
 description = "Synapse — 本地优先的 Agent 原生 API 工作台"
 authors = ["yhweix"]
 edition = "2021"

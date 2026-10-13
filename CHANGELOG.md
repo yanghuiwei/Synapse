@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/yanghuiwei/Synapse/compare/v0.6.0...v0.7.0) (2026-10-13)
+
+
+### Features
+
+* 验证翻标签后 release-please 能继续开版本 PR ([628e659](https://github.com/yanghuiwei/Synapse/commit/628e6592f79ce571ba33188747cf9d332a747e57))
+
+
+### Bug Fixes
+
+* **ci:** 发版流程第三步自动化 —— 发布后自动翻 release PR 的标签 ([2dd7487](https://github.com/yanghuiwei/Synapse/commit/2dd7487951b3ca76aebc741ea4e11d1dcfa1f158))
+
 ## [0.6.0](https://github.com/yanghuiwei/Synapse/compare/v0.5.0...v0.6.0) (2026-10-13)
 
 
