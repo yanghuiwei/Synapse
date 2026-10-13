@@ -298,74 +298,26 @@ jobs:
           git push origin "refs/tags/${TAG}"
           echo "已推 tag ${TAG} -> $(git rev-list -n1 "${TAG}")"
 
-      # ── 发版第三步：把 release PR 的标签翻成 tagged ────────────────────────
-      # release-please 的状态机：release PR 合并后打 `autorelease: pending`，
-      # 流程跑完、tag 建好才该翻成 `autorelease: tagged`。
-      # 本仓库 `draft: true` + `skip-github-release: true`，
-      # release-please 自己不会建 tag ⇒ 那个翻转永远不会自己发生
-      # ⇒ 它永远abort、永远不开新版本 PR（2026-09-24 起连续 4 次 push 被卡死）。
+      # ── 发版第三步：翻 release PR 的标签 —— **只能人工做，改不了** ──
       #
-      # 本步骤紧跟在「发布 tag」之后 —— tag 落地正是「这版真的发出去了」的信号，
-      # 此时翻标签语义正确。顺序反过来就成了「提前宣布已发布」。
-      - name: 同步 release PR 标签
-        if: matrix.platform == 'windows-latest'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 版本号是本步骤用 node 读出来的，GitHub 表达式够不到它，
-          # 所以走step output 传进 run，在 shell 里用 $VERSION。
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          TAG="v${VERSION}"
-
-          # 只在 tag 确实是本次建出来的前提下才翻。
-          # 若上面那步因「已存在」而跳过，这里也该跳过 —— 那说明这版早发过了。
-          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "tag ${TAG} 不存在，跳过标签同步（publish 应该在更早的步骤就失败）"
-            exit 0
-          fi
-
-          # 按 PR title 精确匹配 release PR。版本号与 tauri.conf.json 同源，
-          # 推到 release PR 的 title 也正是 chore(main): release X.Y.Z。
-          #
-          # ⚠️ 三个坑都在这一段，逐个记下（都造成「绿而不动」）：
-          #
-          # 1) **不能用 gh pr list --search**。
-          #    PR title 里的括号会被当成查询语法：chore(main) 与 : release
-          #    都会破坏解析 ⇒ 永远匹配不到 ⇒ 配 exit 0 就是 step 报 success
-          #    却什么都没做。不看日志根本发现不了。
-          #    现在改成 gh api 拉原始列表，自己在本地做精确字符串比较。
-          #
-          #    ⚠️ 另：仓库名用环境变量 GITHUB_REPOSITORY，**不要写成
-          #    GitHub 表达式**（大括号包起来的那种）。shell 步骤里
-          #    表达式只认有限的内置上下文，GITHUB_REPOSITORY 不在其中 ⇒
-          #    **整个 workflow 解析失败**，连手动 dispatch 都被拒（HTTP 422，
-          #    报 Unrecognized named-value）。
-          #    ⚠️ 还有：**注释里也不能出现那种表达式**——GitHub 扫全文，
-          #    不区分是不是注释，连「转义过的写法」也会被当成表达式解析
-          #    （报 Unexpected symbol）。所以下面注释一律用文字描述。
-          #
-          # 2) **不用 shell 反斜杠续行**。续行与缩进在多次「读-改-写」后
-          #    极易被压扁成一行（我踩过一次），届时 bash 报语法错或行为诡异。
-          #    下面全部写成单行，宁长勿续。
-          #
-          # 3) **IFS 用 $(printf '\t') 而不是 $'\t'**。
-          #    后者在生成脚本的 Python 里会被当成真实制表符写进 YAML。
-          API_JSON=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=closed&per_page=30" --jq ".[] | select(.merged_at != null) | [.number, .title] | @tsv")
-          TAB=$(printf '\t')
-          PR=""
-          while IFS="$TAB" read -r num title; do
-            if [ "$title" = "chore(main): release ${VERSION}" ]; then PR="$num"; break; fi
-          done <<< "$API_JSON"
-
-          if [ -z "$PR" ]; then
-            echo "::warning::没找到 title 为 'chore(main): release ${VERSION}' 的已合并 PR，本次不翻标签（tag 已建，下一版需人工补）"
-            exit 0
-          fi
-
-          echo "处理 PR #${PR}"
-          gh pr edit "${PR}" --remove-label "autorelease: pending"
-          gh pr edit "${PR}" --add-label "autorelease: tagged"
-          echo "PR #${PR} 已翻成 autorelease: tagged"
-
+      # release-please 的状态机全在一对标签上：release PR 合并后打上
+      #   autorelease: pending
+      # 流程跑完、tag 建好，才该翻成
+      #   autorelease: tagged
+      # 只要有任何一个合并过的 release PR 停在 pending，它就 abort、
+      # 永远不开新版本 PR（2026-09-24 起连续 4 次 push main 被卡死，根因是 PR #12）。
+      #
+      # 🔴 **这一步没法在本流水线里自动做**，试过了：
+      #    ① 声明 issues: write（顶层与 job 级都加了）
+      #    ② 用 gh pr edit 改标签
+      #    ③ 结果：gh: Resource not accessible by integration (HTTP 403)
+      # ⇒ 本仓库的 Actions workflow 权限被仓库/组织策略锁住，GITHUB_TOKEN
+      #   拿不到写 label 的能力，**加权限声明也没用**。
+      #   （与本文件头那段「Workflow permissions 开关看不到、被组织策略锁定」一致）
+      #   对照证据：**同一个操作换成 PAT 立刻成功**。
+      #
+      # ✅ 人工一条命令，或在 PR 页面上改标签：
+      #     python scripts/fix-autorelease-label.py
+      #
+      # 为什么**撤掉**而不留着：必然 403 的步骤会让整个 run 变红，
+      # 把真正的问题淹掉、Actions 页面也永远是红的。
