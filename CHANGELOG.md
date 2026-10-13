@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.6.0](https://github.com/yanghuiwei/Synapse/compare/v0.5.0...v0.6.0) (2026-10-13)
+
+
+### Features
+
+* give each sidebar section its own workspace view ([6d0a682](https://github.com/yanghuiwei/Synapse/commit/6d0a682e8e08a798e0cfe9d9781238daa8f591bd))
+* **loadtest:** split new-run and history into tabs ([4117fcf](https://github.com/yanghuiwei/Synapse/commit/4117fcf677778e31bc825bad256603e74ac7112b))
+* **theme:** add five accent palettes as an orthogonal theme dimension ([b3cf8b6](https://github.com/yanghuiwei/Synapse/commit/b3cf8b625f63d4ca94fcb3ac2684d7fa0fde21bd))
+* **tools:** add a Tools section with a local JWT parser ([c50f4d6](https://github.com/yanghuiwei/Synapse/commit/c50f4d6ca086df05969d6ccb98cb4ccfdcba236b))
+* **verify:** 验证 release-please 在死锁解开后会正常开出版本 PR ([#18](https://github.com/yanghuiwei/Synapse/issues/18)) ([8414cfd](https://github.com/yanghuiwei/Synapse/commit/8414cfdd8885c8119a14bcc312f3d997d8571e8d))
+* **window:** 自绘标题栏（去系统标题栏 + 整条顶栏可拖 + 窗口按钮） ([6ce9e73](https://github.com/yanghuiwei/Synapse/commit/6ce9e7367a5c853e61a11cd1a6bc30cf161f132e))
+* **workspace:** give history and loadtest their own main views ([9c5fac9](https://github.com/yanghuiwei/Synapse/commit/9c5fac9f7d9320fdf69f8138d9c2b44cac0355fb))
+* 再次验证 release-please（tag 类型问题） ([e3c88f4](https://github.com/yanghuiwei/Synapse/commit/e3c88f4fc8e5226b286117111f487b63912e1209))
+* 死锁解开后验证 release-please 会正常开出版本 PR ([60e0180](https://github.com/yanghuiwei/Synapse/commit/60e01800d687669e4fb7a23ac1e2bb115066db00))
+* 验证 autorelease 标签修正后 release-please 恢复 ([862cf6f](https://github.com/yanghuiwei/Synapse/commit/862cf6fbc3346337ba7f53795b8183f030a3865a))
+
+
+### Bug Fixes
+
+* **ci:** 删掉 squash 合并留下的重复 target 段 ([3293b0e](https://github.com/yanghuiwei/Synapse/commit/3293b0e72b76781ab311ebddd335e61d34e4fb65))
+* **ci:** 发布 tag 必须用轻量 tag，附注 tag 会让 release-please 永远判为未打 tag ([49045e9](https://github.com/yanghuiwei/Synapse/commit/49045e98445c8caf761111870a815fc1ccb91af0))
+* **ci:** 发布流水线补推 tag，解开 release-please 的闭环死锁 ([6fcc7c2](https://github.com/yanghuiwei/Synapse/commit/6fcc7c22e32bedc5c74a677d72cf0a6576dce798))
+* **ci:** 订正 publish.yml 里关于 tag 的错误注释 ([79dfbab](https://github.com/yanghuiwei/Synapse/commit/79dfbab28534ced9b1a2937fee86c0aaa4c36597))
+* **ci:** 通用依赖被误塞进 cfg(windows) 段，macOS/Linux 构建全红 ([#16](https://github.com/yanghuiwei/Synapse/issues/16)) ([6d79e69](https://github.com/yanghuiwei/Synapse/commit/6d79e69656b721e46bb91b22cf8cfd53c38d03be))
+* **loadtest:** stop restating the run number in the report ([8361ef5](https://github.com/yanghuiwei/Synapse/commit/8361ef53b7e5ec7fcf7132481069f2ba8966d308))
+* **response:** keep the pretty/raw toggle usable after switching to raw ([efaff89](https://github.com/yanghuiwei/Synapse/commit/efaff89b5022f75167f2faffcb01640f1728776c))
+
 ## [0.5.0](https://github.com/yanghuiwei/Synapse/compare/v0.4.0...v0.5.0) (2026-09-23)
 
 
