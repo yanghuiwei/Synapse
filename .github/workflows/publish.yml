@@ -321,6 +321,12 @@ jobs:
           #
           # ⚠️ 三个坑都在这一段，逐个记下（都造成「绿而不动」）：
           #
+          # 1) **`${{{{ GITHUB_REPOSITORY }}}}` 不能用在 run: 里**。
+          #    GitHub 表达式在 shell 步骤中只认有限的内置上下文，
+          #    用它会报 `Unrecognized named-value: 'GITHUB_REPOSITORY'`
+          #    并且**整个 workflow 解析失败、连 dispatch 都被拒（HTTP 422）**。
+          #    bash 里本来就有环境变量 `GITHUB_REPOSITORY`（GitHub 自动注入），
+          #    直接用它，不要套表达式。
           # 1) **不能用 gh pr list --search**。
           #    PR title 里的括号会被当成查询语法：chore(main) 与 : release
           #    都会破坏解析 ⇒ 永远匹配不到 ⇒ 配 exit 0 就是 step 报 success
@@ -333,7 +339,7 @@ jobs:
           #
           # 3) **IFS 用 $(printf '\t') 而不是 $'\t'**。
           #    后者在生成脚本的 Python 里会被当成真实制表符写进 YAML。
-          API_JSON=$(gh api "repos/${{GITHUB_REPOSITORY}}/pulls?state=closed&per_page=30" --jq ".[] | select(.merged_at != null) | [.number, .title] | @tsv")
+          API_JSON=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=closed&per_page=30" --jq ".[] | select(.merged_at != null) | [.number, .title] | @tsv")
           TAB=$(printf '\t')
           PR=""
           while IFS="$TAB" read -r num title; do
