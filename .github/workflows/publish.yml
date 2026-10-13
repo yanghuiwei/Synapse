@@ -272,6 +272,14 @@ jobs:
           # 也已经由上一轮建好了，同样不会走到这里。
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "Release ${TAG}"
+          # 🔴 **必须用轻量 tag，不能加 -a。** 这一条是本步骤能否解开死锁的关键：
+          # release-please 判定「这个 release PR 打 tag 了没」时，比对的是
+          # `GET /git/ref/tags/<name>` 返回的 **sha 与 PR 的 merge_commit_sha 是否相等**。
+          # 而 **附注 tag（annotated）** 的 ref 指向的是 **tag 对象**（`git tag -a` 会
+          # 多造一个对象），不是 commit ⇒ sha 永远对不上 ⇒ 它永远判定「未打 tag」
+          # ⇒ 又回到 abort。**症状是本步骤明明推成功了、tag 也在 `GET /tags` 里能看到，
+          # release-please 却仍然抱怨 untagged** —— 极难自查。
+          # 本仓库其它能正常识别的 tag（v0.4.0 / v0.3.0 / v0.2.1）实测都是轻量 tag。
+          git tag "${TAG}"
           git push origin "refs/tags/${TAG}"
-          echo "已推 tag ${TAG} -> $(git rev-parse HEAD)"
+          echo "已推 tag ${TAG} -> $(git rev-list -n1 "${TAG}")"
