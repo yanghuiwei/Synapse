@@ -53,6 +53,14 @@ export const zhCN = {
   "appearance.theme": "明暗模式",
   "appearance.accent": "配色",
 
+  // ---- 窗口按钮（自绘，替代系统标题栏）----
+  // 「还原」而不是「最大化」：同一个按钮两种状态，
+  // 图标与文案都要跟着最大化态翻转（见 WindowControls）
+  "window.minimize": "最小化",
+  "window.maximize": "最大化",
+  "window.restore": "向下还原",
+  "window.close": "关闭",
+
   // ---- 导航 / 侧栏 ----
   "nav.primary": "主导航",
   "nav.collections": "集合",

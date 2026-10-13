@@ -14,6 +14,8 @@
 
 pub mod commands;
 mod external_changes;
+#[cfg(windows)]
+mod window_chrome;
 
 /// 命令层的 `use crate::AppState;` 靠这条成立。
 pub use reqly_core::AppState;
@@ -107,6 +109,44 @@ pub fn run() {
             // MCP / CLI 改了同一个库时把界面叫醒（design.md §8.1 承诺的文件监听）。
             // 放在 `setup` 里是因为它需要 `AppHandle` 才能往后发事件。
             external_changes::spawn(app.handle().clone(), pool);
+
+            // 去掉系统标题栏（自绘标题栏，省掉约 28px 且顶栏可整条拖动）。
+            //
+            // ⚠️ 为什么在这里自己动手，而不用 Tauri 的配置或 API：
+            // `"decorations": false`（配置）与 `window.set_decorations(false)`
+            // （运行时）**两条路都实测过，都没生效，且运行时那条返回 `Ok`、
+            // 不报任何错**。完整排查过程见 `window_chrome` 模块头 ——
+            // **别把这几行当成重复劳动删掉**，它们是当前唯一有效的路径。
+            //
+            // ⚠️ 失败模式极其隐蔽：**界面上看不出区别** —— 自绘顶栏里也有个
+            // "Synapse"，截图一眼扫过去是「正常的」，只有读 Win32 样式位才发现白做。
+            // 所以下面**每个分支都打日志**，且判据用「复核后的样式位」而非返回值。
+            for label in app.webview_windows().keys() {
+                let Some(window) = app.get_webview_window(label) else {
+                    eprintln!("[reqly] 去标题栏：label {label} 在枚举里但取不到窗口");
+                    continue;
+                };
+                #[cfg(windows)]
+                match window.hwnd() {
+                    Ok(hwnd) => {
+                        // 返回值是**读回样式位复核**过的，不是「调用成功」
+                        let ok = window_chrome::strip_decorations(hwnd);
+                        if ok {
+                            eprintln!("[reqly] 去标题栏：{label} 已确认 WS_CAPTION 清除");
+                        } else {
+                            eprintln!(
+                                "[reqly] 去标题栏：{label} 调了但样式位没变（保留系统标题栏，功能不受影响）"
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("[reqly] 去标题栏：{label} 取 hwnd 失败：{e}"),
+                };
+                #[cfg(not(windows))]
+                // 非 Windows 平台仍走 Tauri 自己的 API（macOS 上它能正常工作）
+                if let Err(e) = window.set_decorations(false) {
+                    eprintln!("[reqly] 去标题栏：{label} 调用失败（保留系统标题栏）：{e}");
+                }
+            }
 
             Ok(())
         })

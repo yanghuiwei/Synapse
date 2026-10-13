@@ -6,6 +6,7 @@ import { tokenCounts, useTokenStore } from "@/store/token";
 import { useUiStore } from "@/store/ui";
 import { Button, IconButton } from "@/features/ui/Button";
 import { AppearanceMenu } from "@/features/ui/AppearanceMenu";
+import { WindowControls } from "@/features/layout/WindowControls";
 
 /** 应用标识：一个方块 + 字标。刻意做得克制，别跟工具栏抢注意力 */
 function BrandMark() {
@@ -102,7 +103,22 @@ export function TopBar() {
   const validTokens = useTokenStore((s) => tokenCounts(s).valid);
 
   return (
-    <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-canvas px-2.5">
+    // `data-tauri-drag-region`：**裸值**（不给 "deep"）。
+    //
+    // 查了 tauri-2.11.5 的 `src/window/scripts/drag.js`，它有两种语义：
+    //   裸值 / "true" → 只有**直接点在带这个属性的元素上**才拖
+    //   "deep"        → 点它子树里任何地方都拖
+    // 这里要裸值 —— 一旦用 "deep"，搜索框、导入、外观面板就全被拖拽吃掉，
+    // 按不动了。（脚本里那套 `isClickableElement` 会自动给
+    // BUTTON / INPUT / 带 tabindex / role 匹配的子元素让位，
+    // 所以不用手写 `data-tauri-drag-region="false"`，但**别用 deep**。）
+    //
+    // 双击最大化是脚本内置的（`e.detail === 2` → `internal_toggle_maximize`），
+    // 同样不用自己实现。
+    <header
+      data-tauri-drag-region
+      className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-canvas pl-2.5"
+    >
       <BrandMark />
 
       <IconButton
@@ -121,6 +137,13 @@ export function TopBar() {
       {/* 中间这块用 `flex-1` + 内部居中，而不是「占位符 + 固定宽度按钮」：
           占位符会把搜索框推到右侧控件左边，窗口一宽它就贴着走了。
           搜索框吃满剩余空间再 `justify-center`，窄了自动缩宽、宽了居中，两头都稳。
+
+          ⚠️ `flex-1` 会吃掉**所有**剩余空间，所以它**右边**的元素若想「贴右缘」，
+          不能再靠自己的 `ml-auto`（前面已有 flex-1，auto margin 分不到空间）。
+          `WindowControls` 的 `ml-auto` 就是这样害得按钮停在离右缘 45px 的地方 ——
+          按钮明明渲染了、却点不到（外表与「没渲染」一模一样，排查先量坐标）。
+          现在改成 header 右侧统一由「右侧组」这一层的 flex 布局贴边，
+          `WindowControls` 内部的 `ml-auto` 已去掉。
 
           窄于 `md`（768px）整块让位。按实际控件宽度算过：
           左右两组固定控件约占 440px，768px 时中间还剩 ~310px —— 塞得下一个
@@ -147,46 +170,55 @@ export function TopBar() {
           现在它是纯文本，只保留 `title`（悬停能看到完整句子）。
           副产物：`hidden md:inline-flex` 那个响应式隐藏一起去了 ——
           窄窗口下它一消失，右侧整排控件就会往左跳一下。 */}
-      <span
-        title={
-          pendingTokens > 0
-            ? t("status.tokenExpired", { count: pendingTokens })
-            : t("status.tokenValid", { count: validTokens })
-        }
-        className="hidden shrink-0 select-none text-xs md:block"
-      >
-        {t("status.tokens")}
+      {/* 右侧整组（Token 计数 / 分隔线 / 导入 / 外观 / 窗口按钮）贴住窗口右缘。
+
+          ⚠️ **为什么必须包这一层**（2026-10-13 真机踩到）：
+          中间那块是 `flex-1`，它会吃掉**全部**剩余空间，导致它**之后**的元素
+          即使带 `ml-auto` 也分不到空间（auto margin 只能分配「该元素之后的剩余」）。
+          于是窗口按钮组停在离右缘 45px 的地方 —— **按钮渲染了、坐标也对，
+          但用户点不到**，外表与「按钮没渲染」一模一样。
+          排查时先量按钮坐标、再下结论，别只看「有没有画出来」。
+
+          这一层不带 `flex-1`、也不带 `ml-auto`：它作为 header 最后一个 flex 项，
+          中间的 `flex-1` 吃掉剩余后它自然紧贴右缘。窗口按钮组内部也去掉了
+          自己的 `ml-auto`（那正是把按钮推离右缘的元凶）。 */}
+      <div className="flex shrink-0 items-center gap-3">
         <span
-          className={cn("tabular", pendingTokens > 0 ? "text-warn" : "text-ink-faint")}
+          title={
+            pendingTokens > 0
+              ? t("status.tokenExpired", { count: pendingTokens })
+              : t("status.tokenValid", { count: validTokens })
+          }
+          className="hidden shrink-0 select-none text-xs md:block"
         >
-          {" "}
-          {pendingTokens > 0 ? pendingTokens : validTokens}
+          {t("status.tokens")}
+          <span
+            className={cn("tabular", pendingTokens > 0 ? "text-warn" : "text-ink-faint")}
+          >
+            {" "}
+            {pendingTokens > 0 ? pendingTokens : validTokens}
+          </span>
         </span>
-      </span>
 
-      <div className="mx-0.5 h-5 w-px bg-line" aria-hidden />
+        <div className="mx-0.5 h-5 w-px bg-line" aria-hidden />
 
-      <Button
-        size="sm"
-        variant="secondary"
-        icon={<Import size={13} strokeWidth={2} />}
-        onClick={openImport}
-      >
-        {t("sidebar.import")}
-      </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={<Import size={13} strokeWidth={2} />}
+          onClick={openImport}
+        >
+          {t("sidebar.import")}
+        </Button>
 
-      {/* 顶栏**没有** Token 解析栏的开关：工具现在是「工具」板块的主视图，
-          而左栏的活动栏本身就是那块的路由。在顶栏再开一个入口，
-          会让人以为它是个跟板块无关的浮层 —— 而它并不是 */}
-      {/* 外观（明暗 + 配色）收成**一个**入口。
-          原先是两个并排的控件（`ThemeToggle` 三段 + `AccentPicker` 色块），
-          顶栏右侧被占掉 ~110px；而这两个维度是低频设置，
-          却和「导入」这种高频动作抢同一排位置。
-          ⚠️ 合并的是**入口**，不是**维度** —— 面板里明暗与配色仍是两组独立控件，
-          15 种组合各自可选。原来那条「别合成一个下拉」的判断依然成立，
-          它反对的是把 15 种组合铺成 15 行，不是反对「一个按钮打开两个分区」。
-          详见 `AppearanceMenu` 的注释。 */}
-      <AppearanceMenu />
+        {/* 外观（明暗 + 配色）收成**一个**入口。
+            详见 AppearanceMenu 的注释。 */}
+        <AppearanceMenu />
+
+        {/* 窗口按钮贴住窗口右缘（Windows 惯例）。它自己不再带 `ml-auto`，
+            由上方这一层的「最后一项」定位把它送到右缘。 */}
+        <WindowControls />
+      </div>
     </header>
   );
 }
