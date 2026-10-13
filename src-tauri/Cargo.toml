@@ -95,6 +95,24 @@ reqwest = { version = "0.12.28", default-features = false, features = [
 ] }
 
 
+# --- 仅 Windows 需要的依赖 ---
+# ⚠️ **这一段必须放在所有通用依赖之后、且内容只放 Windows 专属的那几条。**
+#    `serde` / `tokio` / `reqwest` / `rusqlite` 这些是**三平台共用**的，
+#    写进本段等于「只在 Windows 上编译」，于是 macOS / Linux 的 CI 报
+#    `error[E0432]: unresolved import serde` 一片红，而本机 Windows 一切正常 ——
+#    **本地永远验不出来，只有三平台流水线能发现**。
+[target.'cfg(windows)'.dependencies]
+# 直接调 Win32 去掉系统标题栏（`window_chrome.rs`）。
+# ⚠️ **必须显式声明，不能靠 tao 传递**：它是 tao 的传递依赖，
+# 而 Rust 不允许直接使用传递依赖里的 crate —— 不写这一行编译直接报
+# `use of undeclared crate or module`。版本与 tao 用的对齐（0.61），
+# 两条不同的 0.6x 会因为 `HWND` 类型不兼容而编译失败。
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+
 # --- MCP Server（P7）---
 # 已经不在这里了：P8 把它拆成了独立的 `reqly-mcp` package（见 workspace members）。
 # 原因就是本文件顶部写的那条 —— bin target 挂在哪个 package 下，就会链上那个
