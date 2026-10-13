@@ -45,6 +45,8 @@ on:
 
 permissions:
   contents: write
+  # PR 的 label 走Issues API，contents 覆盖不到
+  issues: write
 
 # 同一次发版连推两次 / 手动重跑时，取消上一轮没跑完的 job：
 # 既省 runner 分钟，也避免两个 job 同时往同一个 Release 传附件（会互相覆盖）
@@ -65,6 +67,8 @@ jobs:
     # ↓↓ 第二层。别删，理由见文件头。
     permissions:
       contents: write
+      # PR 的 label 走Issues API，contents 覆盖不到
+      issues: write
 
     strategy:
       # 一个平台挂了不要顺手把其他平台也掐掉 —— 三平台产物互相独立
@@ -285,3 +289,50 @@ jobs:
           git tag "${TAG}"
           git push origin "refs/tags/${TAG}"
           echo "已推 tag ${TAG} -> $(git rev-list -n1 "${TAG}")"
+
+      # ── 发版第三步：把 release PR 的标签翻成 tagged ────────────────────────
+      # release-please 的状态机：release PR 合并后打 `autorelease: pending`，
+      # 流程跑完、tag 建好才该翻成 `autorelease: tagged`。
+      # 本仓库 `draft: true` + `skip-github-release: true`，
+      # release-please 自己不会建 tag ⇒ 那个翻转永远不会自己发生
+      # ⇒ 它永远abort、永远不开新版本 PR（2026-09-24 起连续 4 次 push 被卡死）。
+      #
+      # 本步骤紧跟在「发布 tag」之后 —— tag 落地正是「这版真的发出去了」的信号，
+      # 此时翻标签语义正确。顺序反过来就成了「提前宣布已发布」。
+      - name: 同步 release PR 标签
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${ secrets.GITHUB_TOKEN }
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAG="v${VERSION}"
+
+          # 只在 tag 确实是本次建出来的前提下才翻。
+          # 若上面那步因「已存在」而跳过，这里也该跳过 —— 那说明这版早发过了。
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} 不存在，跳过标签同步（publish 应该在更早的步骤就失败）"
+            exit 0
+          fi
+
+          # 按 PR title 精确匹配：release PR 的 title 正是
+          # `chore(main): release X.Y.Z`，与 tauri.conf.json 的版本号同源。
+          PR=$(gh pr list --state merged \
+                --search "chore(main): release ${VERSION} in:title" \
+                --json number,title,labels --limit 5 \
+                | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
+                    const ps=JSON.parse(d);
+                    const hit=ps.find(p=>p.title==='chore(main): release ${VERSION}');
+                    console.log(hit?hit.number:0);
+                  })")
+          if [ "${PR}" = "0" ]; then
+            echo "没找到 title 为 'chore(main): release ${VERSION}' 的 PR，跳过"
+            exit 0
+          fi
+
+          echo "处理 PR #${PR}"
+          gh pr edit "${PR}" --remove-label "autorelease: pending" >/dev/null
+          gh pr edit "${PR}" --add-label "autorelease: tagged" >/dev/null
+          echo "PR #${PR} 已翻成 autorelease: tagged"
+
