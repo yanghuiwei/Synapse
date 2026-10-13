@@ -124,10 +124,6 @@ pub struct RequestDraft {
     pub body: String,
     #[serde(default)]
     pub settings: RequestSettings,
-    #[serde(default)]
-    pub pre_script: String,
-    #[serde(default)]
-    pub test_script: String,
 }
 
 fn default_method() -> String {
@@ -149,8 +145,6 @@ impl Default for RequestDraft {
             body_type: default_body_type(),
             body: String::new(),
             settings: RequestSettings::default(),
-            pre_script: String::new(),
-            test_script: String::new(),
         }
     }
 }

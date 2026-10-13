@@ -811,8 +811,6 @@ fn apply_draft(target: &mut ApiRequest, draft: &RequestDraft) {
     target.body_type = BodyType::parse(&draft.body_type);
     target.body = draft.body.clone();
     target.settings = draft.settings.clone();
-    target.pre_script = draft.pre_script.clone();
-    target.test_script = draft.test_script.clone();
 }
 
 /// 库里那条和文件里这条**内容**一样吗。
@@ -828,8 +826,6 @@ fn content_matches(existing: &ApiRequest, draft: &RequestDraft) -> bool {
         && existing.body_type == BodyType::parse(&draft.body_type)
         && existing.body == draft.body
         && existing.settings == draft.settings
-        && existing.pre_script == draft.pre_script
-        && existing.test_script == draft.test_script
 }
 
 /// 导入时的名字处理比手工新建宽松：一份集合里有条名字超长，

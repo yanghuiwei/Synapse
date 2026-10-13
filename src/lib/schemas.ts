@@ -119,8 +119,6 @@ export const apiRequestSchema = z.looseObject({
   // 005 迁移新增的列，兜底理由同上
   formFields: z.array(keyValueItemSchema).catch([]),
   settings: requestSettingsSchema,
-  preScript: z.string(),
-  testScript: z.string(),
   sortOrder: z.number(),
   createdAt: z.string(),
   updatedAt: z.string(),

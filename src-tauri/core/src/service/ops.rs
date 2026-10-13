@@ -159,8 +159,6 @@ pub struct RequestDetail {
     pub body_type: String,
     pub body: String,
     pub settings: RequestSettingsDto,
-    pub pre_script: String,
-    pub test_script: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1702,8 +1700,6 @@ fn detail(request: &ApiRequest) -> RequestDetail {
             http_version: request.settings.http_version.as_db_str().to_string(),
             has_proxy: request.settings.proxy.is_some(),
         },
-        pre_script: request.pre_script.clone(),
-        test_script: request.test_script.clone(),
     }
 }
 

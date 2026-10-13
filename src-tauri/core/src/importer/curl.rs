@@ -417,8 +417,6 @@ impl Args {
             body_type,
             body,
             settings,
-            pre_script: String::new(),
-            test_script: String::new(),
         };
         // 手写的同名列优先：`-u` 与 `-H 'Authorization: …'` 同时给的时候，
         // 用户显式写的那条赢（判据见 `merge_auth_rows`，与 Postman 那边同一份）

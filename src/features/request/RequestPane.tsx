@@ -1,4 +1,4 @@
-import { Ban, Braces, ChevronDown, Gauge, KeyRound, ListTree, Save, Send, Settings2, Terminal } from "lucide-react";
+import { Ban, ChevronDown, Save, Send } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/cn";
@@ -10,7 +10,6 @@ import { useRequestStore, type RequestDraft } from "@/store/request";
 import { useUiStore } from "@/store/ui";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
-import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
 import { LoadTestPanel } from "@/features/loadtest/LoadTestPanel";
 import { parsePlaceholders } from "@/lib/placeholder";
@@ -21,26 +20,14 @@ import { KeyValueTable } from "./KeyValueTable";
 import { SaveDraftDialog } from "./SaveDraftDialog";
 import { UrlBar } from "./UrlBar";
 
-type RequestTab = "params" | "headers" | "body" | "scripts" | "settings" | "loadtest";
+type RequestTab = "params" | "headers" | "body" | "settings" | "loadtest";
 
 const TAB_LABEL: Record<RequestTab, MessageKey> = {
   params: "request.tab.params",
   headers: "request.tab.headers",
   body: "request.tab.body",
-  scripts: "request.tab.scripts",
   settings: "request.tab.settings",
   loadtest: "loadtest.tab",
-};
-
-const TAB_ICON: Record<RequestTab, typeof ListTree> = {
-  params: ListTree,
-  // 请求头页现在**也是凭据页**（007 之后 Authorization 就是一行头），
-  // 所以图标给它而不是给 params —— 让「token 在哪儿」这件事看一眼就知道
-  headers: KeyRound,
-  body: Braces,
-  scripts: Terminal,
-  settings: Settings2,
-  loadtest: Gauge,
 };
 
 /**
@@ -65,7 +52,6 @@ const TAB_ORDER: readonly RequestTab[] = [
   "body",
   "params",
   "headers",
-  "scripts",
   "settings",
   "loadtest",
 ];
@@ -259,8 +245,6 @@ export function RequestPane() {
   // 「整块要不要出现」是排版决定（它同时决定了地址栏里还剩多少宽度给 URL）
   const wantsToken = useMemo(() => draftWantsToken(draft), [draft]);
 
-  const BodyIcon = TAB_ICON[tab];
-
   return (
     <section className="flex h-full min-h-0 flex-col bg-canvas">
       {/* URL 栏 */}
@@ -369,18 +353,10 @@ export function RequestPane() {
             valuePlaceholder={t("kv.value")}
           />
         </div>
-      ) : tab === "headers" ? (
+      ) : (
         // 请求头页自带滚动、内边距与折叠区（007 起它同时是凭据页），
         // 所以不像 params 那样再套一层容器
         <HeadersTab className="min-h-0 flex-1" />
-      ) : (
-        // scripts 是 P5 的事，先明确占位而不是留白
-        <EmptyState
-          icon={BodyIcon}
-          title={t(TAB_LABEL[tab])}
-          description={t("common.comingSoon")}
-          className="min-h-0 flex-1"
-        />
       )}
 
       {/* 它是个 portal；挂在这里是为了跟着当前请求走，

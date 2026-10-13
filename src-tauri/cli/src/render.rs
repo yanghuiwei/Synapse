@@ -247,12 +247,6 @@ pub fn request_detail(request: &RequestDetail) -> String {
             &request.body,
         ));
     }
-    if !request.pre_script.is_empty() {
-        out.push_str(&section("前置脚本", &request.pre_script));
-    }
-    if !request.test_script.is_empty() {
-        out.push_str(&section("测试脚本", &request.test_script));
-    }
     out
 }
 

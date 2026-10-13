@@ -20,7 +20,7 @@ use crate::storage::now_iso;
 use crate::storage::repo::{opt_text, parse_json_column, to_json_column, ORDER_BY_SORT};
 
 const COLUMNS: &str = "id, folder_id, workspace_id, name, method, url, params, headers, \
-     body_type, body, body_by_type, body_rows, form_fields, settings, pre_script, test_script, \
+     body_type, body, body_by_type, body_rows, form_fields, settings, \
      sort_order, created_at, updated_at, deleted_at";
 
 fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
@@ -54,8 +54,6 @@ fn map_row(row: &Row<'_>) -> AppResult<ApiRequest> {
         )?,
         // 凭据头（`Authorization` / `X-Api-Key` / …）就在这个数组里，与普通头无区别
         settings: parse_json_column(&settings_raw, "request.settings")?,
-        pre_script: row.get("pre_script")?,
-        test_script: row.get("test_script")?,
         sort_order: row.get("sort_order")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -164,10 +162,8 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
            body_rows    = ?11,
            form_fields  = ?12,
            settings     = ?13,
-           pre_script   = ?14,
-           test_script  = ?15,
-           sort_order   = ?16,
-           updated_at   = ?17
+           sort_order   = ?14,
+           updated_at   = ?15
          WHERE id = ?1",
         rusqlite::params![
             req.id,
@@ -183,8 +179,6 @@ pub fn save(conn: &Connection, req: &ApiRequest) -> AppResult<ApiRequest> {
             to_json_column(&req.body_rows, "request.body_rows")?,
             to_json_column(&req.form_fields, "request.form_fields")?,
             to_json_column(&req.settings, "request.settings")?,
-            req.pre_script,
-            req.test_script,
             req.sort_order,
             now_iso(),
         ],
@@ -235,11 +229,11 @@ pub fn duplicate(conn: &Connection, id: i64, name: &str) -> AppResult<ApiRequest
         "INSERT INTO request
            (folder_id, workspace_id, name, method, url, params, headers,
             body_type, body, body_by_type, body_rows, form_fields,
-            settings, pre_script, test_script,
+            settings,
             sort_order, created_at, updated_at)
          SELECT folder_id, workspace_id, ?2, method, url, params, headers,
                 body_type, body, body_by_type, body_rows, form_fields,
-                settings, pre_script, test_script,
+                settings,
                 ?3, ?4, ?4
          FROM request WHERE id = ?1",
         rusqlite::params![id, name, next_order, now],
@@ -392,7 +386,6 @@ mod tests {
         r.settings.timeout_ms = 5_000;
         r.settings.verify_tls = false;
         r.settings.proxy = Some("http://127.0.0.1:7890".into());
-        r.pre_script = "console.log(1)".into();
 
         let saved = save(&conn, &r).unwrap();
 
@@ -403,7 +396,6 @@ mod tests {
         assert_eq!(saved.body_by_type, r.body_by_type);
         assert_eq!(saved.body_rows, r.body_rows);
         assert_eq!(saved.settings, r.settings);
-        assert_eq!(saved.pre_script, "console.log(1)");
     }
 
     /// 空快照读回来是**空 map / 空 vec**，不是报错 ——
