@@ -255,6 +255,13 @@ jobs:
       #
       # ⚠️ 只在其中一个平台推（`matrix.platform == 'windows-latest'`），
       #    否则三平台并发推同一个 tag 会打架（后两个报 already exists）。
+      # 版本号的单一来源：tauri.conf.json。tag 步骤与标签步骤都用它，
+      # 通过 step output 传递 —— 免得两个步骤各读一遍、读出不一致。
+      - name: 读版本号
+        id: ver
+        shell: bash
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
       - name: 发布 tag（解开 release-please 死锁）
         if: matrix.platform == 'windows-latest'
         shell: bash
@@ -264,7 +271,6 @@ jobs:
           set -euo pipefail
           # 版本号的权威来源是 tauri.conf.json —— 它就是上面 tagName 里
           # __VERSION__ 被替换成的那份，读它才不会与实际构建产物脱节。
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           TAG="v${VERSION}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
@@ -304,9 +310,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 版本号是本步骤用 node 读出来的，GitHub 表达式够不到它，
+          # 所以走step output 传进 run，在 shell 里用 $VERSION。
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           TAG="v${VERSION}"
 
           # 只在 tag 确实是本次建出来的前提下才翻。
@@ -346,16 +354,16 @@ jobs:
           TAB=$(printf '\t')
           PR=""
           while IFS="$TAB" read -r num title; do
-            if [ "$title" = "chore(main): release ${{VERSION}}" ]; then PR="$num"; break; fi
+            if [ "$title" = "chore(main): release ${VERSION}" ]; then PR="$num"; break; fi
           done <<< "$API_JSON"
 
           if [ -z "$PR" ]; then
-            echo "::warning::没找到 title 为 'chore(main): release ${{VERSION}}' 的已合并 PR，本次不翻标签（tag 已建，下一版需人工补）"
+            echo "::warning::没找到 title 为 'chore(main): release ${VERSION}' 的已合并 PR，本次不翻标签（tag 已建，下一版需人工补）"
             exit 0
           fi
 
-          echo "处理 PR #${{PR}}"
-          gh pr edit "${{PR}}" --remove-label "autorelease: pending"
-          gh pr edit "${{PR}}" --add-label "autorelease: tagged"
+          echo "处理 PR #${PR}"
+          gh pr edit "${PR}" --remove-label "autorelease: pending"
+          gh pr edit "${PR}" --add-label "autorelease: tagged"
           echo "PR #${PR} 已翻成 autorelease: tagged"
 
