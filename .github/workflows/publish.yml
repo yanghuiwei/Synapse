@@ -318,15 +318,17 @@ jobs:
 
           # 按 PR title 精确匹配：release PR 的 title 正是
           # `chore(main): release X.Y.Z`，与 tauri.conf.json 的版本号同源。
-          PR=$(gh pr list --state merged \
-                --search "chore(main): release ${VERSION} in:title" \
-                --json number,title,labels --limit 5 \
-                | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
-                    const ps=JSON.parse(d);
-                    const hit=ps.find(p=>p.title==='chore(main): release ${VERSION}');
-                    console.log(hit?hit.number:0);
-                  })")
-          if [ "${PR}" = "0" ]; then
+          # 🔴 **不能用 gh pr list --search**：PR title 里的括号会被当成查询语法
+          # （chore(main): release 0.7.0 → chore(main) 与 : release 都破坏解析），
+          # 结果永远是「没找到」，而本步骤 exit 0 干净退出
+          # ⇒ **step 报 success 但什么都没做**。
+          # 这个坑的特征就是「绿而不动」，不看日志根本发现不了。
+          # 改成用 REST API 拉最近的 PR，自己在本地做精确 title 匹配。
+          PR=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=closed&per_page=30"                 --jq ".[] | select(.merged_at != null) | [.number, .title] | @tsv"                 | while IFS=$'	' read -r num title; do
+                    if [ "$title" = "chore(main): release ${VERSION}" ]; then
+                      echo "$num"; break
+                    fi
+                  done)          if [ "${PR}" = "0" ]; then
             echo "没找到 title 为 'chore(main): release ${VERSION}' 的 PR，跳过"
             exit 0
           fi
