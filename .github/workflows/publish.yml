@@ -316,25 +316,37 @@ jobs:
             exit 0
           fi
 
-          # 按 PR title 精确匹配：release PR 的 title 正是
-          # `chore(main): release X.Y.Z`，与 tauri.conf.json 的版本号同源。
-          # 🔴 **不能用 gh pr list --search**：PR title 里的括号会被当成查询语法
-          # （chore(main): release 0.7.0 → chore(main) 与 : release 都破坏解析），
-          # 结果永远是「没找到」，而本步骤 exit 0 干净退出
-          # ⇒ **step 报 success 但什么都没做**。
-          # 这个坑的特征就是「绿而不动」，不看日志根本发现不了。
-          # 改成用 REST API 拉最近的 PR，自己在本地做精确 title 匹配。
-          PR=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=closed&per_page=30"                 --jq ".[] | select(.merged_at != null) | [.number, .title] | @tsv"                 | while IFS=$'	' read -r num title; do
-                    if [ "$title" = "chore(main): release ${VERSION}" ]; then
-                      echo "$num"; break
-                    fi
-                  done)          if [ "${PR}" = "0" ]; then
-            echo "没找到 title 为 'chore(main): release ${VERSION}' 的 PR，跳过"
+          # 按 PR title 精确匹配 release PR。版本号与 tauri.conf.json 同源，
+          # 推到 release PR 的 title 也正是 chore(main): release X.Y.Z。
+          #
+          # ⚠️ 三个坑都在这一段，逐个记下（都造成「绿而不动」）：
+          #
+          # 1) **不能用 gh pr list --search**。
+          #    PR title 里的括号会被当成查询语法：chore(main) 与 : release
+          #    都会破坏解析 ⇒ 永远匹配不到 ⇒ 配 exit 0 就是 step 报 success
+          #    却什么都没做。不看日志根本发现不了。
+          #    现在改成 gh api 拉原始列表，自己在本地做精确字符串比较。
+          #
+          # 2) **不用 shell 反斜杠续行**。续行与缩进在多次「读-改-写」后
+          #    极易被压扁成一行（我踩过一次），届时 bash 报语法错或行为诡异。
+          #    下面全部写成单行，宁长勿续。
+          #
+          # 3) **IFS 用 $(printf '\t') 而不是 $'\t'**。
+          #    后者在生成脚本的 Python 里会被当成真实制表符写进 YAML。
+          API_JSON=$(gh api "repos/${{GITHUB_REPOSITORY}}/pulls?state=closed&per_page=30" --jq ".[] | select(.merged_at != null) | [.number, .title] | @tsv")
+          TAB=$(printf '\t')
+          PR=""
+          while IFS="$TAB" read -r num title; do
+            if [ "$title" = "chore(main): release ${{VERSION}}" ]; then PR="$num"; break; fi
+          done <<< "$API_JSON"
+
+          if [ -z "$PR" ]; then
+            echo "::warning::没找到 title 为 'chore(main): release ${{VERSION}}' 的已合并 PR，本次不翻标签（tag 已建，下一版需人工补）"
             exit 0
           fi
 
-          echo "处理 PR #${PR}"
-          gh pr edit "${PR}" --remove-label "autorelease: pending" >/dev/null
-          gh pr edit "${PR}" --add-label "autorelease: tagged" >/dev/null
+          echo "处理 PR #${{PR}}"
+          gh pr edit "${{PR}}" --remove-label "autorelease: pending"
+          gh pr edit "${{PR}}" --add-label "autorelease: tagged"
           echo "PR #${PR} 已翻成 autorelease: tagged"
 
