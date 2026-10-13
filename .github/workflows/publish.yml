@@ -6,8 +6,21 @@
 #      draft: true             → 建 untagged draft，tag 推迟到人工 Publish 时
 #      skip-github-release     → 连 tag 一起跳过
 #    而 immutable releases 又禁止「先 Publish 再补资产」。所以 tag 这条路是死的。
-#    现在改由本流水线在创建 Draft Release 时顺带创建 tag（tauri-action 用
-#    tagName: v__VERSION__ 建 release，tag 不存在时 GitHub 会一并创建）。
+#
+# 🔴🔴 关于 tag：**本文件原先注释写着「tauri-action 建 release 时 tag 不存在会一并创建」——
+#    这句话是错的，2026-10-13 实测证伪**：
+#    `releaseDraft: true` 时 GitHub 建的是 **untagged draft**
+#    （Release 的 html_url 是 `.../releases/tag/untagged-<sha>`，tag 位置写着 `untagged-`），
+#    tag **不会**被创建。而 release-please 的健康检查恰恰是
+#    「已合并的 release PR 有没有对应 tag」⇒ 它永远看到一个 outstanding 的未打 tag PR
+#    ⇒ **永远 abort** ⇒ 不产出新 release commit ⇒ 本流水线的 `if` 永远不满足
+#    ⇒ **闭环死锁**（2026-09-24 起连续 4 次 push 全是 `skipped`）。
+#
+#    现在的解法：**本流水线自己显式推 tag**（见「发布 tag」那一步），
+#    保留 `releaseDraft: true` 这个「人工确认后再 Publish」的闸门。
+#    ⚠️ 别用「把 releaseDraft 改 false」来解 —— 那样确实会建 tag，
+#    但代价是**构建产物直接对外可见**，丢掉那道人工确认闸。
+#
 #    判定条件：本次 push 的 commit 里含 release-please 的 release commit
 #    （message 为 chore(main): release X.Y.Z）。
 #
@@ -180,8 +193,9 @@ jobs:
           # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # tag / 标题里的 __VERSION__ 会被替换成 tauri.conf.json 的 version。
-          # tag 不存在时 GitHub 会在建 Release（草稿）时一并创建，指向本次构建
-          # 的 commit —— 所以**不需要任何人手动打 tag**。
+          # ⚠️ **这里设 tagName 只是给 Release 起名，不会真的创建 git tag**
+          # （`releaseDraft: true` ⇒ GitHub 建 untagged draft，见文件头）。
+          # 真 tag 由下面「发布 tag」那一步推。
           # ⚠️ 版本号写在 3 处，必须同步：src-tauri/Cargo.toml、src-tauri/tauri.conf.json、
           # package.json —— 少改一处的后果是「安装包文件名是一个版本、exe 属性里是另一个」。
           # （这三处 + 4 个 crate 已由 release-please 的 extra-files 自动同步。）
@@ -226,3 +240,38 @@ jobs:
           # `tauri build` 会以「找不到 binaries/reqly-mcp-xxx」失败。
           # 想出 Intel 版 macOS：得先把 --target 在 stage-sidecars.mjs 里打通，
           # 不是在 workflow 里加一行就行的。
+
+      # ── 解开 release-please 的死锁（见文件头那段说明）────────────────────────
+      # tauri-action 在 releaseDraft: true 下建的是 untagged draft，**不建 tag**；
+      # 而 release-please 的健康检查是「已合并的 release PR 有没有对应 tag」，
+      # 于是它永远 abort → 永远不产出 release commit → 本流水线的 if 永远不满足。
+      # 这一步把 tag 补上，死锁即解开，**同时保留草稿闸门**。
+      #
+      # ⚠️ 只在其中一个平台推（`matrix.platform == 'windows-latest'`），
+      #    否则三平台并发推同一个 tag 会打架（后两个报 already exists）。
+      - name: 发布 tag（解开 release-please 死锁）
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 版本号的权威来源是 tauri.conf.json —— 它就是上面 tagName 里
+          # __VERSION__ 被替换成的那份，读它才不会与实际构建产物脱节。
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAG="v${VERSION}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} 已存在，跳过（幂等：重跑本流水线不会失败）"
+            exit 0
+          fi
+
+          # 指向哪个 commit：优先用 checkout 出来的 HEAD（= 本次触发构建的那个 commit）。
+          # 它就是发布这个版本的源码，比「猜 main 的最新」更准确
+          # —— 手动 workflow_dispatch 时 HEAD 可能不是发布 commit，但那时 tag 名
+          # 也已经由上一轮建好了，同样不会走到这里。
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "refs/tags/${TAG}"
+          echo "已推 tag ${TAG} -> $(git rev-parse HEAD)"
