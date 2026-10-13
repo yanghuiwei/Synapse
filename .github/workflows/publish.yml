@@ -7,8 +7,9 @@
 #      skip-github-release     → 连 tag 一起跳过
 #    而 immutable releases 又禁止「先 Publish 再补资产」。所以 tag 这条路是死的。
 #
-# 🔴🔴 关于 tag：**本文件原先注释写着「tauri-action 建 release 时 tag 不存在会一并创建」——
-#    这句话是错的，2026-10-13 实测证伪**：
+```
+# 🔴🔴 关于 tag：本文件原先注释写着「tauri-action 建 release 时 tag 不存在会一并创建」——
+#    这句话是错的，2026-10-13 实测证伪：
 #    `releaseDraft: true` 时 GitHub 建的是 **untagged draft**
 #    （Release 的 html_url 是 `.../releases/tag/untagged-<sha>`，tag 位置写着 `untagged-`），
 #    tag **不会**被创建。而 release-please 的健康检查恰恰是
@@ -24,6 +25,7 @@
 #    判定条件：本次 push 的 commit 里含 release-please 的 release commit
 #    （message 为 chore(main): release X.Y.Z）。
 #
+```
 # ⚠️ 关于 permissions：本仓库 Settings → Actions → General 里的
 #    "Workflow permissions" 开关**看不到**（被组织策略锁定），所以不能指望仓库默认值。
 #    因此这里在**两层**都显式声明 contents: write：
