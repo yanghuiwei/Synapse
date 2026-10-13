@@ -321,17 +321,20 @@ jobs:
           #
           # ⚠️ 三个坑都在这一段，逐个记下（都造成「绿而不动」）：
           #
-          # 1) **`${{{{ GITHUB_REPOSITORY }}}}` 不能用在 run: 里**。
-          #    GitHub 表达式在 shell 步骤中只认有限的内置上下文，
-          #    用它会报 `Unrecognized named-value: 'GITHUB_REPOSITORY'`
-          #    并且**整个 workflow 解析失败、连 dispatch 都被拒（HTTP 422）**。
-          #    bash 里本来就有环境变量 `GITHUB_REPOSITORY`（GitHub 自动注入），
-          #    直接用它，不要套表达式。
           # 1) **不能用 gh pr list --search**。
           #    PR title 里的括号会被当成查询语法：chore(main) 与 : release
           #    都会破坏解析 ⇒ 永远匹配不到 ⇒ 配 exit 0 就是 step 报 success
           #    却什么都没做。不看日志根本发现不了。
           #    现在改成 gh api 拉原始列表，自己在本地做精确字符串比较。
+          #
+          #    ⚠️ 另：仓库名用环境变量 GITHUB_REPOSITORY，**不要写成
+          #    GitHub 表达式**（大括号包起来的那种）。shell 步骤里
+          #    表达式只认有限的内置上下文，GITHUB_REPOSITORY 不在其中 ⇒
+          #    **整个 workflow 解析失败**，连手动 dispatch 都被拒（HTTP 422，
+          #    报 Unrecognized named-value）。
+          #    ⚠️ 还有：**注释里也不能出现那种表达式**——GitHub 扫全文，
+          #    不区分是不是注释，连「转义过的写法」也会被当成表达式解析
+          #    （报 Unexpected symbol）。所以下面注释一律用文字描述。
           #
           # 2) **不用 shell 反斜杠续行**。续行与缩进在多次「读-改-写」后
           #    极易被压扁成一行（我踩过一次），届时 bash 报语法错或行为诡异。
