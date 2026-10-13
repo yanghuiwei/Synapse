@@ -84,4 +84,4 @@ jobs:
 #     看 **PR 的标签**，别只看 tag 在不在。
 #     `GET /repos/<owner>/<repo>/pulls/<n>` → 看 labels 数组里有没有 `autorelease: pending`。
 #     有它 ⇒ 就是这个死锁，与 tag / draft / immutable 都无关。
-```
+#
