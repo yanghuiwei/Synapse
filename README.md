@@ -7,7 +7,7 @@
 单文件安装包 5.5 MB · 本地优先 · 无账号 · 无遥测
 
 [![Release](https://img.shields.io/github/release/yanghuiwei/Synapse?label=Release&color=blue)](https://github.com/yanghuiwei/Synapse/releases)
-[![License](https://img.shields.io/badge/license-see%20repo-yellow.svg)](https://github.com/yanghuiwei/Synapse)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/tauri-2.0-24C8DB?logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
@@ -320,4 +320,8 @@ git commit -s -m "feat(scope): 一句话说清做了什么"
 
 ## 九、许可证
 
-仓库暂未指定开源许可证。**在你选定并加入 LICENSE 文件之前，默认保留所有权利。**
+[MIT](LICENSE) © 2026 yhweix
+
+可以自由使用、复制、修改、合并、发布、分发、再许可与销售 —— 包括商业用途。唯一的义务是**在副本或实质性部分里保留版权声明与许可声明**。
+
+软件按「原样」提供，不附带任何明示或暗示的担保。
