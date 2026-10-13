@@ -3,6 +3,7 @@ name = "reqly"
 version = "0.7.0" # x-release-please-version
 description = "Synapse — 本地优先的 Agent 原生 API 工作台"
 authors = ["yhweix"]
+license = "MIT"
 edition = "2021"
 # 有两个 bin 目标（桌面端 `reqly` + `bin/reqly-mcp.rs`）之后，`cargo run` 就不再有唯一解。
 # Tauri CLI 拉起 dev 时执行的正是 `cargo run --no-default-features`（不带 `--bin`），
@@ -46,16 +47,18 @@ reqly-core = { path = "core" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-# 直接调 Win32 去掉系统标题栏（`window_chrome.rs`）。
+# 下面这些是**三平台共用**的依赖，刻意留在通用段里 ——
+# 把它们写进下面的 `[target.'cfg(windows)'.dependencies]` 等于「只在 Windows 上编译」，
+# macOS / Linux 会报 `unresolved import serde` 一片红，而本机 Windows 一切正常
+# （本地永远验不出来，只有三平台流水线能发现）。详见该段上方的说明。
+#
+# 直接调 Win32 去掉系统标题栏（`window_chrome.rs`）—— 那条 windows crate
+# 声明在下面的 cfg(windows) 段里，因为它确实只有 Windows 用得上。
 # ⚠️ **必须显式声明，不能靠 tao 传递**：它是 tao 的传递依赖，
 # 而 Rust 不允许直接使用传递依赖里的 crate —— 不写这一行编译直接报
 # `use of undeclared crate or module`。版本与 tao 用的对齐（0.61），
 # 两条不同的 0.6x 会因为 `HWND` 类型不兼容而编译失败。
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-] }
+#
 # 选文件 / 另存为。**只在 Rust 侧用**（`commands/file.rs`）——
 # 后端调插件不受 capability 约束，所以不必装 JS 包、也不必在
 # `capabilities/default.json` 里开权限，少一层「权限没配、运行时静默失败」。
