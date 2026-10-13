@@ -99,6 +99,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/010_history_response.sql"),
         data: None,
     },
+    Migration {
+        version: 11,
+        name: "drop_scripts",
+        sql: include_str!("../../migrations/011_drop_scripts.sql"),
+        data: None,
+    },
 ];
 
 /// 代码里定义的最高版本号
@@ -634,6 +640,93 @@ mod tests {
             [],
         )
         .expect("系统分类的唯一性是按工作区算的");
+    }
+
+    /// 011：脚本两列必须被删干净。
+    ///
+    /// 它们从 001 建表起就在，但执行引擎从未实现 —— 属于「UI 骨架先画出来、
+    /// 功能一直没排期」的遗留。既然不做，列和导入器搬进来的数据一起清掉。
+    /// 这条测试与 `auth_columns_are_dropped_by_the_flatten_migration` 同构。
+    #[test]
+    fn script_columns_are_dropped_by_migration_11() {
+        let mut conn = open_memory_with_pragmas();
+        run(&mut conn).unwrap();
+
+        for column in ["pre_script", "test_script"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('request') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "request.{column} 必须被 011 删掉");
+        }
+    }
+
+    /// 存量库的升级路径：001~010 的老库补跑 011 之后，脚本列必须消失，
+    /// 而**其余列与数据一律不动**（`ALTER TABLE DROP COLUMN` 不该碰别人）。
+    #[test]
+    fn legacy_db_loses_the_script_columns_on_upgrade() {
+        let mut conn = open_memory_with_pragmas();
+        for sql in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_folder_auth.sql"),
+            include_str!("../../migrations/003_body_by_type.sql"),
+            include_str!("../../migrations/004_system_folder.sql"),
+            include_str!("../../migrations/005_form_fields.sql"),
+            include_str!("../../migrations/006_history_curl.sql"),
+            include_str!("../../migrations/007_flatten_auth.sql"),
+            include_str!("../../migrations/008_request_scoped_token_source.sql"),
+            include_str!("../../migrations/009_drop_sources_outside_rule_hosts.sql"),
+            include_str!("../../migrations/010_history_response.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_migration (version, applied_at) VALUES
+               (1,'2026-01-01T00:00:00.000Z'), (2,'2026-01-01T00:00:00.000Z'),
+               (3,'2026-01-01T00:00:00.000Z'), (4,'2026-01-01T00:00:00.000Z'),
+               (5,'2026-01-01T00:00:00.000Z'), (6,'2026-01-01T00:00:00.000Z'),
+               (7,'2026-01-01T00:00:00.000Z'), (8,'2026-01-01T00:00:00.000Z'),
+               (9,'2026-01-01T00:00:00.000Z'), (10,'2026-01-01T00:00:00.000Z');
+             INSERT INTO workspace (id, name, created_at, updated_at)
+               VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+             INSERT INTO request (id, workspace_id, name, url, method, body,
+                                  pre_script, test_script, created_at, updated_at)
+               VALUES (1, 1, '带脚本的老请求', 'http://x/y', 'POST', '{\"a\":1}',
+                       'console.log(1)', 'assert(1)',
+                       '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+
+        let applied = run(&mut conn).expect("upgrade");
+        assert_eq!(applied, versions_from(11), "老库该补跑 011");
+
+        for column in ["pre_script", "test_script"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('request') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "request.{column} 必须被 011 删掉");
+        }
+
+        // 其余内容逐字段未变
+        let (name, url, method, body): (String, String, String, String) = conn
+            .query_row(
+                "SELECT name, url, method, body FROM request WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("请求本身必须还在");
+        assert_eq!(name, "带脚本的老请求");
+        assert_eq!(url, "http://x/y");
+        assert_eq!(method, "POST");
+        assert_eq!(body, "{\"a\":1}");
     }
 
     /// 外键必须真的生效（PRAGMA foreign_keys 是连接级开关，容易忘）

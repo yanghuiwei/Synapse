@@ -159,8 +159,6 @@ pub struct RequestDetail {
     pub body_type: String,
     pub body: String,
     pub settings: RequestSettingsDto,
-    pub pre_script: String,
-    pub test_script: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1702,8 +1700,6 @@ fn detail(request: &ApiRequest) -> RequestDetail {
             http_version: request.settings.http_version.as_db_str().to_string(),
             has_proxy: request.settings.proxy.is_some(),
         },
-        pre_script: request.pre_script.clone(),
-        test_script: request.test_script.clone(),
     }
 }
 
@@ -1907,13 +1903,10 @@ mod tests {
     }
 
     fn temp_ops(tag: &str, read_only: bool) -> TempOps {
-        let dir = std::env::temp_dir().join(format!(
-            "reqly-ops-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        // 上一次跑崩了会留下同名目录
-        let _ = std::fs::remove_dir_all(&dir);
+        // 目录名必须唯一到「每次调用」——原因见 testkit::unique_temp_dir 的注释：
+        // 拿线程 id 区分会让并行的 tokio 测试互相删掉对方还开着的库，
+        // 症状是每次失败集合都不同的 SQLITE_READONLY_DBMOVED。
+        let dir = crate::storage::testkit::unique_temp_dir("reqly-ops", tag);
         let state = Arc::new(AppState::new(dir.join("reqly.db")).expect("建库"));
         TempOps {
             ops: Ops::new(state, read_only),

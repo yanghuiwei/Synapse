@@ -282,8 +282,6 @@ pub struct ApiRequest {
     /// 值是一个磁盘路径，发送时才读。
     pub form_fields: Vec<KeyValueItem>,
     pub settings: RequestSettings,
-    pub pre_script: String,
-    pub test_script: String,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,

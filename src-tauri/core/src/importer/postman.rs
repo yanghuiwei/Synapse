@@ -168,7 +168,6 @@ fn walk_postman(
 
     let (url, params) = postman_url(request.get("url"));
     let (body_type, body) = postman_body(request.get("body"), warnings);
-    let (pre_script, test_script) = postman_scripts(item);
     // 这一请求自己的 auth 优先；没写才沿用上层。
     // `noauth` 也会走到这里 —— 它展开成**空**的行，于是显式地把继承切断，
     // 与旧实现里「显式 none」的语义完全一致。
@@ -188,8 +187,6 @@ fn walk_postman(
         body_type,
         body,
         settings: Default::default(),
-        pre_script,
-        test_script,
     };
     // 用户手写的同名列优先（见 `merge_auth_rows`）
     merge_auth_rows(&mut draft, &rows);
@@ -443,45 +440,6 @@ fn postman_body(value: Option<&Value>, warnings: &mut Vec<ImportWarning>) -> (St
     }
 }
 
-/// Postman 的 `event[]` → `pre_script` / `test_script`
-fn postman_scripts(item: &Value) -> (String, String) {
-    let mut pre = String::new();
-    let mut test = String::new();
-    let Some(events) = item.get("event").and_then(Value::as_array) else {
-        return (pre, test);
-    };
-    for event in events {
-        let listen = event.get("listen").and_then(Value::as_str).unwrap_or("");
-        let exec = event
-            .pointer("/script/exec")
-            .map(|value| match value {
-                Value::Array(lines) => lines
-                    .iter()
-                    .map(value_to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                other => value_to_string(other),
-            })
-            .unwrap_or_default();
-        if exec.is_empty() {
-            continue;
-        }
-        match listen {
-            "prerequest" => append_script(&mut pre, &exec),
-            "test" => append_script(&mut test, &exec),
-            _ => {}
-        }
-    }
-    (pre, test)
-}
-
-fn append_script(target: &mut String, chunk: &str) {
-    if !target.is_empty() {
-        target.push('\n');
-    }
-    target.push_str(chunk);
-}
-
 /// collection / folder 级的 `variable[]` → 环境变量
 fn collect_postman_vars(node: &Value, out: &mut Vec<EnvVarDraft>) {
     let Some(items) = node.get("variable").and_then(Value::as_array) else {
@@ -720,7 +678,6 @@ fn apipost_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Option<Re
         return None;
     }
     let (body_type, body) = apipost_body(item.get("body"), warnings);
-    let (pre_script, test_script) = apipost_scripts(item);
 
     let mut draft = RequestDraft {
         name: str_any(item, &["name", "target_name", "title"]).unwrap_or_default(),
@@ -731,8 +688,6 @@ fn apipost_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Option<Re
         body_type,
         body,
         settings: Default::default(),
-        pre_script,
-        test_script,
     };
     // apipost 原生的 auth 也展开成行，落点规则与 Postman 完全一致
     merge_auth_rows(
@@ -918,12 +873,6 @@ fn auth_param_any(value: &Value, groups: &[&str], keys: &[&str]) -> Option<Strin
     None
 }
 
-fn apipost_scripts(item: &Value) -> (String, String) {
-    let pre = str_any(item, &["pre_script", "prerequest_script", "preScript"]).unwrap_or_default();
-    let test = str_any(item, &["test_script", "testScript", "after_script"]).unwrap_or_default();
-    (pre, test)
-}
-
 fn collect_apipost_vars(node: &Value, out: &mut Vec<EnvVarDraft>) {
     let Some(items) = first_array(node, &["variable", "variables", "environment"]) else {
         return;
@@ -1042,7 +991,6 @@ fn apipost_export_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Op
     };
 
     let (body_type, body) = apipost_export_body(request.get("body"), warnings);
-    let (pre_script, test_script) = apipost_export_scripts(&request);
     apipost_export_notes(&request, warnings);
 
     let mut draft = RequestDraft {
@@ -1054,8 +1002,6 @@ fn apipost_export_request(item: &Value, warnings: &mut Vec<ImportWarning>) -> Op
         body_type,
         body,
         settings: Default::default(),
-        pre_script,
-        test_script,
     };
     // 没有 URL 的那条**留着**（由 `finalize_draft` 记警告）——
     // 真实文件里确实有一条只有标题、`request.url` 是空串的占位接口，
@@ -1169,17 +1115,6 @@ fn apipost_export_body(
             ("none".to_string(), String::new())
         }
     }
-}
-
-/// `request.event` 在这一套里是**对象**（宽松那套的 `pre_script` 直挂在节点上）
-fn apipost_export_scripts(request: &Value) -> (String, String) {
-    let Some(event) = request.get("event") else {
-        return (String::new(), String::new());
-    };
-    (
-        str_any(event, &["pre_script", "prerequest_script"]).unwrap_or_default(),
-        str_any(event, &["test", "test_script"]).unwrap_or_default(),
-    )
 }
 
 /// `pre_tasks` / `post_tasks`（前后置操作链）reqly 没有对应实现。
@@ -1472,14 +1407,6 @@ mod tests {
     }
 
     #[test]
-    fn postman_scripts_land_in_the_script_columns() {
-        let bundle = postman(COLLECTION);
-        let create = &bundle.folders[0].requests[1];
-        assert_eq!(create.pre_script, "const t = Date.now();\nconsole.log(t);");
-        assert_eq!(create.test_script, "pm.test('ok', () => {});");
-    }
-
-    #[test]
     fn postman_collection_variables_become_an_environment() {
         let bundle = postman(COLLECTION);
         assert_eq!(bundle.environments.len(), 1);
@@ -1684,7 +1611,6 @@ mod tests {
         assert_eq!(draft.url, "{{host}}/orders");
         assert_eq!(draft.body_type, "json");
         assert_eq!(draft.headers[0].key, "content-type");
-        assert_eq!(draft.pre_script, "console.log(1)");
         let auth_header = draft
             .headers
             .iter()
@@ -1855,14 +1781,6 @@ mod tests {
         let token = &bundle.folders[0].requests[1];
         assert_eq!(token.body_type, "urlencoded");
         assert_eq!(token.body, "client_id=7a805f44&scope=Media%20SAP");
-    }
-
-    #[test]
-    fn apipost_export_event_object_feeds_both_scripts() {
-        let bundle = apipost(APIPOST_EXPORT);
-        let draft = &bundle.folders[0].requests[0];
-        assert_eq!(draft.pre_script, "console.log(1)");
-        assert_eq!(draft.test_script, "assert(1)");
     }
 
     #[test]

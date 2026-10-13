@@ -143,8 +143,6 @@ export interface ApiRequest {
    */
   formFields: KeyValueItem[];
   settings: RequestSettings;
-  preScript: string;
-  testScript: string;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;

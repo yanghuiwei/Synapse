@@ -6,10 +6,25 @@
 #      draft: true             → 建 untagged draft，tag 推迟到人工 Publish 时
 #      skip-github-release     → 连 tag 一起跳过
 #    而 immutable releases 又禁止「先 Publish 再补资产」。所以 tag 这条路是死的。
-#    现在改由本流水线在创建 Draft Release 时顺带创建 tag（tauri-action 用
-#    tagName: v__VERSION__ 建 release，tag 不存在时 GitHub 会一并创建）。
-#    判定条件：本次 push 的 commit 里含 release-please 的 release commit
-#    （message 为 chore(main): release X.Y.Z）。
+#
+#
+#   # 🔴🔴 关于 tag：本文件原先注释写着「tauri-action 建 release 时 tag 不存在会一并创建」——
+#   #    这句话是错的，2026-10-13 实测证伪：
+#   #    `releaseDraft: true` 时 GitHub 建的是 **untagged draft**
+#   #    （Release 的 html_url 是 `.../releases/tag/untagged-<sha>`，tag 位置写着 `untagged-`），
+#   #    tag **不会**被创建。而 release-please 的健康检查恰恰是
+#   #    「已合并的 release PR 有没有对应 tag」⇒ 它永远看到一个 outstanding 的未打 tag PR
+#   #    ⇒ **永远 abort** ⇒ 不产出新 release commit ⇒ 本流水线的 `if` 永远不满足
+#   #    ⇒ **闭环死锁**（2026-09-24 起连续 4 次 push 全是 `skipped`）。
+#   #
+#   #    现在的解法：**本流水线自己显式推 tag**（见「发布 tag」那一步），
+#   #    保留 `releaseDraft: true` 这个「人工确认后再 Publish」的闸门。
+#   #    ⚠️ 别用「把 releaseDraft 改 false」来解 —— 那样确实会建 tag，
+#   #    但代价是**构建产物直接对外可见**，丢掉那道人工确认闸。
+#   #
+#   #    判定条件：本次 push 的 commit 里含 release-please 的 release commit
+#   #    （message 为 chore(main): release X.Y.Z）。
+#   #
 #
 # ⚠️ 关于 permissions：本仓库 Settings → Actions → General 里的
 #    "Workflow permissions" 开关**看不到**（被组织策略锁定），所以不能指望仓库默认值。
@@ -30,6 +45,8 @@ on:
 
 permissions:
   contents: write
+  # PR 的 label 走Issues API，contents 覆盖不到
+  issues: write
 
 # 同一次发版连推两次 / 手动重跑时，取消上一轮没跑完的 job：
 # 既省 runner 分钟，也避免两个 job 同时往同一个 Release 传附件（会互相覆盖）
@@ -50,6 +67,8 @@ jobs:
     # ↓↓ 第二层。别删，理由见文件头。
     permissions:
       contents: write
+      # PR 的 label 走Issues API，contents 覆盖不到
+      issues: write
 
     strategy:
       # 一个平台挂了不要顺手把其他平台也掐掉 —— 三平台产物互相独立
@@ -180,8 +199,9 @@ jobs:
           # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # tag / 标题里的 __VERSION__ 会被替换成 tauri.conf.json 的 version。
-          # tag 不存在时 GitHub 会在建 Release（草稿）时一并创建，指向本次构建
-          # 的 commit —— 所以**不需要任何人手动打 tag**。
+          # ⚠️ **这里设 tagName 只是给 Release 起名，不会真的创建 git tag**
+          # （`releaseDraft: true` ⇒ GitHub 建 untagged draft，见文件头）。
+          # 真 tag 由下面「发布 tag」那一步推。
           # ⚠️ 版本号写在 3 处，必须同步：src-tauri/Cargo.toml、src-tauri/tauri.conf.json、
           # package.json —— 少改一处的后果是「安装包文件名是一个版本、exe 属性里是另一个」。
           # （这三处 + 4 个 crate 已由 release-please 的 extra-files 自动同步。）
@@ -226,3 +246,78 @@ jobs:
           # `tauri build` 会以「找不到 binaries/reqly-mcp-xxx」失败。
           # 想出 Intel 版 macOS：得先把 --target 在 stage-sidecars.mjs 里打通，
           # 不是在 workflow 里加一行就行的。
+
+      # ── 解开 release-please 的死锁（见文件头那段说明）────────────────────────
+      # tauri-action 在 releaseDraft: true 下建的是 untagged draft，**不建 tag**；
+      # 而 release-please 的健康检查是「已合并的 release PR 有没有对应 tag」，
+      # 于是它永远 abort → 永远不产出 release commit → 本流水线的 if 永远不满足。
+      # 这一步把 tag 补上，死锁即解开，**同时保留草稿闸门**。
+      #
+      # ⚠️ 只在其中一个平台推（`matrix.platform == 'windows-latest'`），
+      #    否则三平台并发推同一个 tag 会打架（后两个报 already exists）。
+      # 版本号的单一来源：tauri.conf.json。tag 步骤与标签步骤都用它，
+      # 通过 step output 传递 —— 免得两个步骤各读一遍、读出不一致。
+      - name: 读版本号
+        id: ver
+        shell: bash
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: 发布 tag（解开 release-please 死锁）
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 与标签步骤同源，避免两个步骤各读一遍读出不一致的版本号
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 版本号由上一步读出并经 env 注入（GitHub 表达式够不到 run 内算出的变量）
+          # __VERSION__ 被替换成的那份，读它才不会与实际构建产物脱节。
+          TAG="v${VERSION}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} 已存在，跳过（幂等：重跑本流水线不会失败）"
+            exit 0
+          fi
+
+          # 指向哪个 commit：优先用 checkout 出来的 HEAD（= 本次触发构建的那个 commit）。
+          # 它就是发布这个版本的源码，比「猜 main 的最新」更准确
+          # —— 手动 workflow_dispatch 时 HEAD 可能不是发布 commit，但那时 tag 名
+          # 也已经由上一轮建好了，同样不会走到这里。
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 🔴 **必须用轻量 tag，不能加 -a。** 这一条是本步骤能否解开死锁的关键：
+          # release-please 判定「这个 release PR 打 tag 了没」时，比对的是
+          # `GET /git/ref/tags/<name>` 返回的 **sha 与 PR 的 merge_commit_sha 是否相等**。
+          # 而 **附注 tag（annotated）** 的 ref 指向的是 **tag 对象**（`git tag -a` 会
+          # 多造一个对象），不是 commit ⇒ sha 永远对不上 ⇒ 它永远判定「未打 tag」
+          # ⇒ 又回到 abort。**症状是本步骤明明推成功了、tag 也在 `GET /tags` 里能看到，
+          # release-please 却仍然抱怨 untagged** —— 极难自查。
+          # 本仓库其它能正常识别的 tag（v0.4.0 / v0.3.0 / v0.2.1）实测都是轻量 tag。
+          git tag "${TAG}"
+          git push origin "refs/tags/${TAG}"
+          echo "已推 tag ${TAG} -> $(git rev-list -n1 "${TAG}")"
+
+      # ── 发版第三步：翻 release PR 的标签 —— **只能人工做，改不了** ──
+      #
+      # release-please 的状态机全在一对标签上：release PR 合并后打上
+      #   autorelease: pending
+      # 流程跑完、tag 建好，才该翻成
+      #   autorelease: tagged
+      # 只要有任何一个合并过的 release PR 停在 pending，它就 abort、
+      # 永远不开新版本 PR（2026-09-24 起连续 4 次 push main 被卡死，根因是 PR #12）。
+      #
+      # 🔴 **这一步没法在本流水线里自动做**，试过了：
+      #    ① 声明 issues: write（顶层与 job 级都加了）
+      #    ② 用 gh pr edit 改标签
+      #    ③ 结果：gh: Resource not accessible by integration (HTTP 403)
+      # ⇒ 本仓库的 Actions workflow 权限被仓库/组织策略锁住，GITHUB_TOKEN
+      #   拿不到写 label 的能力，**加权限声明也没用**。
+      #   （与本文件头那段「Workflow permissions 开关看不到、被组织策略锁定」一致）
+      #   对照证据：**同一个操作换成 PAT 立刻成功**。
+      #
+      # ✅ 人工一条命令，或在 PR 页面上改标签：
+      #     python scripts/fix-autorelease-label.py
+      #
+      # 为什么**撤掉**而不留着：必然 403 的步骤会让整个 run 变红，
+      # 把真正的问题淹掉、Actions 页面也永远是红的。

@@ -41,16 +41,36 @@ pub struct TestDb {
     _dir: TempDir,
 }
 
+/// 🔴 测试临时目录的**唯一命名**。`tag` 只为方便失败时在 TEMP 里认出是哪个测试。
+///
+/// ## 为什么不能用 `线程 id` 做区分
+///
+/// 原先是 `{tag}-{pid}-{ThreadId}`。问题是 `ThreadId` **不是一次运行的唯一标识**：
+/// `#[tokio::test]` 的多线程 runtime 会把多个测试**复用同一个 worker 线程**，
+/// 于是同一个 `tag` 在同一个 pid 下拿到**同一个目录名**。
+/// 后一个测试开头的 `remove_dir_all` 把前一个**还开着连接**的库删掉，
+/// SQLite 于是报 `SQLITE_READONLY_DBMOVED`（"attempt to write a readonly database"）。
+///
+/// 症状极有欺骗性：**每次跑失败的测试都不一样**（这次 3 个、下次 5 个、且轮着换），
+/// 且**单独跑必过** —— 看起来像 flaky，实际上是并行时目录撞名。
+///
+/// ## 为什么用纳秒时间戳
+///
+/// 单调递增、同一纳秒内也不会重复，足以保证唯一。
+/// `state.rs` 的 `Scratch` 早就这么写了（那里注释明写「测试并行跑，同名目录会互相踩」），
+/// 现在两边统一走这里。
+pub fn unique_temp_dir(prefix: &str, tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时钟应晚于 Unix 纪元")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{tag}-{}-{nanos}", std::process::id()))
+}
+
 impl TestDb {
     /// `tag` 只用于目录名，方便失败时在 TEMP 里认出是哪个测试留下的。
     pub fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "reqly-test-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        // 建之前先扫掉同名残留（上一次跑崩了会留下）
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("reqly-test", tag);
         let pool = create_pool(&dir.join("reqly.db")).expect("建池");
 
         {
