@@ -370,15 +370,15 @@ export const zhCN = {
   // ---- 取 Token 接口的下拉 ----
   //
   // 名字、地址、scope 三件事要同时看得见：选错它们的现象都是发送后 401，
-  // 而界面上一切正常（`api.example.com` 与 `api.test.example.com`
-  // 只差四个字母，一个是生产一个是测试）。
+  // 而界面上一切正常（`api.example.com` 与 `apidemo.example.com`
+  // 只差几个字母，一个是生产一个是测试）。
   "token.pickerSearch": "搜接口名、地址、方法或 scope",
   "token.pickerEmpty": "没有匹配的接口",
   // scope 为空时必须说话：那条取 Token 请求哪个服务都调不通，
   // 却在列表里和配好的那些长得一模一样
   "token.pickerScopeNone": "无 scope",
   "token.pickerScopeHint":
-    "候选只有「token 刷新」分类里的接口。scope 要包含目标接口地址第 2 段的服务名（/PSA/MasterData2/… 就是 MasterData2），否则取回来的 Token 调不通那个服务。",
+    "候选只有「token 刷新」分类里的接口。scope 要包含目标接口地址第 2 段的服务名（/Billing/OrderApi/… 就是 OrderApi），否则取回来的 Token 调不通那个服务。",
   "token.pickerOutOfFolder": "不在「token 刷新」分类",
   "token.extractTitle": "从响应里取什么",
   "token.accessPath": "access_token 路径",

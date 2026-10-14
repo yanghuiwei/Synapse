@@ -69,7 +69,7 @@ export interface RequestPickerProps {
  *
  * 1. **是哪个接口** —— 名字（`生产拿token` / `测试环境拿token (2)`）
  * 2. **打到哪个环境** —— 地址里的 host（`api.example.com` 与
- *    `api.test.example.com` 只差四个字母，一个是生产一个是测试）
+ *    `apidemo.example.com` 只差几个字母，一个是生产一个是测试）
  * 3. **拿回来的 Token 能调什么服务** —— 请求体里的 `scope`
  *
  * 这三件事恰好是「选错」的全部成因，而现象都是发送后 401、界面上一切正常。

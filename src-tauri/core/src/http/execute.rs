@@ -1927,7 +1927,7 @@ mod tests {
         let mut s = spec("POST", server.url("/token"));
         s.body_type = BodyType::Form;
         // 末尾留一个换行：不能因此多出一个空字段
-        s.body = "client_id=abc\ngrant_type=client_credentials\nscope=TimeSheetApi RMSApi\n".into();
+        s.body = "client_id=abc\ngrant_type=client_credentials\nscope=BillingApi UserApi\n".into();
 
         execute(&client, &s).await.expect("应当发出 multipart");
 

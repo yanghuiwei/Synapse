@@ -30,7 +30,11 @@ pub struct Migration {
     /// 为什么挂在迁移上而不是应用启动时：迁移天然**只跑一次**，所以
     /// 「用户手工删掉某条 Token 源」不会被下次启动重新长回来。挂在启动路径上就得
     /// 再加一个 `setting` 标记来达到同样的效果。
-    pub data: Option<fn(&rusqlite::Connection) -> AppResult<usize>>,
+    ///
+    /// 第二个参数是播种用的 host 白名单，由调用方（[`run_with_seed_hosts`]）传入。
+    /// 它不进本结构体是有意的：**白名单是部署方的决定，不是迁移的一部分** ——
+    /// 把某份域名清单写死在这里，就等于让所有装上它的人都继承那份清单。
+    pub data: Option<fn(&rusqlite::Connection, &[String]) -> AppResult<usize>>,
 }
 
 /// 全部迁移，**按 version 升序**。
@@ -84,14 +88,22 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "request_scoped_token_source",
         sql: include_str!("../../migrations/008_request_scoped_token_source.sql"),
-        // 结构改完立刻铺源：新表是空的，不铺的话 145 个接口会一起显示「还没有配置」
-        data: Some(crate::storage::seed::request_token_sources),
+        // 结构改完立刻铺源：新表是空的，不铺的话既有接口会一起显示「还没有配置」。
+        //
+        // 白名单传空 —— 本仓库不从任何预设的域名清单出发。播种的用途是
+        // 「迁移一份已有库」，而该铺哪些 host 只有库的主人才知道，由部署方决定。
+        // 空表对全新安装天然是空操作：库里本来就没有任何请求可铺。
+        data: Some(|conn, hosts| crate::storage::seed::request_token_sources(conn, hosts)),
     },
     Migration {
         version: 9,
         name: "drop_sources_outside_rule_hosts",
         sql: include_str!("../../migrations/009_drop_sources_outside_rule_hosts.sql"),
-        data: Some(crate::storage::seed::drop_sources_outside_rule_hosts),
+        // 与 008 同一份白名单 ⇒ 空操作。「哪些源该留」没有清单就不动，
+        // 见 seed::drop_sources_outside_rule_hosts 的说明。
+        data: Some(|conn, hosts| {
+            crate::storage::seed::drop_sources_outside_rule_hosts(conn, hosts)
+        }),
     },
     Migration {
         version: 10,
@@ -156,6 +168,18 @@ pub fn current_version(conn: &Connection) -> AppResult<i64> {
 ///
 /// 重复调用是安全的：第二次会返回空 vec。
 pub fn run(conn: &mut Connection) -> AppResult<Vec<i64>> {
+    run_with_seed_hosts(conn, &[])
+}
+
+/// [`run`] 的可注入版本：额外指定 008/009 播种时允许的 host 白名单。
+///
+/// 运行时走 [`run`]（白名单为空 ⇒ 播种不做任何事）。这个入口只给测试用 ——
+/// 播种判据本身需要单测，而「给不给白名单」正是那个判据的前置条件，
+/// 不留这个口子就只能靠改全局常量来测，那正是它被写成常量的原因。
+pub fn run_with_seed_hosts(
+    conn: &mut Connection,
+    seed_rule_hosts: &[String],
+) -> AppResult<Vec<i64>> {
     ensure_version_table(conn)?;
 
     let applied = applied_versions(conn)?;
@@ -177,7 +201,7 @@ pub fn run(conn: &mut Connection) -> AppResult<Vec<i64>> {
         // 版本号也不会被登记 —— 下次启动从头再来一遍，不会留下「结构已改、
         // 数据只铺了一半」的中间态。
         if let Some(data) = migration.data {
-            data(&tx).map_err(|e| AppError::Migration {
+            data(&tx, seed_rule_hosts).map_err(|e| AppError::Migration {
                 version: migration.version,
                 reason: format!("{}: data step failed: {e}", migration.name),
             })?;
@@ -221,6 +245,18 @@ mod tests {
         let conn = open_memory();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn
+    }
+
+    /// 播种白名单（测试用）。
+    ///
+    /// ⚠️ 这里**必须显式给出**而不是依赖默认值：008/009 在真实运行时传的是空表
+    /// （见 `MIGRATIONS` 里的注释），而这些测试要验的正是「给了白名单时铺得对不对」。
+    /// 若两者共用一份配置，这些测试就会静默退化成「什么都不铺也能全绿」。
+    fn test_rule_hosts() -> Vec<String> {
+        vec![
+            "apidemo.example.com".to_string(),
+            "api.example.com".to_string(),
+        ]
     }
 
     fn table_names(conn: &Connection) -> Vec<String> {
@@ -810,8 +846,8 @@ mod tests {
     /// 1. **`token_cache` 被显式清空。** 重建 `token_source` 一定会波及缓存
     ///    （`foreign_keys=ON`），所以清理必须是写出来的那一步 —— 见 008 的注释 ①。
     /// 2. **内外网分开**：`localhost` 那条请求没有同 host 的取 token 请求 ⇒ 不建源。
-    /// 3. **scope 决定用哪一条**：#101 的 scope 不覆盖 `psaou` ⇒ 落到 #102；
-    ///    #200 的 scope 不覆盖 `NewContractAPI` ⇒ 落到 #201。
+    /// 3. **scope 决定用哪一条**：#101 的 scope 不覆盖 `billing` ⇒ 落到 #102；
+    ///    #200 的 scope 不覆盖 `ContractAPI` ⇒ 落到 #201。
     #[test]
     fn folder_scoped_source_is_replaced_by_per_request_sources() {
         let mut conn = open_memory_with_pragmas();
@@ -844,39 +880,39 @@ mod tests {
 
                -- 取 token 请求：名称里的「测试」/「生产」是环境默认候选的标记
                INSERT INTO request (id, workspace_id, name, url, body, created_at, updated_at) VALUES
-                 (100, 1, '测试环境拿token',     'http://api.test.example.com/ids/connect/token',
+                 (100, 1, '测试环境拿token',     'http://apidemo.example.com/ids/connect/token',
                   'client_id=a&scope=A%20B%20C%20D%20E', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (101, 1, '测试环境拿token (2)', 'http://api.test.example.com/ids/connect/token',
+                 (101, 1, '测试环境拿token (2)', 'http://apidemo.example.com/ids/connect/token',
                   'client_id=b' || char(10) || 'scope=A B C', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 -- `psaou` 是给 #2 那类 `/BPM/psaou/…` 用的：没有它，#102 就不是
+                 -- `billing` 是给 #2 那类 `/BPM/billing/…` 用的：没有它，#102 就不是
                  -- 「覆盖集里的候选」，规则 ⑤ 只能退回默认 #101，那条断言也就测不到东西
-                 (102, 1, '测试环境拿token (3)', 'http://api.test.example.com/ids/connect/token',
-                  'client_id=a&scope=A%20B%20C%20D%20psaou', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (102, 1, '测试环境拿token (3)', 'http://apidemo.example.com/ids/connect/token',
+                  'client_id=a&scope=A%20B%20C%20D%20billing', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
                  (200, 1, '生产拿token',         'http://api.example.com/ids/connect/token',
                   'client_id=c&scope=A%20B%20C%20D%20E', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
                  (201, 1, '拿合同token',         'http://api.example.com/ids/connect/token',
-                  'client_id=d&scope=NewContractAPI', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                  'client_id=d&scope=ContractAPI', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
                  -- 同一个 host 上确实有取 token 请求，但域名不在白名单里
-                 (300, 1, '钉钉获取token',     'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                 (300, 1, '第三方获取token',   'https://api.thirdparty.example/v1.0/oauth2/accessToken',
                   'client_id=e&client_secret=f', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
 
                -- 业务请求：默认覆盖 / scope 偏离 / 谁都不覆盖 / 另一个 host / 内网 / 回收站
-               -- `#6` 是补的：钉钉的 host 上有取 token 请求，但域名不在白名单里 ——
+               -- `#6` 是补的：第三个 host 上有取 token 请求，但域名不在白名单里 ——
                -- 少了这一条，008 光按「host 相等」配对也能全绿（真库上就是这么漏的）
                INSERT INTO request (id, workspace_id, name, url, deleted_at, created_at, updated_at) VALUES
-                 (1, 1, '工时查询', 'http://api.test.example.com/PMPFIN/TimeSheetApi/v1/x',
+                 (1, 1, '工时查询', 'http://apidemo.example.com/Billing/TimeSheetApi/v1/x',
                   NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (2, 1, '表单查询', 'http://api.test.example.com/BPM/psaou/v1/y',
+                 (2, 1, '表单查询', 'http://apidemo.example.com/BPM/billing/v1/y',
                   NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (3, 1, '没人覆盖的服务', 'http://api.test.example.com/PSA/NobodyCovers/v1/z',
+                 (3, 1, '没人覆盖的服务', 'http://apidemo.example.com/PSA/NobodyCovers/v1/z',
                   NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (4, 1, '获取报价', 'http://api.example.com/PMPFIN/NewContractAPI/v1/get',
+                 (4, 1, '获取报价', 'http://api.example.com/Billing/ContractAPI/v1/get',
                   NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (5, 1, '本地服务', 'http://localhost:5000/RMS/Api/x',
+                 (5, 1, '本地服务', 'http://localhost:5000/Api/x',
                   NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (6, 1, '机器人单聊', 'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                 (6, 1, '机器人单聊', 'https://api.thirdparty.example/v1.0/robot/oToMessages/batchSend',
                   NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (7, 1, '回收站里的', 'http://api.test.example.com/PMPFIN/TimeSheetApi/v1/x',
+                 (7, 1, '回收站里的', 'http://apidemo.example.com/Billing/TimeSheetApi/v1/x',
                   '2026-01-02T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
 
                -- 老的分类级 Token 源 + 一份**必须被显式删掉**的缓存
@@ -888,7 +924,9 @@ mod tests {
         )
         .unwrap();
 
-        let applied = run(&mut conn).expect("upgrade");
+        // 用带白名单的入口：这条测试要验的正是「给了白名单时008 铺得对不对」，
+        // 而运行时路径传的是空表（见 run_with_seed_hosts 的说明）。
+        let applied = run_with_seed_hosts(&mut conn, &test_rule_hosts()).expect("upgrade");
         assert_eq!(applied, versions_from(8), "老库该补跑 008 起的全部迁移");
 
         // ① 老的分类级行没了；旧缓存也随之有意地清干净
@@ -901,8 +939,8 @@ mod tests {
             .collect();
         assert!(!ids.contains(&9), "分类级的老行必须被丢弃");
 
-        // 为什么「清空」是对的目标：新表里 source id 从 1 重新长起
-        // （seed 铺 145 行就是 1~145）。旧缓存行留着就会指向另一个接口的新源。
+        // 为什么「清空」是对的目标：新表里 source id 从 1 重新长起。
+        // 旧缓存行留着就会指向另一个接口的新源。
         let caches: i64 = conn
             .query_row("SELECT COUNT(*) FROM token_cache", [], |r| r.get(0))
             .unwrap();
@@ -921,14 +959,14 @@ mod tests {
             .ok()
         };
         assert_eq!(fetch_of(1), Some(101), "默认候选覆盖 ⇒ 用默认");
-        assert_eq!(fetch_of(2), Some(102), "默认不含 psaou ⇒ 覆盖集里词最少的");
+        assert_eq!(fetch_of(2), Some(102), "默认不含 billing ⇒ 覆盖集里词最少的");
         assert_eq!(fetch_of(3), Some(101), "谁都不覆盖 ⇒ 退回默认");
-        assert_eq!(fetch_of(4), Some(201), "生产默认不含 NewContractAPI ⇒ 偏离");
+        assert_eq!(fetch_of(4), Some(201), "生产默认不含 ContractAPI ⇒ 偏离");
         assert_eq!(fetch_of(5), None, "localhost 没有同 host 的取 token 请求");
         assert_eq!(
             fetch_of(6),
             None,
-            "钉钉上**有**同 host 的取 token 请求，但那个域名不在白名单里"
+            "白名单外的host 上**有**同 host 的取 token 请求，但仍不铺"
         );
         assert_eq!(fetch_of(7), None, "回收站里的请求不铺");
         for fetch in [100, 101, 102, 200, 201, 300] {
@@ -940,7 +978,8 @@ mod tests {
         }
 
         // ③ 播种幂等：重复执行不产生第二行
-        let again = crate::storage::seed::request_token_sources(&conn).unwrap();
+        let again =
+            crate::storage::seed::request_token_sources(&conn, &test_rule_hosts()).unwrap();
         assert_eq!(again, 0, "重复播种应当一条都不新建");
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM token_source", [], |r| r.get(0))
@@ -952,10 +991,10 @@ mod tests {
     ///
     /// 这条是补上去的。上面那份 fixture 里没有这种形状 —— 内网 IP / localhost
     /// 是「host 不在白名单上、同时**也没有**同 host 的取 token 请求」，
-    /// 于是 008 光按「host 相等」配对也能全绿；真库上却因此多铺了 19 条
-    /// （ipsapro 14 + 钉钉 5，见 009 的注释）。
+    /// 于是 008 光按「host 相等」配对也能全绿；真库上却因此多铺了一批
+    /// （见 009 的注释）。
     #[test]
-    fn non_rule_hosts_get_no_source_even_with_a_same_host_token_request() {
+    fn hosts_outside_the_allow_list_get_no_source_even_with_a_same_host_token_request() {
         let mut conn = open_memory_with_pragmas();
         run(&mut conn).unwrap();
 
@@ -963,23 +1002,24 @@ mod tests {
             r#"INSERT INTO workspace (id, name, created_at, updated_at)
                  VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
                INSERT INTO request (id, workspace_id, name, url, created_at, updated_at) VALUES
-                 (1, 1, 'ipsapro 业务',  'https://app.example.com/RMS/Api/x',
+                 (1, 1, '外部系统业务',  'https://portal.example.net/Api/x',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (2, 1, '业务回写',      'https://app.example.com/iCan/bk/getToken',
+                 (2, 1, '外部回写',       'https://portal.example.net/Api/bk/getToken',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (3, 1, '钉钉业务',      'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                 (3, 1, '第三方业务',      'https://api.thirdparty.example/v1.0/robot/send',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (4, 1, '钉钉获取token', 'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                 (4, 1, '第三方获取token', 'https://api.thirdparty.example/v1.0/oauth2/accessToken',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (5, 1, '生产业务',      'http://api.example.com/PMPFIN/TimeSheetApi/v1/x',
+                 (5, 1, '生产业务',        'http://api.example.com/Billing/TimeSheetApi/v1/x',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (6, 1, '生产拿token',   'http://api.example.com/ids/connect/token',
+                 (6, 1, '生产拿token',     'http://api.example.com/ids/connect/token',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');"#,
         )
         .expect("fixture");
 
-        let created = crate::storage::seed::request_token_sources(&conn).unwrap();
-        assert_eq!(created, 1, "只有规则域名上那条业务请求该得到源");
+        let created =
+            crate::storage::seed::request_token_sources(&conn, &test_rule_hosts()).unwrap();
+        assert_eq!(created, 1, "只有白名单上那条业务请求该得到源");
 
         let owners: Vec<i64> = conn
             .prepare("SELECT request_id FROM token_source ORDER BY request_id")
@@ -988,17 +1028,17 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(owners, vec![5], "ipsapro 与钉钉那些一条都不该有");
+        assert_eq!(owners, vec![5], "白名单外的那些一条都不该有");
     }
 
-    /// 009 的收尾：把铺到规则域名之外的源收回来。
+    /// 009 的收尾：把铺到白名单之外的源收回来。
     ///
     /// 直接调那个函数，不重放整套迁移 —— 008 的判据已经修好了，从最新版出发
     /// **造不出**那种脏数据，能造的只有手工插几条。
     ///
-    /// 同时钉住「只删该删的」：规则域名上那条源、以及它名下的缓存都不能被误伤。
+    /// 同时钉住「只删该删的」：白名单上那条源、以及它名下的缓存都不能被误伤。
     #[test]
-    fn stale_sources_outside_the_rule_hosts_are_dropped() {
+    fn stale_sources_outside_the_allow_list_are_dropped() {
         let mut conn = open_memory_with_pragmas();
         run(&mut conn).unwrap();
 
@@ -1006,25 +1046,25 @@ mod tests {
             r#"INSERT INTO workspace (id, name, created_at, updated_at)
                  VALUES (1, 'w', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
                INSERT INTO request (id, workspace_id, name, url, created_at, updated_at) VALUES
-                 (1, 1, 'ipsapro 业务',  'https://app.example.com/RMS/Api/x',
+                 (1, 1, '外部系统业务',  'https://portal.example.net/Api/x',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (2, 1, '钉钉业务',      'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend',
+                 (2, 1, '第三方业务',      'https://api.thirdparty.example/v1.0/robot/send',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (3, 1, '生产业务',      'http://api.example.com/PMPFIN/TimeSheetApi/v1/x',
+                 (3, 1, '生产业务',        'http://api.example.com/Billing/TimeSheetApi/v1/x',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (4, 1, '生产拿token',   'http://api.example.com/ids/connect/token',
+                 (4, 1, '生产拿token',     'http://api.example.com/ids/connect/token',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (5, 1, '业务回写',      'https://app.example.com/iCan/bk/getToken',
+                 (5, 1, '外部回写',       'https://portal.example.net/Api/bk/getToken',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (6, 1, '钉钉获取token', 'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+                 (6, 1, '第三方获取token', 'https://api.thirdparty.example/v1.0/oauth2/accessToken',
                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
                -- 三行源：前两行是旧判据才会铺出来的（业务与取 token 请求同 host，
                -- 但域名不在白名单上），第三行是合法的
                INSERT INTO token_source (id, workspace_id, request_id, name, fetch_request_id,
                                          created_at, updated_at) VALUES
-                 (1, 1, 1, 'ipsapro 业务', 5, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (2, 1, 2, '钉钉业务',     6, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-                 (3, 1, 3, '生产业务',     4, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+                 (1, 1, 1, '外部系统业务', 5, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (2, 1, 2, '第三方业务',     6, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+                 (3, 1, 3, '生产业务',       4, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
                INSERT INTO token_cache (id, token_source_id, access_token, updated_at) VALUES
                  (1, 1, 'STALE', '2026-01-01T00:00:00.000Z'),
                  (2, 2, 'STALE', '2026-01-01T00:00:00.000Z'),
@@ -1032,8 +1072,10 @@ mod tests {
         )
         .expect("fixture");
 
-        let removed = crate::storage::seed::drop_sources_outside_rule_hosts(&conn).unwrap();
-        assert_eq!(removed, 2, "ipsapro 与钉钉那两条源必须被收回");
+        let removed =
+            crate::storage::seed::drop_sources_outside_rule_hosts(&conn, &test_rule_hosts())
+                .unwrap();
+        assert_eq!(removed, 2, "白名单外那两条源必须被收回");
 
         let left: Vec<i64> = conn
             .prepare("SELECT request_id FROM token_source ORDER BY request_id")
@@ -1042,7 +1084,7 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(left, vec![3], "规则域名上的源必须原样活着");
+        assert_eq!(left, vec![3], "白名单上的源必须原样活着");
 
         let cached: Vec<String> = conn
             .prepare("SELECT access_token FROM token_cache ORDER BY id")
@@ -1059,7 +1101,8 @@ mod tests {
 
         // 幂等：再跑一次没有可删的了
         assert_eq!(
-            crate::storage::seed::drop_sources_outside_rule_hosts(&conn).unwrap(),
+            crate::storage::seed::drop_sources_outside_rule_hosts(&conn, &test_rule_hosts())
+                .unwrap(),
             0
         );
     }

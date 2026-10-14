@@ -60,7 +60,7 @@ const EXIT_USAGE: u8 = 2;
 const EXAMPLES: &str = "\
 示例：
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db folders
-  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db folders create --name RMS-报价权限
+  reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db folders create --name 报价权限
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db requests list --query 用户
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db requests get 12
   reqly-cli --db %APPDATA%/com.reqly.desktop/reqly.db send 12 --header \"X-Debug: 1\"

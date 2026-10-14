@@ -1672,9 +1672,9 @@ mod tests {
             {
               "target_type": "api", "name": "TS校验填写", "mark": "developing", "sort": 1,
               "tags": [], "created_uuid": "-1", "method": "GET", "mock": "{}",
-              "mock_url": "/PMPFIN/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs",
+              "mock_url": "/Billing/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs",
               "request": {
-                "url": "https://api.example.com/PMPFIN/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs?empNo=",
+                "url": "https://api.example.com/Billing/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs?empNo=",
                 "description": "",
                 "event": { "pre_script": "console.log(1)", "test": "assert(1)" },
                 "pre_tasks": [], "post_tasks": [],
@@ -1745,7 +1745,7 @@ mod tests {
         assert_eq!(draft.method, "GET");
         assert_eq!(
             draft.url,
-            "https://api.example.com/PMPFIN/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs",
+            "https://api.example.com/Billing/TimeSheetApi/v1/NewAPI/FillTs/CheckLoadingTs",
             "url 在 request.url 里，且 query 表非空时要从 URL 上切掉"
         );
     }

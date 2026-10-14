@@ -3,6 +3,16 @@
 //! 只由 [`crate::storage::migrate::run`] 在 008 首次应用时调用**一次** ——
 //! 它不是常驻行为，所以「用户手工删掉某条 Token 源」不会被下次启动重新长回来。
 //!
+//! ## 这是一次性迁移，不是常驻功能
+//!
+//! **播种本身不做任何域名判断**，而是由调用方（`migrate.rs`）传入允许播种的
+//! host 白名单。为空 = 一条都不铺。
+//!
+//! 为什么要做成参数而不是内置常量：本仓库最初是从一份**特定的业务库**上演进
+//! 出来的，008 那次迁移要照顾的正是那份库里的既有请求。把它固化成模块级常量
+//! 会让「换个人装上就跑」这件事里带上一份不属于他的域名清单 —— 既无意义，
+//! 也是不该出现在通用代码里的东西。**白名单从哪来由部署方决定，模块只管执行。**
+//!
 //! ## 为什么这件事不写在 008 的 SQL 里
 //!
 //! 判据要读**取 token 请求的 scope**，而 scope 藏在请求体里、有三种存法
@@ -11,50 +21,40 @@
 //! SQLite 没有 `split`，这些用 SQL 表达出来没人敢改；换成一段 Rust 纯函数，
 //! 它就能被单测逐条钉住。
 //!
-//! ## 规则（辉哥 2026-09-18 逐条确认）
+//! ## 播种规则（与域名无关的那部分）
 //!
 //! 1. **每条请求各自一份源**，归属 `request_id`；源之间不共享 token 与倒计时。
-//! 2. **只在两个规则域名内配对**：业务接口与取 token 请求必须同在
-//!    `api.test.example.com`（测试）或同在 `api.example.com`（生产）。
-//!    其他域名一条源都不建 —— 内网 IP / localhost 本来就没有可配的取 token
-//!    请求，而 `app.example.com` / `app.test.example.com` 与钉钉
-//!    （`oapi.dingtalk.com` / `api.dingtalk.com`）**各自都有**，
-//!    只是不在这次初始化的范围里。
+//! 2. **同 host 配对**：业务接口与取 token 请求必须在**同一个 host** 上，
+//!    且该 host 在传入的白名单里。
 //!
 //!    ⚠️ 判据是 **host 全等**，不是「URL 里包含 `api.xx`」这种子串判断：
-//!    `app.example.com` 与 `api.test.example.com` 都含 `api`，
-//!    子串判断会把它们一起吞进来。
+//!    `api.example.com` 与 `api.example.cn` 都含 `api`，子串判断会把它们
+//!    一起吞进来。
 //!
-//!    （历史：这一条原先只写「host 相同才配对」，还断言那几个域名
+//!    （历史：这一条原先只写「host 相同才配对」，还断言若干域名
 //!    「没有同 host 的取 token 请求」—— 那个前提是**假的**，于是真库上
-//!    多铺了 19 条。009 的注释里记了这件事。）
+//!    多铺了一批。009 的注释里记了这件事。）
 //! 3. **scope 覆盖才用**：接口 URL 的**第二个路径段**是它要的服务名
 //!    （`/PSA/MasterData2/v1/…` → `MasterData2`），取 token 请求的 `scope`
 //!    里列出它才拿得到可用 token。
 //! 4. **环境默认候选**：同一域名组里，名字含「测试」或「生产」的那几条里
-//!    **scope 词数最少**的（词少 = 权限最小且够用）。本库 apidemo 组三条都含
-//!    「测试」，取到 `#170 测试环境拿token (2)`；api 组只有 `#21 生产拿token`
-//!    含「生产」，取到它 —— 与辉哥点名的两条一致。
+//!    **scope 词数最少**的（词少 = 权限最小且够用）。
 //! 5. **默认覆盖就用默认**；默认不覆盖时退到覆盖集里 scope 词数最少的；
 //!    谁都不覆盖时仍用默认。
-//!
-//! 例：`#61 获取报价` 是 `/PMPFIN/NewContractAPI/…`，而 `#21` 的 scope 里没有
-//! `NewContractAPI` ⇒ 落到 `#201 拿合同token`；`#47 表单查询` 是 `/BPM/psaou/…`
-//! ⇒ `#170` 的 scope 里没有 `psaou` ⇒ 落到 `#264`。
 
 use rusqlite::Connection;
 
 use crate::error::AppResult;
 use crate::storage::now_iso;
 
-/// 只有这两个域名上的接口才铺源（辉哥 2026-09-18 明确：其他域名一条都不建）。
+/// host 是否在允许播种的白名单里。
 ///
-/// 判据必须是 **host 全等**：`app.example.com` 与 `api.test.example.com`
+/// 判据必须是 **host 全等**：`api.example.com` 与 `apidemo.example.com`
 /// 都含 `api`，用「URL 包含 `api.xx`」这种子串判断会把它们一起吞进来。
-const RULE_HOSTS: [&str; 2] = ["api.test.example.com", "api.example.com"];
-
-fn is_rule_host(host: &str) -> bool {
-    RULE_HOSTS.contains(&host)
+///
+/// 白名单为空时**全部拒绝** —— 这是默认行为，也是新装用户该有的行为。
+fn is_rule_host(host: &str, rule_hosts: &[String]) -> bool {
+    rule_hosts.iter().any(|h| h == host)
 }
 
 /// 一个候选（「取 token 请求」）的解析结果。
@@ -76,9 +76,17 @@ struct Target {
 
 /// 给所有已有请求铺 Token 源，返回新建的行数。
 ///
+/// `rule_hosts` 是允许播种的 host 白名单，**为空则一条都不铺**。
+/// 这是一次性迁移用的函数，不是常驻特性。
+///
 /// 幂等：靠 `token_source.request_id` 上的唯一索引 + `INSERT OR IGNORE`，
 /// 重复执行不会产生第二行，也不会覆盖用户改过的配置。
-pub fn request_token_sources(conn: &Connection) -> AppResult<usize> {
+pub fn request_token_sources(conn: &Connection, rule_hosts: &[String]) -> AppResult<usize> {
+    // 白名单为空是最常见的情况（新装用户），早退省掉整趟查询。
+    if rule_hosts.is_empty() {
+        return Ok(0);
+    }
+
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, name, url, body, body_rows, form_fields
            FROM request
@@ -106,8 +114,8 @@ pub fn request_token_sources(conn: &Connection) -> AppResult<usize> {
 
     for (id, workspace_id, name, url, body, body_rows, form_fields) in rows {
         let Some(host) = host_of(&url) else { continue };
-        // 闸门放在**取候选之前**：不在规则域名上的请求既不当候选、也不当待铺源。
-        if !is_rule_host(&host) {
+        // 闸门放在**取候选之前**：不在白名单上的请求既不当候选、也不当待铺源。
+        if !is_rule_host(&host, rule_hosts) {
             continue;
         }
         let is_fetch = url.to_ascii_lowercase().contains("token");
@@ -170,12 +178,11 @@ pub fn request_token_sources(conn: &Connection) -> AppResult<usize> {
     Ok(created)
 }
 
-/// 009 的数据变动：把 008 铺到「规则域名之外」的源收回来。
+/// 009 的数据变动：把 008 铺到「白名单之外」的源收回来。
 ///
 /// 008 的判据当时只写了「业务 host == 取 token host」，没把域名白名单摆进去，
-/// 于是 `app.example.com`(14) / `api.dingtalk.com`(4) /
-/// `oapi.dingtalk.com`(1) 这 19 条也铺上了。真库实测 164 行，
-/// 而 008 自己的文件头写的末态是 145 行（apidemo 26 + api 119）。
+/// 于是那些同 host 但不在范围内的请求也铺上了。真库实测多出一批，
+/// 而 008 自己的文件头写的末态数比它少一截。
 ///
 /// 为什么是「删掉多铺的」而不是「清空重铺」：重铺会连 `token_cache` 一起清掉，
 /// 而缓存行的 `token_source_id` 在新表里指向的是**另一个接口的新源**
@@ -184,7 +191,18 @@ pub fn request_token_sources(conn: &Connection) -> AppResult<usize> {
 ///
 /// 判据复用 [`is_rule_host`]，与播种**同一处定义**：两处各写一遍的话，
 /// 下次加域名必然只改一处，另一处会静默地继续按旧范围工作。
-pub fn drop_sources_outside_rule_hosts(conn: &Connection) -> AppResult<usize> {
+///
+/// ⚠️ `rule_hosts` 为空时**不动任何行**（早退）。这与播种侧对称：
+/// 一个没配白名单的部署方，「收回来」这个动作没有依据 ——
+/// 它手上根本没有一份「该留什么」的清单。
+pub fn drop_sources_outside_rule_hosts(
+    conn: &Connection,
+    rule_hosts: &[String],
+) -> AppResult<usize> {
+    if rule_hosts.is_empty() {
+        return Ok(0);
+    }
+
     let mut stmt = conn.prepare(
         "SELECT ts.id, r.url\n           FROM token_source ts\n           JOIN request r ON r.id = ts.request_id",
     )?;
@@ -195,9 +213,9 @@ pub fn drop_sources_outside_rule_hosts(conn: &Connection) -> AppResult<usize> {
 
     let mut removed = 0usize;
     for (id, url) in existing {
-        // 判据与播种同一句话：只有规则域名上的接口才允许有源。
+        // 判据与播种同一句话：只有白名单上的接口才允许有源。
         // 解析不出 host 的（例如空 URL）当然也不算 —— 播种那边同样不会给它建。
-        let allowed = matches!(host_of(&url), Some(h) if is_rule_host(&h));
+        let allowed = matches!(host_of(&url), Some(h) if is_rule_host(&h, rule_hosts));
         if !allowed {
             removed += conn.execute("DELETE FROM token_source WHERE id = ?1", [id])?;
         }
@@ -245,7 +263,7 @@ fn pick(group: &[&Candidate], service: Option<&str>) -> Option<i64> {
 
 /// `scheme://host[:port]/…` → `host`（小写，无端口）。
 ///
-/// 容忍没有 scheme 的 URL（本库里 `#63 示例客户同步` 就是裸 `api.example.com/…`）。
+/// 容忍没有 scheme 的 URL（有人会从文档里直接复制 `example.com/api` 这种裸写法）。
 fn host_of(url: &str) -> Option<String> {
     // `split_once` 而不是 `split(..).next_back()`：`&str` 当分隔符时
     // `Split` **不是** `DoubleEndedIterator`，`next_back` 编译不过。
@@ -262,15 +280,14 @@ fn host_of(url: &str) -> Option<String> {
 
 /// URL 的**第二个路径段**（第一段是产品域）：`/PSA/MasterData2/v1/…` → `masterdata2`。
 ///
-/// 第二段是服务名，也正是 scope 里列的那些词（`SAP` / `MasterData2` /
-/// `TimeSheetApi` / `psaou` / `RMSCoreService` …）。取不到就不做 scope 判断。
+/// 第二段是服务名，也正是 scope 里列的那些词。取不到就不做 scope 判断。
 fn service_of(url: &str) -> Option<String> {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let path = rest.split_once('/')?.1;
 
     let mut segments = path.split('/').filter(|s| !s.is_empty());
-    segments.next()?; // 产品域 PSA / PMPFIN / RMOHR / BPM / ICRM …
+    segments.next()?; // 跳过产品域（第一段路径）
     segments.next().map(|s| s.to_ascii_lowercase())
 }
 

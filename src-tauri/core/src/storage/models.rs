@@ -322,8 +322,8 @@ pub struct TokenSource {
     ///
     /// 008 之前这里是 `folder_id`（挂在系统分类「token刷新」下，全工作区共用
     /// 一份），于是"每个接口单独配自己的取 token 请求"根本表达不出来 ——
-    /// 实际用法里同一个工作区同时躺着 9 条拿 token 请求（生产 / 测试 / 合同 /
-    /// 资源报价 / 数仓 / 钉钉，client_id 与 scope 各不相同）。
+    /// 实际用法里同一个工作区同时躺着多条拿 token 请求（生产 / 测试 / 各类服务，
+    /// client_id 与 scope 各不相同）。
     pub request_id: i64,
     /// 用哪个请求去取 token
     pub fetch_request_id: i64,

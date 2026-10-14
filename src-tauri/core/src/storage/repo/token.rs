@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn create_uses_design_defaults() {
         let conn = db();
-        let s = create(&conn, 1, 1, "iPSA-OAuth", 3).unwrap();
+        let s = create(&conn, 1, 1, "Example-OAuth", 3).unwrap();
         assert_eq!(s.request_id, 1);
         assert_eq!(s.access_path, "$.access_token");
         assert_eq!(s.refresh_path, "$.refresh_token");

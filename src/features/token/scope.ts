@@ -6,7 +6,7 @@ import type { ApiRequest, KeyValueItem } from "@/lib/types";
  * ## 它为什么值得摆在界面上
  *
  * `scope` 决定「这把 Token 能调哪些服务」。后端播种 Token 源时的判据是
- * **目标接口 URL 第 2 段的服务名**（`/PSA/MasterData2/v1/…` → `masterdata2`）
+ * **目标接口 URL 第 2 段的服务名**（`/Billing/OrderApi/v1/…` → `orderapi`）
  * 必须出现在取 Token 请求的 `scope` 里，否则拿回来的 Token 调那个服务就是 401
  * （见 `core/src/storage/seed.rs` 的 `pick` 与 `service_of`）。
  *
