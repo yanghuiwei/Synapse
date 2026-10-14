@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.1](https://github.com/yanghuiwei/Synapse/compare/v0.7.0...v0.7.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **ci:** run: 里不能用 ${{ GITHUB_REPOSITORY }} 表达式 ([d4a6571](https://github.com/yanghuiwei/Synapse/commit/d4a657108014a011752b0fbcf814efc262f42591))
+* **ci:** tag 步骤漏了 VERSION 环境变量（unbound variable） ([bbdbdc0](https://github.com/yanghuiwei/Synapse/commit/bbdbdc01456deefb30eb72929ddad29cba9714cd))
+* **ci:** VERSION 是 shell 算的，GitHub 表达式够不着 ([11f5d0d](https://github.com/yanghuiwei/Synapse/commit/11f5d0d0aab38dcfbeb4a75f0ff143507cf79d0c))
+* **ci:** 修回被压扁的 shell 续行，并把 PR 查找改成 API + 精确比较 ([7abe7b6](https://github.com/yanghuiwei/Synapse/commit/7abe7b6483cd526ab3bba30843ac15e72cbad787))
+* **ci:** 翻标签那步不能用 gh pr list --search（绿而不动） ([8c696fb](https://github.com/yanghuiwei/Synapse/commit/8c696fbdbda2fdbe975c1c1f0879b2d96af2fc62))
+* **ci:** 连注释里的 GitHub 表达式也会被解析 —— 改成纯文字描述 ([6e6d86f](https://github.com/yanghuiwei/Synapse/commit/6e6d86ffa32476f8a6df7a9b4dbc5803b4eabff4))
+
+
+### Performance Improvements
+
+* **ui:** 统一状态徽标与提示带，并给浮层加入场动效 ([912ede3](https://github.com/yanghuiwei/Synapse/commit/912ede396a35e1fe0c34538c53e666f58285a31a))
+
+
+### Reverts
+
+* 撤掉注定 403 的「同步 release PR 标签」步骤 ([2c09717](https://github.com/yanghuiwei/Synapse/commit/2c0971759dd3c5c76ec3e68a4dd9a852a72f2423))
+
 ## [0.7.0](https://github.com/yanghuiwei/Synapse/compare/v0.6.0...v0.7.0) (2026-10-13)
 
 
