@@ -1845,13 +1845,13 @@ mod tests {
     /// 它要**留着**（跟 postman 口径一致）：丢掉的话用户只会看到「怎么少了一条」
     #[test]
     fn apipost_export_request_without_url_is_kept_and_flagged() {
-        let text = r#"{"project":{},"apis":[{"target_type":"api","name":"http://10.136.0.86:8001",
+        let text = r#"{"project":{},"apis":[{"target_type":"api","name":"http://192.168.1.100:8001",
             "method":"GET","request":{"url":"","event":{},"pre_tasks":[],"post_tasks":[]},
             "children":[]}],"envs":[]}"#;
         let bundle = apipost(text);
         assert_eq!(bundle.request_count(), 1);
         assert_eq!(bundle.requests[0].url, "");
-        assert_eq!(bundle.requests[0].name, "http://10.136.0.86:8001");
+        assert_eq!(bundle.requests[0].name, "http://192.168.1.100:8001");
         assert!(bundle
             .warnings
             .iter()
