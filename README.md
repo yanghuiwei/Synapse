@@ -300,9 +300,10 @@ pnpm cli:build       # reqly-cli.exe
 | 文档 | 内容 |
 |---|---|
 | [设计文档](docs/design.md) | 定位、决策记录、数据模型、模块设计 |
-| [实施计划与踩坑](docs/plan.md) | 各阶段实测记录 —— 为什么这么定，以及踩过什么 |
+| [压测精度校准](docs/ab-calibration-p6.txt) | 内置引擎 vs ApacheBench 的分位数配对实测 |
+| [docs 说明](docs/README.md) | 目录里还有什么、各自是什么 |
 
-代码里的注释密度不低，几个核心 crate 的模块头文档（`lib.rs` / `server.rs` / `ops.rs`）值得一读，那里有不少「为什么这么写」的记录。
+代码里的注释密度不低，几个核心 crate 的模块头文档（`lib.rs` / `server.rs` / `ops.rs`）值得一读，那里有不少「为什么这么写」的记录 —— 特别是几处**本地验不出来、只有真实环境才暴露**的问题是怎么处理的。
 
 ---
 

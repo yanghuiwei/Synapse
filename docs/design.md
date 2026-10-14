@@ -207,7 +207,7 @@ CREATE TABLE token_source (
   id                INTEGER PRIMARY KEY,
   workspace_id      INTEGER NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
   folder_id         INTEGER NOT NULL REFERENCES folder(id) ON DELETE CASCADE,
-  name              TEXT NOT NULL,               -- 如 'iPSA-OAuth'
+  name              TEXT NOT NULL,               -- 如 'Example-OAuth'
   fetch_request_id  INTEGER NOT NULL REFERENCES request(id),  -- 用哪个请求取 token
   access_path       TEXT NOT NULL DEFAULT '$.access_token',
   refresh_path      TEXT NOT NULL DEFAULT '$.refresh_token',
