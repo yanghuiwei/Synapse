@@ -2,13 +2,16 @@
 -- Reqly 009_drop_sources_outside_rule_hosts.sql —— 收回 008 多铺的 Token 源
 -- ------------------------------------------------------------
 -- 008 的播种只按「业务 host == 取 token host」配了对，没把域名白名单摆进去，
--- 于是 `app.example.com`(14) / `api.dingtalk.com`(4) /
--- `oapi.dingtalk.com`(1) 这 19 条也铺上了 —— 那几个域名辉哥明确说过「不建」。
+-- 于是那些「同 host 但不在白名单内」的接口也被铺上了源。
 --
--- 真库实测：008 铺出 164 行，而 008 自己的文件头写的末态是 145 行
--- （apidemo 26 + api 119）—— **代码与同一个文件的注释自相矛盾**。
--- 测试全绿、clippy 不响，只有去查真库才看得出来：原 fixture 里没有
+-- ## 这一类 bug 为什么测试与 clippy 都抓不到
+-- 当时的实际铺出行数比 008 自己的文件头写的末态多出一截 ——
+-- **代码与同一个文件的注释自相矛盾**。测试全绿、clippy 不响，
+-- 只有去查真实的库才看得出来：原 fixture 里没有
 -- 「同 host、但域名在白名单之外」这种形状的取 token 请求。
+--
+-- 补的那条测试见 migrate.rs 的
+-- `hosts_outside_the_allow_list_get_no_source_even_with_a_same_host_token_request`。
 --
 -- ## 为什么是「删掉多铺的」，不是「清空重铺」
 -- 重铺会连 `token_cache` 一起清掉，而缓存行的 `token_source_id` 在新表里
@@ -16,16 +19,18 @@
 -- 清就是白丢一批还能用的 token。收窄删除范围两个问题都没有。
 --
 -- ## 为什么没直接改 008 了事
--- 本仓库的 008 还没发布（`git status` 里它还是 `??`），但辉哥本机的库
--- **已经跑过那一版**了（`schema_migration` 里 version=8 已登记）——
--- 改 008 不会让他的库重跑。所以两边都做：修 008 的判据（供别的机器用），
+-- 已跑过 008 的库不会重跑（`schema_migration` 里 version=8 已登记）。
+-- 所以两边都做：修 008 的判据（供别的机器用），
 -- 再用这一步把已经落下的脏数据收回来。
 --
 -- ## 这段 SQL 为什么是空的
 -- 判据要解析 URL 的 host，SQL 写不出来（没有 split；`LIKE` 也分不清
--- `api.example.com` 与 `app.example.com`）。真正的删除在 Rust 侧
--- `seed::drop_sources_outside_rule_hosts`，与播种共用同一处域名定义，
+-- `api.example.com` 与 `apidemo.example.com`）。真正的删除在 Rust 侧
+-- `seed::drop_sources_outside_rule_hosts`，与播种共用同一处白名单定义，
 -- 同事务执行（见 migrate.rs 的 `data` 字段）。
+--
+-- ⚠️ 白名单默认为空，此时本步是**空操作** —— 手上没有「该留什么」的清单，
+-- 就不能执行「收回来」这个动作。
 --
 -- 删除会经 `token_cache.token_source_id` 的 ON DELETE CASCADE 连带清掉
 -- 这些源名下那几行缓存 —— 那正是要的：源都不该存在，它的缓存更没有意义。
