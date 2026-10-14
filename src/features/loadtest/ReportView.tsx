@@ -8,6 +8,7 @@ import type {
   LoadtestRun,
   LoadtestSummary,
 } from "@/lib/types";
+import { Badge } from "@/features/ui/Badge";
 import { ExportBar } from "./ExportBar";
 import { formatDuration } from "./format";
 import { HistogramChart } from "./HistogramChart";
@@ -107,10 +108,14 @@ function RunHeader({ run, summary }: { run: LoadtestRun; summary: LoadtestSummar
       {run.finishedAt === null || summary?.cancelled === true ? (
         <div className="flex flex-wrap items-center gap-2">
           {run.finishedAt === null ? (
-            <Tag className="border-warn/40 bg-warn/10 text-warn">{t("loadtest.unfinished")}</Tag>
+            <Badge tone="warn" size="md">
+              {t("loadtest.unfinished")}
+            </Badge>
           ) : null}
           {summary?.cancelled === true ? (
-            <Tag className="border-err/40 bg-err/10 text-err">{t("loadtest.cancelledTag")}</Tag>
+            <Badge tone="err" size="md">
+              {t("loadtest.cancelledTag")}
+            </Badge>
           ) : null}
         </div>
       ) : null}
@@ -135,14 +140,6 @@ function Meta({ label, value }: { label: string; value: string }) {
       <dt>{label}</dt>
       <dd className="tabular font-mono text-ink-muted">{value}</dd>
     </div>
-  );
-}
-
-function Tag({ children, className }: { children: string; className: string }) {
-  return (
-    <span className={`rounded-full border px-2 py-[1px] text-[10px] leading-4 ${className}`}>
-      {children}
-    </span>
   );
 }
 

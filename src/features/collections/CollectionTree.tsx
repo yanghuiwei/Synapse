@@ -20,6 +20,7 @@ import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import { validateName } from "@/lib/name";
 import type { ApiRequest, Folder } from "@/lib/types";
+import { Badge } from "@/features/ui/Badge";
 import { ContextMenu, type MenuItem } from "@/features/ui/ContextMenu";
 import { ConfirmDialog, PromptDialog } from "@/features/ui/Dialog";
 import { EmptyState } from "@/features/ui/EmptyState";
@@ -463,20 +464,18 @@ export function CollectionTree() {
                     <span className="truncate font-medium text-ink">{folder.name}</span>
 
                     {folder.isSystem ? (
-                      <span
-                        className="flex shrink-0 items-center gap-0.5 rounded-sm bg-brand/12 px-1 text-[10px] font-medium text-brand"
+                      <Badge
+                        tone="brand"
+                        icon={Lock}
                         title={t("collections.systemFolder")}
+                        className="font-medium"
                       >
-                        <Lock size={9} strokeWidth={2.4} aria-hidden />
                         {t("collections.systemBadge")}
-                      </span>
+                      </Badge>
                     ) : folder.isTokenSource ? (
-                      <span
-                        className="shrink-0 rounded-sm bg-brand/12 px-1 text-[10px] font-medium text-brand"
-                        title={t("auth.tokenSource")}
-                      >
+                      <Badge tone="brand" title={t("auth.tokenSource")} className="font-medium">
                         {t("auth.tokenSource")}
-                      </span>
+                      </Badge>
                     ) : null}
 
                     <span className="flex-1" />

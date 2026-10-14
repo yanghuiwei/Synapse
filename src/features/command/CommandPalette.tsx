@@ -168,7 +168,7 @@ function PalettePanel() {
   return createPortal(
     <div
       style={{ zIndex: "var(--z-dialog)" }}
-      className="fixed inset-0 flex items-start justify-center bg-scrim p-6 pt-[12vh]"
+      className="fixed inset-0 flex items-start justify-center bg-scrim p-6 pt-[12vh] animate-fade-in"
       onPointerDown={(e) => {
         if (e.target === e.currentTarget) close();
       }}
@@ -178,7 +178,7 @@ function PalettePanel() {
         aria-modal="true"
         aria-label={t("palette.placeholder")}
         onKeyDown={onKeyDown}
-        className="flex max-h-[70vh] w-[560px] max-w-full flex-col overflow-hidden rounded-lg border border-line bg-surface shadow-e2"
+        className="flex max-h-[70vh] w-[560px] max-w-full origin-top flex-col overflow-hidden rounded-lg border border-line bg-surface shadow-e3 animate-pop-in"
       >
         <div className="flex items-center gap-2 border-b border-line px-3">
           <Search size={14} strokeWidth={2} className="shrink-0 text-ink-faint" />

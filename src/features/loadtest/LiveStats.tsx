@@ -1,4 +1,5 @@
 import { cn } from "@/lib/cn";
+import { Badge } from "@/features/ui/Badge";
 import { statusTextClass } from "@/lib/http";
 import { formatSeconds } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
@@ -123,9 +124,9 @@ function FailureLog({ failures }: { failures: readonly FailureLine[] }) {
           {t("loadtest.failureLog")}
         </h4>
         {failures.length > 0 ? (
-          <span className="tabular rounded-full bg-err/10 px-1.5 text-[10px] leading-4 text-err">
+          <Badge tone="err" size="md" className="tabular">
             {failures.length}
-          </span>
+          </Badge>
         ) : null}
         <span className="ml-auto text-[10px] text-ink-faint">{t("loadtest.failureLogHint")}</span>
       </div>

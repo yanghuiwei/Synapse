@@ -6,6 +6,7 @@ import { formatSeconds } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { TokenStatus } from "@/lib/types";
+import { Badge, type BadgeTone } from "@/features/ui/Badge";
 import { IconButton } from "@/features/ui/Button";
 
 /**
@@ -19,16 +20,20 @@ type BadgeState = "unknown" | "never" | "valid" | "expired";
 
 interface StateMeta {
   icon: LucideIcon;
+  /** 图标 / 纯文字态下的颜色 */
   className: string;
+  /** 有底色徽标时的 tone。`null` = 走纯文字（紧凑模式） */
+  tone: BadgeTone;
   spin?: boolean;
 }
 
 const STATE_META: Record<BadgeState, StateMeta> = {
   // 状态还没查回来。**不**默认显示成「有效」—— PR 里最常见的一类错误
-  unknown: { icon: CircleHelp, className: "text-ink-faint" },
-  never: { icon: CircleCheck, className: "text-ok" },
-  valid: { icon: CircleCheck, className: "text-ok" },
-  expired: { icon: TriangleAlert, className: "text-warn" },
+  unknown: { icon: CircleHelp, className: "text-ink-faint", tone: "neutral" },
+  // 「永不过期」用 ok 的色调但**不带警示图标**（CircleCheck 已足够）
+  never: { icon: CircleCheck, className: "text-ok", tone: "ok" },
+  valid: { icon: CircleCheck, className: "text-ok", tone: "ok" },
+  expired: { icon: TriangleAlert, className: "text-warn", tone: "warn" },
 };
 
 export interface TokenStatusBadgeProps {
@@ -70,14 +75,26 @@ export function TokenStatusBadge({
 
   return (
     <div className={cn("flex min-w-0 items-center gap-1.5", className)}>
-      <span className={cn("flex min-w-0 items-center gap-1 text-[11px]", meta.className)}>
-        {refreshing ? (
-          <LoaderCircle size={12} strokeWidth={2.2} aria-hidden className="animate-spin" />
-        ) : (
-          <Icon size={12} strokeWidth={2.2} aria-hidden />
-        )}
-        <span className="truncate">{label(t, state, status)}</span>
-      </span>
+      {/*
+        紧凑与非紧凑走**两套渲染**，不是同一个徽标换个尺寸：
+        紧凑模式出现在侧栏行内、历史列表行内 —— 那些位置一行本来就窄，
+        再加个底色块，读起来像「这一行出错了」，而实际语义只是「这个 Token 还有 42 秒过期」。
+        底色的意义是「值得多看一眼」，密集列表里到处是底色就没有一处值得多看。
+      */}
+      {compact ? (
+        <span className={cn("flex min-w-0 items-center gap-1 text-[11px]", meta.className)}>
+          {refreshing ? (
+            <LoaderCircle size={12} strokeWidth={2.2} aria-hidden className="animate-spin" />
+          ) : (
+            <Icon size={12} strokeWidth={2.2} aria-hidden />
+          )}
+          <span className="truncate">{label(t, state, status)}</span>
+        </span>
+      ) : (
+        <Badge tone={meta.tone} icon={refreshing ? LoaderCircle : Icon} spinning={refreshing}>
+          {label(t, state, status)}
+        </Badge>
+      )}
 
       {onRefresh && !compact ? (
         <IconButton

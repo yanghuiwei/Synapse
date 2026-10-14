@@ -129,6 +129,17 @@ const HEIGHT = { normal: "h-8", dense: "h-7" } as const;
 /** 多行模式的最小高度 = 单行控件高度，空值时不会塌成一条缝 */
 const MIN_HEIGHT = { normal: "min-h-8", dense: "min-h-7" } as const;
 
+/**
+ * 占位符高亮的底色。
+ *
+ * ⚠️ 这里**不**用 `--x-subtle` 那档令牌，理由是它们太重：
+ * 这些块是**贴在输入框文字流里**的行内高亮（和编辑器里的
+ * 搜索命中同一个视觉层级），不是独立的面。一行 URL 里可能有五六个占位符，
+ * 用 `--brand-subtle`（8% 那种实色底）会把整行糊成一片蓝。
+ * 行内高亮要的正是「半透明、透出下面的文字」—— 所以这里保留透明度写法。
+ *
+ * 真正的「块」级提示（横幅、徽标、告示）才用 subtle 令牌，两者是不同层级的东西。
+ */
 const KIND_CLASS: Record<PlaceholderKind, string> = {
   resolved: "rounded-[3px] bg-brand/12 text-brand",
   // 淡黄底 + 警示色文字。深浅主题下都由令牌决定，不硬编码色值
@@ -391,8 +402,10 @@ export function PlaceholderHint({ text, className }: PlaceholderHintProps) {
   return (
     <div
       className={cn(
-        "flex shrink-0 items-start gap-1.5 border-t border-warn/40 bg-warn/10 px-2.5 py-1.5",
-        "text-[11px] text-warn",
+        "flex shrink-0 items-start gap-1.5 border-t border-warn/35 bg-warn-subtle px-2.5 py-1.5",
+        // text-warn-on：底色是实色的 warn-subtle，原色文字在这个底上只有 4.2:1，
+        // 11px 小字要 4.5（理由与数据见 ui/Badge.tsx 的同名注释）
+        "text-[11px] text-warn-on",
         className,
       )}
     >

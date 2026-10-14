@@ -165,8 +165,8 @@ export function ContextMenu({ items, x, y, anchorRef, onClose }: ContextMenuProp
         visibility: pos ? "visible" : "hidden",
       }}
       className={cn(
-        "fixed min-w-[176px] rounded-md border border-line bg-surface p-1",
-        "shadow-e2 outline-none",
+        "fixed min-w-[176px] origin-top-left rounded-md border border-line bg-surface p-1",
+        "shadow-e3 outline-none animate-pop-in",
       )}
     >
       {items.map((item, index) => {

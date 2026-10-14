@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { LoadtestRun } from "@/lib/types";
+import { Badge } from "@/features/ui/Badge";
 import { ContextMenu, type MenuItem } from "@/features/ui/ContextMenu";
 import { ConfirmDialog } from "@/features/ui/Dialog";
 import { EmptyState } from "@/features/ui/EmptyState";
@@ -228,9 +229,9 @@ function RunRow({
 /** 行内的小标签。`未完成` / `已取消` 共用，省得两处各写一套圆角字号 */
 function RowTag({ children }: { children: string }) {
   return (
-    <span className="shrink-0 rounded-full bg-warn/12 px-1.5 text-[9px] leading-4 text-warn">
+    <Badge tone="warn" size="sm">
       {children}
-    </span>
+    </Badge>
   );
 }
 

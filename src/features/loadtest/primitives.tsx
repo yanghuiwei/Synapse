@@ -16,12 +16,48 @@ import { cn } from "@/lib/cn";
 
 export type StatTone = "default" | "ok" | "err" | "brand" | "warn";
 
+/**
+ * 指标数字的颜色。
+ *
+ * ⚠️ 只有 `ok` / `err` 两档带底色，`brand` / `warn` 刻意**不带**：
+ * 理由是「底色 = 这一格值得多看一眼」。
+ * 压测报告里成功/失败是两个对立的事实，给底色能把它们一眼分开；
+ * 而 P95 是「所有分位数里被引用最多的一个」，真正该突出的是**它** ——
+ * 但一屏里到处是淡蓝底就会失去强调意义，所以 P95 仍靠品牌色的数字本身。
+ * （真要强调 P95，正确做法是换布局，不是换底色。）
+ *
+ * 带底色的两档用 `text-x-on`（压深一档），没底色的用 `text-x` 原色。
+ * 数字是 17px，AA 大字门槛 3:1 下 `text-ok` 其实也够（2.95 ~ 临界），
+ * 但**同屏里两套绿**（带底色的压深、没底色的原色）本身就是不一致，
+ * 视觉上会看出「这两个绿不是同一个绿」。所以带底色的一律用 on 档。
+ */
 const TONE_VALUE: Record<StatTone, string> = {
   default: "text-ink",
-  ok: "text-ok",
-  err: "text-err",
+  ok: "text-ok-on",
+  err: "text-err-on",
   brand: "text-brand",
   warn: "text-warn",
+};
+
+/**
+ * 哪些档位带底色。
+ *
+ * 单独一张表而不是从 TONE_VALUE 里 `includes("bg-")` 嗅探：
+ * 那种写法在有人把某个 tone 的类串改一下时就静默失效（底色跟着边框一起没了，
+ * 构建不报错），而这里是显式的「带 / 不带」清单。
+ */
+const TONE_FILLED: Record<StatTone, boolean> = {
+  default: false,
+  ok: true,
+  err: true,
+  brand: false,
+  warn: false,
+};
+
+/** 带底色那两档的边框。实色边框 + 实色底，边界才不会靠透明度猜 */
+const TONE_FILLED_SURFACE: Record<"ok" | "err", string> = {
+  ok: "bg-ok-subtle border-ok/25",
+  err: "bg-err-subtle border-err/25",
 };
 
 export interface StatCardProps {
@@ -47,7 +83,10 @@ export function StatCard({ label, value, unit, tone = "default", hint, className
     <div
       title={hint}
       className={cn(
-        "flex min-w-0 flex-col gap-1 rounded-md border border-line bg-surface px-2.5 py-2",
+        "flex min-w-0 flex-col gap-1 rounded-md border px-2.5 py-2",
+        TONE_FILLED[tone]
+          ? cn("bg-surface", TONE_FILLED_SURFACE[tone as "ok" | "err"])
+          : "border-line bg-surface",
         className,
       )}
     >
@@ -256,9 +295,21 @@ export function BarRow({
 
 export type NoticeTone = "warn" | "err" | "info";
 
+/**
+ * 提示条的底色走 `--x-subtle`（x 取 ok/warn/err…）那档实色令牌，**不写** `bg-warn/8`。
+ *
+ * 原来这里是 `bg-warn/8` + `border-warn/35` —— 8% 的品牌色是**半透明**的，
+ * 于是它压到什么底上就变成什么色。压测报告区底色是 `canvas`，
+ * 而同样的 `<Notice tone="warn">` 若被放进 `bg-surface` 的卡片里，
+ * 底色会明显偏浅 —— 同一条提示在两个位置长得不一样，且**不报任何错**。
+ * 实色令牌让底色与它下面的东西无关。
+ *
+ * 边框保留半透明（`border-x/35`）是有意的：边框只负责「圈出这一块」，
+ * 不该跟着底色一起变实，否则小字块会显得比正文还重。
+ */
 const NOTICE_TONE: Record<NoticeTone, string> = {
-  warn: "border-warn/35 bg-warn/8 text-warn",
-  err: "border-err/35 bg-err/8 text-err",
+  warn: "border-warn/35 bg-warn-subtle text-warn-on",
+  err: "border-err/35 bg-err-subtle text-err-on",
   info: "border-line bg-canvas-subtle text-ink-muted",
 };
 

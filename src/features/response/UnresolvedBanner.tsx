@@ -1,9 +1,8 @@
-import { TriangleAlert } from "lucide-react";
-
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import type { MessageKey } from "@/lib/i18n";
 import type { UnresolvedPlaceholder, UnresolvedReason } from "@/lib/types";
+import { InlineNotice } from "@/features/ui/InlineNotice";
 
 /**
  * 未解析原因 → 文案 key。
@@ -46,15 +45,8 @@ export function UnresolvedBanner({ placeholders, className }: UnresolvedBannerPr
   if (placeholders.length === 0) return null;
 
   return (
-    <div
-      role="status"
-      className={cn(
-        "shrink-0 border-b border-warn/40 bg-warn/10 px-2.5 py-1.5 text-[11px] text-warn",
-        className,
-      )}
-    >
+    <InlineNotice tone="warn" className={cn("block", className)}>
       <div className="flex items-center gap-1.5">
-        <TriangleAlert size={12} strokeWidth={2.2} aria-hidden className="shrink-0" />
         <span className="font-medium">
           {t("placeholder.unresolvedTitle", { count: placeholders.length })}
         </span>
@@ -64,12 +56,18 @@ export function UnresolvedBanner({ placeholders, className }: UnresolvedBannerPr
         {placeholders.map((item) => (
           <li key={item.raw} className="flex flex-wrap items-baseline gap-x-1.5">
             <code className="font-mono">{item.raw}</code>
-            <span className="text-warn/80">{t(REASON_KEYS[item.reason])}</span>
+            {/* ⚠️ 这里原先是 `text-warn/80`，加底色之后就不达标了：
+                --warn 以 80% 透明度压在 --warn-subtle (#fdf2e3) 上只有 2.32:1。
+                改造前它压的是白底（那时 3.4:1，11px 小字勉强），
+                换成实色底之后必须跟着改 —— 加底色会改变底的亮度，
+                任何叠在上面的半透明文字都得重算。
+                改成 `text-warn-on/90`：7.06:1 达标，且仍比上面的标题弱一层。 */}
+            <span className="text-warn-on/90">{t(REASON_KEYS[item.reason])}</span>
           </li>
         ))}
       </ul>
 
-      <p className="mt-1 pl-[18px] text-warn/80">{t("placeholder.unresolvedHint")}</p>
-    </div>
+      <p className="mt-1 pl-[18px] text-warn-on/90">{t("placeholder.unresolvedHint")}</p>
+    </InlineNotice>
   );
 }

@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/i18n";
 import * as ipc from "@/lib/ipc";
 import type { KeyValueItem } from "@/lib/types";
+import { InlineNotice } from "@/features/ui/InlineNotice";
 import { IconButton } from "@/features/ui/Button";
 import { isBlankRow, withTrailingBlank } from "./KeyValueTable";
 import { PlaceholderInput } from "./PlaceholderInput";
@@ -111,9 +112,9 @@ export function FormFieldTable({ rows, onChange, className }: FormFieldTableProp
   return (
     <div className={cn("min-h-0", className)}>
       {notice !== null ? (
-        <p className="border-b border-line bg-err/8 px-2.5 py-1 text-[11px] text-err">
+        <InlineNotice tone="err" className="py-1">
           {notice}
-        </p>
+        </InlineNotice>
       ) : null}
 
       {/* `table-fixed`：理由与 `KeyValueTable` 那份相同（列宽只认 `<colgroup>`），

@@ -141,7 +141,7 @@ export function TokenToolPanel({ className }: { className?: string }) {
 function NotAToken() {
   const { t } = useI18n();
   return (
-    <div className="flex items-start gap-2 rounded-sm border border-warn/35 bg-warn/8 px-2 py-1.5 text-[11px] text-warn">
+    <div className="flex items-start gap-2 rounded-sm border border-warn/35 bg-warn-subtle px-2 py-1.5 text-[11px] text-warn-on">
       <TriangleAlert size={13} strokeWidth={2.2} aria-hidden className="mt-px shrink-0" />
       <div className="space-y-0.5">
         <p className="font-medium">{t("tools.notAToken")}</p>

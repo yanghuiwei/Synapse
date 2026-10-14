@@ -112,7 +112,7 @@ export function AppearanceMenu() {
           role="dialog"
           aria-label={t("appearance.label")}
           style={{ top: pos.top, left: pos.left }}
-          className="fixed z-[var(--z-dropdown)] w-[264px] rounded-lg border border-line bg-surface p-1.5 shadow-e2"
+          className="fixed z-[var(--z-dropdown)] w-[264px] origin-top-right rounded-lg border border-line bg-surface p-1.5 shadow-e3 animate-pop-in"
         >
           {/* ---- 明暗 ---- */}
           <SectionLabel text={t("appearance.theme")} />

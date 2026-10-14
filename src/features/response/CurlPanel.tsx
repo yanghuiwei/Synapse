@@ -7,7 +7,9 @@ import type { MessageKey } from "@/lib/i18n";
 import * as ipc from "@/lib/ipc";
 import type { HistoryEntry } from "@/lib/types";
 import { draftToSpec, useRequestStore } from "@/store/request";
+import { Badge, type BadgeTone } from "@/features/ui/Badge";
 import { Button, IconButton } from "@/features/ui/Button";
+import { InlineNotice } from "@/features/ui/InlineNotice";
 
 /**
  * 面板里这条命令的来源。
@@ -29,11 +31,12 @@ interface CurlSource {
   tokenRefreshed?: boolean;
 }
 
-const SOURCE_BADGE: Record<CurlSource["kind"], string> = {
-  sent: "bg-ok/12 text-ok",
-  history: "bg-info/12 text-info",
+/** curl 来源 → 徽标色调。走 Badge 的 tone，底色由 `--x-subtle` 令牌给 */
+const SOURCE_TONE: Record<CurlSource["kind"], BadgeTone> = {
+  sent: "ok",
+  history: "info",
   // 推演用 warn 而不是中性色：它是三种来源里唯一「不是事实」的那种
-  preview: "bg-warn/12 text-warn",
+  preview: "warn",
 };
 
 /** `MM-DD HH:mm`。历史列表那边有它自己的一套日期分组口径，这里只要精确到分钟 */
@@ -198,9 +201,9 @@ export function CurlPanel({ className }: { className?: string }) {
 
   const errorLine =
     error === null ? null : (
-      <p className="shrink-0 border-b border-line bg-err/8 px-2.5 py-1 text-[11px] text-err">
+      <InlineNotice tone="err" className="py-1">
         {t("curl.failed")}：{error.localized}
-      </p>
+      </InlineNotice>
     );
 
   if (source === null) {
@@ -227,16 +230,11 @@ export function CurlPanel({ className }: { className?: string }) {
   return (
     <div className={cn("flex min-h-0 flex-col", className)}>
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-1.5">
-        <span
-          className={cn(
-            "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px]",
-            SOURCE_BADGE[source.kind],
-          )}
-        >
+        <Badge tone={SOURCE_TONE[source.kind]}>
           {source.executedAt !== undefined
             ? t("curl.sourceHistory", { time: shortTime(source.executedAt) })
             : t(source.kind === "sent" ? "curl.sourceSent" : "curl.sourcePreview")}
-        </span>
+        </Badge>
 
         <span className="truncate text-[11px] text-ink-faint">
           {t(hintKeyOf(source.kind, response?.tokenUsage != null))}
@@ -272,15 +270,15 @@ export function CurlPanel({ className }: { className?: string }) {
       {errorLine}
 
       {source.unresolvedCount !== undefined && source.unresolvedCount > 0 ? (
-        <p className="shrink-0 border-b border-line bg-warn/8 px-2.5 py-1 text-[11px] text-warn">
+        <InlineNotice tone="warn" className="py-1">
           {t("curl.unresolved", { count: String(source.unresolvedCount) })}
-        </p>
+        </InlineNotice>
       ) : null}
 
       {source.tokenRefreshed === true ? (
-        <p className="shrink-0 border-b border-line bg-info/8 px-2.5 py-1 text-[11px] text-info">
+        <InlineNotice tone="info" className="py-1">
           {t("curl.refreshHint")}
-        </p>
+        </InlineNotice>
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto">

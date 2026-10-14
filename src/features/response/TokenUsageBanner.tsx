@@ -5,6 +5,7 @@ import { formatSeconds } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import type { TranslateFn } from "@/lib/i18n";
 import type { TokenUsage } from "@/lib/types";
+import { InlineNotice } from "@/features/ui/InlineNotice";
 
 export interface TokenUsageBannerProps {
   /** `undefined` = 本次没用到 Token（请求里没写 `{{token.*}}`，或没有可用来源） */
@@ -45,17 +46,13 @@ export function TokenUsageBanner({ usage, className }: TokenUsageBannerProps) {
   const endpoint = refreshed && usage.endpointName !== null ? usage.endpointName : null;
 
   return (
-    <div
-      role="status"
-      className={cn(
-        "flex shrink-0 flex-wrap items-center gap-x-2 gap-y-0.5 border-b px-2.5 py-1.5 text-[11px]",
-        refreshed ? "border-brand/35 bg-brand/8 text-brand" : "border-line bg-surface text-ink-muted",
-        className,
-      )}
+    <InlineNotice
+      tone={refreshed ? "brand" : "info"}
+      icon={Icon}
+      className={className}
       title={refreshed ? t("token.usage.refreshedHint") : t("token.usage.cachedHint")}
     >
-      <span className="flex items-center gap-1.5 font-medium">
-        <Icon size={12} strokeWidth={2.2} aria-hidden className="shrink-0" />
+      <span className="font-medium">
         {refreshed ? t("token.usage.refreshed") : t("token.usage.cached")}
       </span>
 
@@ -63,22 +60,26 @@ export function TokenUsageBanner({ usage, className }: TokenUsageBannerProps) {
         <span className="font-mono">{t("token.usage.via", { name: endpoint })}</span>
       )}
 
-      <span className={cn("tabular", refreshed ? "text-brand/80" : "text-ink-faint")}>
+      {/* ⚠️ 次级文字用 `text-brand-on/90` 而不是 `/80`，也不是原色：
+          加了 brand-subtle 底之后，原色 `text-brand/80` 在 5 套配色里有 3 套不达标
+          （azure 3.84 / clay 4.11 / teal 3.56，AA 要 4.5）。
+          `/90` 是逐套验过全过的最低档 —— 暗色+蓝紫在 /85 时只有 4.41，差 0.09。 */}
+      <span className={cn("tabular", refreshed ? "text-brand-on/90" : "text-ink-faint")}>
         {left}
       </span>
 
-      <span className={cn("truncate", refreshed ? "text-brand/80" : "text-ink-faint")}>
+      <span className={cn("truncate", refreshed ? "text-brand-on/90" : "text-ink-faint")}>
         {usage.sourceName}
       </span>
 
       {/* 关掉自动刷新时「过期也不刷」是预期行为，得说出来 ——
           否则下一次发送直接报错会被当成 bug */}
       {usage.autoRefresh ? null : (
-        <span className={cn(refreshed ? "text-brand/80" : "text-warn")}>
+        <span className={cn(refreshed ? "text-brand-on/90" : "text-warn-on")}>
           · {t("token.usage.autoRefreshOff")}
         </span>
       )}
-    </div>
+    </InlineNotice>
   );
 }
 

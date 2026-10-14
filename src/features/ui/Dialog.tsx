@@ -91,7 +91,7 @@ export function Dialog({
   return createPortal(
     <div
       style={{ zIndex: "var(--z-dialog)" }}
-      className="fixed inset-0 flex items-center justify-center bg-scrim p-6"
+      className="fixed inset-0 flex items-center justify-center bg-scrim p-6 animate-fade-in"
       onPointerDown={
         dismissOnOverlay
           ? (e) => {
@@ -108,8 +108,8 @@ export function Dialog({
         tabIndex={-1}
         style={{ width }}
         className={cn(
-          "max-h-full overflow-y-auto rounded-lg border border-line bg-surface",
-          "shadow-e2 outline-none",
+          "max-h-full origin-center overflow-y-auto rounded-lg border border-line bg-surface",
+          "shadow-e3 outline-none animate-pop-in",
         )}
       >
         {sentinel("start")}

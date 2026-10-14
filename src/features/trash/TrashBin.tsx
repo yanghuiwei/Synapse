@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn";
 import { methodTextClass } from "@/lib/http";
 import { useI18n } from "@/lib/i18n";
 import type { ApiRequest, Folder, HistoryEntry, PurgeTrashResult } from "@/lib/types";
+import { Badge } from "@/features/ui/Badge";
 import { ConfirmDialog } from "@/features/ui/Dialog";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { useTrashStore } from "@/store/trash";
@@ -142,7 +143,7 @@ export function TrashBin() {
       {/* 还原 / 彻底删除失败的提示。列表照常显示真实内容，只是多一行说明 ——
           否则用户会对着一个「点了没反应」的列表反复点 */}
       {error ? (
-        <p className="mb-1 rounded-sm border border-err/40 bg-err/10 px-1.5 py-1 text-[10px] leading-relaxed text-err">
+        <p className="mb-1 rounded-sm border border-err/35 bg-err-subtle px-1.5 py-1 text-[10px] leading-relaxed text-err-on">
           {error.localized}
         </p>
       ) : null}
@@ -303,9 +304,9 @@ function FolderRow({ folder, onPurge }: { folder: Folder; onPurge: () => void })
         <FolderIcon size={12} strokeWidth={2} aria-hidden className="shrink-0 text-ink-faint" />
         <span className="min-w-0 flex-1 truncate text-ink">{folder.name}</span>
         {folder.isTokenSource ? (
-          <span className="shrink-0 rounded-sm bg-brand/12 px-1 text-[10px] text-brand">
+          <Badge tone="brand" size="sm">
             {t("auth.tokenSource")}
-          </span>
+          </Badge>
         ) : null}
         <RowActions
           onRestore={() => void useTrashStore.getState().restoreFolder(folder.id)}

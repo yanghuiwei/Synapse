@@ -11,6 +11,7 @@ import { useRequestStore } from "@/store/request";
 import { useTokenStore } from "@/store/token";
 import { useWorkspaceStore } from "@/store/workspace";
 import { Button } from "@/features/ui/Button";
+import { InlineNotice } from "@/features/ui/InlineNotice";
 import {
   draftFromSource,
   emptyTokenSourceDraft,
@@ -225,24 +226,24 @@ export function HeadersTab({ className }: HeadersTabProps) {
       </div>
 
       {pasteNotice ? (
-        <p className="shrink-0 border-b border-line bg-warn/10 px-2.5 py-1 text-[11px] text-warn">
+        <InlineNotice tone="warn" className="py-1">
           {t("headers.pasteDeduped")}
-        </p>
+        </InlineNotice>
       ) : null}
 
       {noticeDismissed ? null : (
-        <div className="flex shrink-0 items-start gap-2 border-b border-line bg-brand/8 px-2.5 py-1.5">
-          <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-ink-muted">
+        <InlineNotice tone="brand" noIcon className="items-start">
+          <p className="min-w-0 flex-1 leading-relaxed text-ink-muted">
             {t("headers.notice.authMerged")}
           </p>
           <button
             type="button"
             onClick={dismissNotice}
-            className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-brand transition-colors duration-100 hover:bg-brand/12"
+            className="shrink-0 rounded-xs px-1.5 py-0.5 text-[11px] text-brand-on transition-colors duration-100 hover:bg-brand/12"
           >
             {t("headers.notice.dismiss")}
           </button>
-        </div>
+        </InlineNotice>
       )}
 
       {/* 凭据行的 token 倒计时 —— 手贴的 token 唯一缺的那件事 */}

@@ -34,6 +34,24 @@
   --color-err: var(--err);
   --color-info: var(--info);
 
+  /* 语义色的**底色**档。用法：`bg-ok-subtle` + `text-ok-on` 配对出现。
+     ⚠️ 配的是 `text-*-on` 而不是 `text-*` —— 徽标文字只有 10~11px，
+     AA 要 4.5:1，而 --ok 直接压在 --ok-subtle 上只有 2.95。
+     `--x-on` 就是为这件事存在的（详见 theme.css 里 --ok-subtle 那段实测数据）。
+     纯文字态（没有底色）才用 `text-ok` —— 别全局换成 text-ok-on，
+     那会把整个界面的绿色都压深，改动面远超「给徽标加个底」这件事本身。 */
+  --color-ok-subtle: var(--ok-subtle);
+  --color-warn-subtle: var(--warn-subtle);
+  --color-err-subtle: var(--err-subtle);
+  --color-info-subtle: var(--info-subtle);
+  --color-brand-subtle: var(--brand-subtle);
+
+  --color-ok-on: var(--ok-on);
+  --color-warn-on: var(--warn-on);
+  --color-err-on: var(--err-on);
+  --color-info-on: var(--info-on);
+  --color-brand-on: var(--brand-on);
+
   --color-m-get: var(--m-get);
   --color-m-post: var(--m-post);
   --color-m-put: var(--m-put);
@@ -51,15 +69,32 @@
   --font-sans: var(--type-sans);
   --font-mono: var(--type-mono);
 
+  --radius-xs: var(--corner-xs);
   --radius-sm: var(--corner-sm);
   --radius-md: var(--corner-md);
   --radius-lg: var(--corner-lg);
 
   /* 阴影。`--shadow-*` 是 Tailwind 的阴影命名空间（生成 shadow-e1 / shadow-e2），
-     右边引用 theme.css 的原始令牌 —— 名字不能撞，所以原始令牌叫 --shadow-1/2。 */
+     右边引用 theme.css 的原始令牌 —— 名字不能撞，所以原始令牌叫 --shadow-1/2/3。
+     e3 = 浮层专用（对话框 / 菜单 / 命令面板），见 theme.css 里的说明。 */
   --shadow-e1: var(--shadow-1);
   --shadow-e2: var(--shadow-2);
+  --shadow-e3: var(--shadow-3);
 
   /* 模态遮罩。用法：`bg-scrim` */
   --color-scrim: var(--scrim);
+
+  /* 动效时长。用法：`duration-pop`。
+     ⚠️ 这些是 CSS 变量而非 `@theme` 命名空间（`--transition-*`）——
+        因为它们的用法是 `style` 里读 var()，或者配合 tailwindcss-animate 风格的
+        自定义 keyframes 工具类，不走 transition 属性的简写。 */
+  --ease-pop: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 浮层入场。用法：`animate-pop-in`。
+   keyframes 定义在 theme.css 里（与时长令牌同源，便于一起改）。
+   只作用于 opacity / transform —— 不碰布局属性，动画期间不触发重排。 */
+@theme inline {
+  --animate-pop-in: reqly-pop-in var(--dur-pop) var(--ease-pop);
+  --animate-fade-in: reqly-fade-in var(--dur-mask) linear;
 }

@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/cn";
+import { Badge } from "@/features/ui/Badge";
 import { methodTextClass } from "@/lib/http";
 import { useI18n } from "@/lib/i18n";
 import type { ApiRequest } from "@/lib/types";
@@ -255,7 +256,7 @@ function ScopeChips({
         <span
           key={word}
           title={t("token.pickerScopeHint")}
-          className="rounded-sm border border-brand/25 bg-brand/8 px-1 font-mono text-[10px] text-brand"
+          className="rounded-xs border border-brand/25 bg-brand-subtle px-1 font-mono text-[10px] text-brand-on"
         >
           {word}
         </span>
@@ -506,9 +507,14 @@ function PickerPanel({ items, value, gone, pinned, anchorRef, onPick, onClose }:
         zIndex: "var(--z-dropdown)",
         // 量出位置之前先藏起来，否则会看到面板在别处闪一下
         visibility: pos ? "visible" : "hidden",
+        // 上翻靠这个 inline transform 实现，所以入场动画**只能**用 fade-in：
+        // CSS 动画的 transform 与行内 transform 会互相覆盖（行内优先级更高，
+        // 但 transform 属于可动画属性，动画期间由关键帧接管）——
+        // 两者同时生效时面板会先按关键帧的 scale 弹一下再跳到 translateY(-100%)，
+        // 表现为「弹出来又瞬移到上方」。只给淡入就没有这个冲突。
         transform: pos?.up ? "translateY(-100%)" : undefined,
       }}
-      className="fixed flex flex-col overflow-hidden rounded-md border border-line bg-surface shadow-e2 outline-none"
+      className="fixed flex flex-col overflow-hidden rounded-md border border-line bg-surface shadow-e3 outline-none animate-fade-in"
     >
       {/* 候选只有几条时搜索框纯属占地方 —— 一眼能看完的东西不需要再过滤一次 */}
       {showQuery ? (
@@ -654,9 +660,7 @@ function Option({
         <MethodLabel method={request.method} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">{request.name}</span>
         {row.pinned ? (
-          <span className="shrink-0 rounded-sm border border-warn/30 bg-warn/8 px-1 text-[10px] text-warn">
-            {t("token.pickerOutOfFolder")}
-          </span>
+          <Badge tone="warn">{t("token.pickerOutOfFolder")}</Badge>
         ) : null}
         {current && !row.pinned ? (
           <Check size={12} strokeWidth={2.6} aria-hidden className="shrink-0 text-brand" />

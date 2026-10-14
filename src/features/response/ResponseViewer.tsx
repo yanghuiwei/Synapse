@@ -15,6 +15,7 @@ import {
   tryPrettyJson,
 } from "@/lib/json";
 import type { BodyFile, HttpResponsePayload, SavedFile } from "@/lib/types";
+import { InlineNotice } from "@/features/ui/InlineNotice";
 import { Button, IconButton } from "@/features/ui/Button";
 
 export type ResponseTab = "body" | "headers" | "cookies" | "timeline" | "curl";
@@ -292,12 +293,12 @@ function BodyView({
       </div>
 
       {response.truncated ? (
-        <p className="shrink-0 border-b border-line bg-warn/8 px-2.5 py-1 text-[11px] text-warn">
+        <InlineNotice tone="warn" className="py-1">
           {/* 「已存到文件」这半句只在真存下来了的时候说 —— 没有它就说得像有 */}
           {t(file !== undefined ? "response.truncatedSaved" : "response.truncated", {
             size: formatBytes(response.body.length),
           })}
-        </p>
+        </InlineNotice>
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto">

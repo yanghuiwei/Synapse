@@ -145,6 +145,12 @@ export function TokenGate({ requestId, wantsToken, className }: TokenGateProps) 
           meta.className,
           // 「提前量窗口内 / 已过期」时补一个边框：这两种状态要能把人拽过来，
           // 否则它和「有效」的差别只剩一个颜色，扫一眼很容易略过
+          //
+          // ⚠️ 这里是 `--x-subtle` 那档实色令牌的**例外**，刻意仍用 `bg-warn/8`：
+          // 它是个**可点按钮**（hover 态是 bg-surface-hover），而 subtle 是实色 ——
+          // 实色底 + hover 底会互相盖不住（hover 只能靠 `hover:` 变体压过去，
+          // 但那样警告底就在 hover 时消失，视觉上等于「悬停后变正常」）。
+          // 半透明底在这里恰好正确：它透出 canvas，hover 的实色能正常盖住它。
           refreshNeeded(state) && "border-line bg-warn/8",
         )}
       >
@@ -339,7 +345,7 @@ function TokenGatePanel({
         // 量出位置之前先藏起来，避免看到面板在别处闪一下
         visibility: pos ? "visible" : "hidden",
       }}
-      className="fixed rounded-md border border-line bg-surface p-2.5 shadow-e2"
+      className="fixed origin-top-left rounded-md border border-line bg-surface p-2.5 shadow-e3 animate-pop-in"
     >
       <div className="flex items-center gap-1.5">
         <span className="text-[11px] font-medium text-ink-muted">{t("token.gate.title")}</span>

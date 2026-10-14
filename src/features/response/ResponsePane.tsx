@@ -15,6 +15,7 @@ import { statusTextClass } from "@/lib/http";
 import { useI18n } from "@/lib/i18n";
 import type { IpcError } from "@/lib/ipc";
 import { useRequestStore } from "@/store/request";
+import { Badge } from "@/features/ui/Badge";
 import { Button } from "@/features/ui/Button";
 import { EmptyState } from "@/features/ui/EmptyState";
 import { TabStrip, type TabItem } from "@/features/ui/TabStrip";
@@ -189,9 +190,9 @@ export function ResponsePane() {
         </div>
 
         {response?.redirected ? (
-          <span className="rounded-sm bg-info/12 px-1.5 py-0.5 text-[10px] text-info">
+          <Badge tone="info" size="md">
             {t("response.redirectedNote")}
-          </span>
+          </Badge>
         ) : null}
       </div>
 
