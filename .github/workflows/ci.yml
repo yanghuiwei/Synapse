@@ -1,0 +1,142 @@
+# CI —— PR 与 main 的质量门禁
+#
+# 与 publish.yml 的分工：
+#   本文件  校验。PR 与 main push 都跑，只要不通过就不该合。
+#   publish  发版。只在 main 上含 release commit 时跑，产出安装包。
+#
+# 为什么必须有这个文件：外部贡献者的 PR 只能靠 CI 告诉维护者「这里坏了」。
+# 少了它，每个人都得在本地手动跑一遍全套才知道自己写没写坏。
+#
+# ⚠️ 关于 Windows 上 cargo 只能过一半：
+#   `reqly`（桌面端）链 tauri，它的构建需要 MSVC 链接器与 WebView2 相关头文件，
+#   ubuntu 镜像上跑不起来。所以矩阵分两组：
+#     - 三平台跑 `cargo test -p reqly-core / reqly-cli / reqly-mcp`（**不含 tauri**）
+#     - 只在 windows 跑一次完整 `cargo check --workspace`
+#   这不是取巧，是这几个 crate 本身就是平台无关的 —— 它们才是绝大多数改动所在。
+#
+# 触发条件用 `pull_request` + `push: main`，两者都开：
+#   PR 里校验（给人反馈），合并后再跑一次（防「本地过不了但硬合了进来」）。
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# 同一个 PR 的新 push 取消上一轮：省 runner，也避免旧结果盖掉新的。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 只读校验，不需要任何写权限。
+# 刻意写全：默认权限可能来自组织策略，显式声明「不写」比依赖默认值稳。
+permissions:
+  contents: read
+
+jobs:
+  # ---- 平台无关的 Rust 核心：三平台都跑 ----
+  rust-core:
+    name: rust core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo fmt --check
+        if: runner.os == 'Linux'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: clippy
+        run: >-
+          cargo clippy --manifest-path src-tauri/Cargo.toml
+          -p reqly-core -p reqly-cli -p reqly-mcp
+          --all-targets -- -D warnings
+
+      - name: cargo test
+        # ⚠️ **已知问题：Windows 上这批测试有 flaky，不是本仓库独有。**
+        #
+        # 症状：`SQLITE_READONLY_DBMOVED`（"attempt to write a readonly database"），
+        # 随机命中不同测试，本机实测失败率约 84%（25 轮里21 轮红）。
+        #
+        # 已排除的原因（都验证过，不是它们）：
+        #   - 临时目录撞名 —— 单独跑某一个测试 15 次仍有 2 次失败，而它独占自己的目录；
+        #   - 测试之间的并发干扰 —— `--test-threads=1` 照样红；
+        #   - TEMP 残留 —— 清空残留当时有效、过几轮又回来；
+        #   - Windows 时钟精度不够导致目录名重复 —— 确实成立（实测重复率 72%），
+        #     改成原子计数器后目录名已保证唯一，但失败率没变，**所以不是主因**。
+        #
+        # 尚未定位的线索：`with_conn` 走 `spawn_blocking`，「future 返回」不等于
+        # 「阻塞线程上的活干完」；tokio 的阻塞池在测试之间是共享的。
+        #
+        # 这一段在 Linux / macOS 上大概率不复现（那是 POSIX 的 unlink 语义，
+        # 删掉被打开的文件不会影响在跑的进程）。若 Linux 上也红了，
+        # 说明根因与文件锁无关，请优先看上面的线索。
+        run: >-
+          cargo test --manifest-path src-tauri/Cargo.toml
+          -p reqly-core -p reqly-cli -p reqly-mcp
+
+  # ---- 桌面端：只有 Windows 能编译（链 tauri，需要 MSVC）----
+  rust-desktop:
+    name: rust desktop (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # windows-latest 自带 VS Build Tools（含 MSVC），这里只需要补上
+      # Rust 的 msvc 目标 —— dtolnay/rust-toolchain 已经装好，不用额外操作。
+      - name: cargo check --workspace
+        run: cargo check --manifest-path src-tauri/Cargo.toml --workspace --all-targets
+
+  # ---- 前端 ----
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 顺序不能换：setup-node 的 cache: pnpm 要先能调到 pnpm 命令，
+      # 所以 pnpm/action-setup 必须排在 setup-node 前面（与 publish.yml 同理）。
+      - name: 装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: 装依赖
+        run: pnpm install --frozen-lockfile
+
+      # tsc --noEmit 而不是 pnpm build：这里只验类型与编译，
+      # 不需要产出 dist（发版流水线才需要）。
+      - name: 类型检查
+        run: pnpm exec tsc --noEmit
+
+      - name: 构建
+        run: pnpm build

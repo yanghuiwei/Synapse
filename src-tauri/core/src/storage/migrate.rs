@@ -34,8 +34,18 @@ pub struct Migration {
     /// 第二个参数是播种用的 host 白名单，由调用方（[`run_with_seed_hosts`]）传入。
     /// 它不进本结构体是有意的：**白名单是部署方的决定，不是迁移的一部分** ——
     /// 把某份域名清单写死在这里，就等于让所有装上它的人都继承那份清单。
-    pub data: Option<fn(&rusqlite::Connection, &[String]) -> AppResult<usize>>,
+    pub data: Option<SeedFn>,
 }
+
+/// 迁移里那个「一次性数据变动」函数的形状。
+///
+/// 单独起名不是为了好看，是因为这个类型在 `Migration` 的定义处已经宽到
+/// 触发 clippy 的 `type_complexity`（而 clippy 警告会让 CI 门禁直接红）。
+/// 类型别名同时也是文档：读到 `data: Option<SeedFn>` 时，
+/// 「这是一次性数据变动」这件事比一串 `fn(&Connection, &[String]) -> …` 直观得多。
+///
+/// 返回值是本次新建/删除的行数，只用于日志与断言。
+pub type SeedFn = fn(&rusqlite::Connection, &[String]) -> AppResult<usize>;
 
 /// 全部迁移，**按 version 升序**。
 ///
@@ -93,7 +103,7 @@ pub const MIGRATIONS: &[Migration] = &[
         // 白名单传空 —— 本仓库不从任何预设的域名清单出发。播种的用途是
         // 「迁移一份已有库」，而该铺哪些 host 只有库的主人才知道，由部署方决定。
         // 空表对全新安装天然是空操作：库里本来就没有任何请求可铺。
-        data: Some(|conn, hosts| crate::storage::seed::request_token_sources(conn, hosts)),
+        data: Some(crate::storage::seed::request_token_sources),
     },
     Migration {
         version: 9,
@@ -101,9 +111,7 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/009_drop_sources_outside_rule_hosts.sql"),
         // 与 008 同一份白名单 ⇒ 空操作。「哪些源该留」没有清单就不动，
         // 见 seed::drop_sources_outside_rule_hosts 的说明。
-        data: Some(|conn, hosts| {
-            crate::storage::seed::drop_sources_outside_rule_hosts(conn, hosts)
-        }),
+        data: Some(crate::storage::seed::drop_sources_outside_rule_hosts),
     },
     Migration {
         version: 10,
@@ -959,7 +967,11 @@ mod tests {
             .ok()
         };
         assert_eq!(fetch_of(1), Some(101), "默认候选覆盖 ⇒ 用默认");
-        assert_eq!(fetch_of(2), Some(102), "默认不含 billing ⇒ 覆盖集里词最少的");
+        assert_eq!(
+            fetch_of(2),
+            Some(102),
+            "默认不含 billing ⇒ 覆盖集里词最少的"
+        );
         assert_eq!(fetch_of(3), Some(101), "谁都不覆盖 ⇒ 退回默认");
         assert_eq!(fetch_of(4), Some(201), "生产默认不含 ContractAPI ⇒ 偏离");
         assert_eq!(fetch_of(5), None, "localhost 没有同 host 的取 token 请求");
@@ -978,8 +990,7 @@ mod tests {
         }
 
         // ③ 播种幂等：重复执行不产生第二行
-        let again =
-            crate::storage::seed::request_token_sources(&conn, &test_rule_hosts()).unwrap();
+        let again = crate::storage::seed::request_token_sources(&conn, &test_rule_hosts()).unwrap();
         assert_eq!(again, 0, "重复播种应当一条都不新建");
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM token_source", [], |r| r.get(0))

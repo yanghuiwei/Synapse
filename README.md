@@ -309,6 +309,10 @@ pnpm cli:build       # reqly-cli.exe
 
 ## 八、贡献
 
+欢迎参与。动手前请读 [贡献指南](CONTRIBUTING.md) —— 里面写了本地要过哪些门禁，
+以及一条容易踩的坑：别在三个平台共用的 crate 里引入只在 Windows 上成立的依赖
+（本机验不出来，只有 Linux CI 会红）。
+
 ```bash
 git checkout -b feat/your-feature
 # ...
@@ -316,6 +320,15 @@ git commit -s -m "feat(scope): 一句话说清做了什么"
 ```
 
 提交信息跟随 [Conventional Commits](https://www.conventionalcommits.org/)，发版由 [release-please](https://github.com/googleapis/release-please) 自动化 —— **版本号和 CHANGELOG 不要手改**。
+
+参与即表示同意遵守 [行为准则](CODE_OF_CONDUCT.md)。
+发现安全问题见 [安全策略](SECURITY.md) —— **不要**用公开 Issue 报告。
+
+| | |
+|---|---|
+| 🐛 [报告 Bug](.github/ISSUE_TEMPLATE/bug_report.yml) | 请附上「你是怎么发现的」 |
+| 💡 [功能请求](.github/ISSUE_TEMPLATE/feature_request.yml) | 先说问题，别直接跳到方案 |
+| ❓ [配置问题](.github/ISSUE_TEMPLATE/config.yml) | 安装 / 接 MCP / 构建 |
 
 ---
 

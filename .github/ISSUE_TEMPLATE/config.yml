@@ -1,0 +1,39 @@
+name: 配置问题
+description: 安装、接入 AI 客户端、构建方面的问题
+labels: question
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: 问题类型
+      options:
+        - 安装与运行
+        - 接入 MCP 客户端
+        - 使用 CLI
+        - 从源码构建
+        - 导入数据
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: 操作系统、Synapse 版本、Node/Rust 版本（如果是构建问题）。
+      placeholder: Windows 11 · Synapse 0.7.0 · Node 22 · Rust stable
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: 你已经试过什么
+      description: 贴出报错信息原文会快很多——不要改写，完整贴。

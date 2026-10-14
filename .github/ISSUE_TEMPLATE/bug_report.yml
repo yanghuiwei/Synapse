@@ -1,0 +1,85 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: bug
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 描述你观察到的现象，而不是你推断的原因。
+      placeholder: |
+        例如：保存请求后切换到另一个集合，再切回来，这条请求消失了。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 你期望什么
+      placeholder: 描述你期望的正确行为。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: how-found
+    attributes:
+      label: 你是怎么发现的
+      description: 这条信息通常比修复本身更有价值——它决定了后来的人怎么判断问题是否彻底解决。
+      placeholder: |
+        例如：升级到 0.7.0 后第一次导入 HAR 文件时出现；只在开启「自动刷新 Token」时出现；
+        在同事的机器上无法复现。
+
+  - type: input
+    id: version
+    attributes:
+      label: Synapse 版本
+      placeholder: 0.7.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: channel
+    attributes:
+      label: 使用方式
+      description: 在哪个入口遇到的？
+      placeholder: 桌面端 / reqly-cli / MCP 客户端
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志或请求定义
+      description: |
+        如果是通过 MCP 或 CLI 遇到的，贴出对应的调用记录会快很多。
+        注意：贴之前请检查里面有没有真实凭据。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已检查过要贴的内容，不含真实凭据或敏感数据
+          required: true
