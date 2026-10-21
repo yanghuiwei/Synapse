@@ -110,7 +110,7 @@ reqwest = { version = "0.12.28", default-features = false, features = [
 # 而 Rust 不允许直接使用传递依赖里的 crate —— 不写这一行编译直接报
 # `use of undeclared crate or module`。版本与 tao 用的对齐（0.61），
 # 两条不同的 0.6x 会因为 `HWND` 类型不兼容而编译失败。
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
