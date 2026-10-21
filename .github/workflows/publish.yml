@@ -88,7 +88,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ── 前端工具链 ─────────────────────────────────────────────────────────
       # 顺序不能换：setup-node 的 cache: pnpm 需要先能调到 pnpm 命令，
