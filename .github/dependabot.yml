@@ -1,0 +1,57 @@
+version: 2
+updates:
+  # Rust 依赖。workspace 根在 src-tauri/，所以 directory 指向这里而不是仓库根。
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      # release-please 只认 conventional commits；不写前缀会生成一条
+      # 无法归类的提交，CHANGELOG 里会缺一块。
+      prefix: fix
+      include: scope
+    groups:
+      # tauri 全家桶必须同版本，拆成 5 个 PR 会各自构建失败。
+      tauri:
+        patterns:
+          - "tauri*"
+      # 其余次要升级合一个 PR，减少噪音；主版本仍然单独开。
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react*"
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # workflow 里用的是 actions/checkout@v4 这类可变 tag，靠它帮忙盯安全公告。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: fix
+      include: scope
