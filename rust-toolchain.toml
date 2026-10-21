@@ -1,0 +1,6 @@
+# 工具链口径与 CI 保持一致：.github/workflows/*.yml 用的是 dtolnay/rust-toolchain@stable。
+# 额外声明 rustfmt / clippy —— 只装 rustc + cargo 的 minimal 配置里没有这两个组件，
+# 新贡献者第一次跑 `cargo fmt --check` 或 `cargo clippy` 就会撞 "no such command"。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
