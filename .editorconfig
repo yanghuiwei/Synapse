@@ -1,0 +1,29 @@
+# 统一跨编辑器的基础格式。CI 里的 `cargo fmt --check` 只覆盖 Rust，
+# 前端与文档没有格式化门禁，靠这里兜住最基本的几条。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Rust 社区约定是 4 空格，与 rustfmt 默认一致。
+[*.rs]
+indent_size = 4
+
+# Markdown 的行尾双空格是硬换行，不能裁。
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{yml,yaml,json,jsonc}]
+indent_size = 2
+
+[*.sql]
+indent_size = 4
+
+# Windows 上批处理类脚本必须是 CRLF，否则 cmd 解析会出问题。
+[*.{bat,cmd}]
+end_of_line = crlf
