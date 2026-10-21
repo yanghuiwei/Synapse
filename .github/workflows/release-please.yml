@@ -49,7 +49,17 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # 优先用 PAT（理由见文件头），没有则回落到 GITHUB_TOKEN。
+          #
+          # 为什么敢回落：release-please 在这里只**创建** PR，合并是人点的，
+          # 所以 main 上那个 release commit 是由用户身份推的 —— publish.yml
+          # 监听的是 main push，照常触发。PAT 只在「由 release-please 自己
+          # push 东西」时才不可替代，而本仓库配置了 skip-github-release: true，
+          # tag 由 publish.yml 自己推，不经过 release-please。
+          #
+          # 回落的代价只有一个：release PR 上不会自动跑 CI（GITHUB_TOKEN 创建的
+          # PR 不触发 workflow）。那个 PR 只改版本号与 CHANGELOG，可以接受。
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
