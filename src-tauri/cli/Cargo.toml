@@ -1,6 +1,6 @@
 [package]
 name = "reqly-cli"
-version = "0.7.1" # x-release-please-version
+version = "0.8.0" # x-release-please-version
 edition = "2021"
 description = "Synapse 的命令行入口：同一个本地 API 工作台，给脚本与 AI 用"
 # 独立 crate，元数据不继承 workspace 根，所以 license 必须在这里再写一次。
