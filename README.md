@@ -121,15 +121,6 @@ TLS 走 rustls + **系统根证书**（不是 webpki 内置清单）。企业内
 
 Windows 安装器会自动把安装目录加进用户 PATH —— **装完新开一个终端**就能敲 `reqly-cli`。
 
-<details>
-<summary><b>界面速览</b></summary>
-
-| 集合与请求 | 压测报表 | MCP 接入 |
-|---|---|---|
-| ![集合](docs/screenshots/p2-request-ok-dark.png) | ![压测](docs/screenshots/p6-report-dark.png) | ![MCP](docs/screenshots/p7-mcp-setup-dark.png) |
-
-</details>
-
 ### 4.2 接上 AI 客户端
 
 打开 **设置 → MCP**，面板会给出**与当前安装路径匹配**的片段，直接粘进客户端配置。
