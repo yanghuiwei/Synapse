@@ -1,4 +1,10 @@
 version: 2
+
+# 刚公开时 dependabot 一口气开了 13 个 PR（连 checkout 4→7、tauri-action 0→1
+# 这种跨大版本都提），访客点进 PR 页全是依赖升级，观感很差；而 major 跳跃
+# 一旦合并很可能直接打崩构建。所以统一两条约束：
+#   1) open-pull-requests-limit 压到 2 —— 每个生态同时最多两个待处理；
+#   2) 忽略 semver-major —— 大版本升级由人主动发起，不让机器推着走。
 updates:
   # Rust 依赖。workspace 根在 src-tauri/，所以 directory 指向这里而不是仓库根。
   - package-ecosystem: cargo
@@ -6,7 +12,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     commit-message:
       # release-please 只认 conventional commits；不写前缀会生成一条
       # 无法归类的提交，CHANGELOG 里会缺一块。
@@ -30,7 +39,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: fix
       include: scope
@@ -52,6 +64,12 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 2
+    # actions 的 major 往往是 breaking（inputs 改名、runtime 升级），必须人工确认，
+    # 尤其 tauri-action 这种直接决定产物的。
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     commit-message:
       prefix: fix
       include: scope
