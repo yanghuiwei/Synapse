@@ -112,6 +112,26 @@ jobs:
 
       # windows-latest 自带 VS Build Tools（含 MSVC），这里只需要补上
       # Rust 的 msvc 目标 —— dtolnay/rust-toolchain 已经装好，不用额外操作。
+
+      # ⚠️ 这一步不能省。tauri 的 build script 会校验 `bundle.externalBin` 声明的
+      # sidecar 是否真的存在于 `src-tauri/binaries/`，缺一个就：
+      #     resource path `binaries\reqly-mcp-x86_64-pc-windows-msvc.exe` doesn't exist
+      #     error: failed to run custom build command for `reqly`
+      # 而那个目录是 `pnpm sidecar:stage` 生成的产物、被 .gitignore 忽略，
+      # 所以 clean clone 里**必然**没有 —— 本地因为跑过 build 才不暴露。
+      # 这里用 debug 构建 + 手工改名：只为让校验通过，不需要 release 优化（那样太慢）。
+      - name: 准备 sidecar 占位（tauri build script 会校验 externalBin）
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml -p reqly-mcp -p reqly-cli
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p src-tauri/binaries
+          for name in reqly-mcp reqly-cli; do
+            cp "src-tauri/target/debug/${name}.exe" "src-tauri/binaries/${name}-${triple}.exe"
+            echo "staged ${name}-${triple}.exe"
+          done
+
       - name: cargo check --workspace
         run: cargo check --manifest-path src-tauri/Cargo.toml --workspace --all-targets
 
