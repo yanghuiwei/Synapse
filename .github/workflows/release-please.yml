@@ -47,7 +47,7 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         with:
           # 优先用 PAT（理由见文件头），没有则回落到 GITHUB_TOKEN。
           #
