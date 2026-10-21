@@ -94,7 +94,7 @@ jobs:
       # 顺序不能换：setup-node 的 cache: pnpm 需要先能调到 pnpm 命令，
       # 所以 pnpm/action-setup 必须排在 setup-node 前面。
       - name: 装 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           # package.json 里没有 packageManager 字段，这里不写版本 action 会直接报错。
           # 仓库 pnpm-lock.yaml 的 lockfileVersion 是 9.0 → pnpm 9 / 10 都能装，这里钉 10。

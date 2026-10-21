@@ -125,7 +125,7 @@ jobs:
       # 顺序不能换：setup-node 的 cache: pnpm 要先能调到 pnpm 命令，
       # 所以 pnpm/action-setup 必须排在 setup-node 前面（与 publish.yml 同理）。
       - name: 装 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
