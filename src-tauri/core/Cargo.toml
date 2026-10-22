@@ -1,6 +1,6 @@
 [package]
 name = "reqly-core"
-version = "0.8.0" # x-release-please-version
+version = "0.9.0" # x-release-please-version
 edition = "2021"
 description = "Synapse 的核心层：存储 / HTTP 执行 / 模板 / 压测 / 导入器（不含 Tauri）"
 license = "MIT"
