@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/yanghuiwei/Synapse/compare/v0.8.0...v0.9.0) (2026-10-22)
+
+
+### Features
+
+* **brand:** 重设计 Logo 为「断裂传递」符号 ([8dcd566](https://github.com/yanghuiwei/Synapse/commit/8dcd566ce33673cba3d2b5182f1d871d7ad2d2fc))
+
+
+### Bug Fixes
+
+* **security:** 补上 Content-Security-Policy，并固化 Rust 工具链口径 ([79974e2](https://github.com/yanghuiwei/Synapse/commit/79974e265b9b740ec1af4bcd08701c43185c5580))
+
 ## [0.8.0](https://github.com/yanghuiwei/Synapse/compare/v0.7.1...v0.8.0) (2026-10-21)
 
 
